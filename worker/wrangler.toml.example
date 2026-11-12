@@ -1,0 +1,11 @@
+name = "reeden-free-sync"
+main = "worker.js"
+compatibility_date = "2026-11-12"
+
+[vars]
+ALLOWED_ORIGINS = "https://YOUR-USER.github.io"
+MAX_UPLOAD_BYTES = "100663296"
+
+[[r2_buckets]]
+binding = "ASSETS"
+bucket_name = "YOUR_R2_BUCKET"
