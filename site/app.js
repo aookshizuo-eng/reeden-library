@@ -101,6 +101,11 @@ function requestHeaders(headers = {}) {
 const state = { themes: [], fonts: [], review: [], jobs: [], activeView: "import", importKind: "theme", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs") };
 const selections = { review: new Set(), theme: new Set(), font: new Set() };
 const loadedFontFaces = new Set();
+const BROWSER_TASK_CONCURRENCY = 3;
+const BROWSER_RECORD_CACHE_TTL = 15000;
+let browserLibraryRecordsCache;
+let browserLibraryRecordsPromise;
+let browserLibraryRecordsLoadedAt = 0;
 let storageDirty = false;
 let jobsPollTimer;
 let jobsLoading = false;
@@ -110,6 +115,26 @@ let pan123QrTimer;
 let pan123QrExpiryTimer;
 let pan123QrGeneration = 0;
 let pan123QrController;
+
+async function mapConcurrent(items, limit, worker) {
+  const values = Array.from(items || []), result = new Array(values.length);
+  const width = Math.max(1, Math.min(Number(limit) || 1, values.length || 1));
+  let next = 0;
+  async function consume() {
+    while (true) {
+      const index = next++;
+      if (index >= values.length) return;
+      result[index] = await worker(values[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: width }, consume));
+  return result;
+}
+
+function invalidateBrowserLibraryRecords() {
+  browserLibraryRecordsCache = undefined;
+  browserLibraryRecordsLoadedAt = 0;
+}
 
 function readSessionIds(key) {
   try { const value = JSON.parse(sessionStorage.getItem(key) || "[]"); return Array.isArray(value) ? value.filter(id => typeof id === "string") : []; }
@@ -187,6 +212,7 @@ async function uploadBrowserRecord(record, codec) {
   const recordSha = await codec.sha256Hex(bytes);
   await uploadBrowserObject("records", recordSha, "json", bytes, "application/json");
   record.record_sha256 = recordSha;
+  invalidateBrowserLibraryRecords();
   return record;
 }
 
@@ -626,20 +652,29 @@ async function retryJob(id) {
   finally { setOperation(""); }
 }
 
-async function loadThemes() {
-  const records = browserSyncEnabled() ? await loadBrowserLibraryRecords() : (await api("/api/themes")).items || [];
+async function loadThemes(force = false) {
+  const records = browserSyncEnabled() ? await loadBrowserLibraryRecords(force) : (await api("/api/themes")).items || [];
   state.themes = records.filter(item => item.kind === "theme" || !item.kind);
   renderThemes();
 }
-async function loadBrowserLibraryRecords() {
-  const records = [];
-  let cursor = "";
-  do {
-    const data = await api(`/api/library${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
-    records.push(...(data.items || data.records || []));
-    cursor = data.cursor || "";
-  } while (cursor);
-  return records;
+async function loadBrowserLibraryRecords(force = false) {
+  const fresh = browserLibraryRecordsCache && Date.now() - browserLibraryRecordsLoadedAt < BROWSER_RECORD_CACHE_TTL;
+  if (!force && fresh) return browserLibraryRecordsCache;
+  if (!force && browserLibraryRecordsPromise) return browserLibraryRecordsPromise;
+  browserLibraryRecordsPromise = (async () => {
+    const records = [];
+    let cursor = "";
+    do {
+      const data = await api(`/api/library${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
+      records.push(...(data.items || data.records || []));
+      cursor = data.cursor || "";
+    } while (cursor);
+    browserLibraryRecordsCache = records;
+    browserLibraryRecordsLoadedAt = Date.now();
+    return records;
+  })();
+  try { return await browserLibraryRecordsPromise; }
+  finally { browserLibraryRecordsPromise = undefined; }
 }
 async function loadPendingThemes() {
   if (browserSyncEnabled()) return;
@@ -659,8 +694,8 @@ async function discardReview(id) {
   } catch (error) { toast(error.message); }
   finally { setOperation(""); }
 }
-async function loadFonts() {
-  const records = browserSyncEnabled() ? await loadBrowserLibraryRecords() : (await api("/api/fonts")).items || [];
+async function loadFonts(force = false) {
+  const records = browserSyncEnabled() ? await loadBrowserLibraryRecords(force) : (await api("/api/fonts")).items || [];
   state.fonts = records.filter(item => item.kind === "font");
   renderFonts();
 }
@@ -766,12 +801,21 @@ async function analyzeFiles(files) {
   try {
     if (browserSyncEnabled()) {
       const codec = await browserCodec();
-      const items = [];
-      for (const file of valid) {
+      const items = await mapConcurrent(valid, BROWSER_TASK_CONCURRENCY, async (file, index) => {
+        operationMessage($("#reviewBatchStatus"), `正在读取主题 ${index + 1} / ${valid.length}…`);
         const raw = new Uint8Array(await file.arrayBuffer());
-        const inspection = await codec.inspectContainer(raw);
         let entries = [];
-        if (inspection.format === "red_v4") entries = await codec.readZipEntries(raw);
+        let inspection;
+        try {
+          // readZipEntries already validates and inflates every resource. Use
+          // that result for both metadata and the preview instead of doing a
+          // second full ZIP read through inspectContainer().
+          entries = await codec.readZipEntries(raw);
+          inspection = { format: "red_v4", compressionSupported: true, entries: entries.map(entry => ({ name: entry.name, bytes: entry.bytes.length, mime: codec.mimeFromBytes(entry.bytes, entry.name) })) };
+        } catch (error) {
+          if (error?.code !== "private_red_unsupported") throw error;
+          inspection = await codec.inspectContainer(raw);
+        }
         const identity = metadataFromEntries(entries, file.name);
         let previewUrl = "";
         let previewDetails = { kind: "shelf_and_splash", simulation: true };
@@ -781,8 +825,8 @@ async function analyzeFiles(files) {
         }
         const info = { ...identity, source_name: file.name, bytes: raw.length, container_format: inspection.format, compression_supported: inspection.compressionSupported !== false, preview_details: previewDetails };
         const duplicateRecords = browserDuplicateCandidates(identity.name, identity.author);
-        items.push({ staging_id: `browser-${crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`}`, file, bytes: raw, inspection, info, duplicates: duplicateRecords.map(record => ({ ...record })), preview_urls: { light: previewUrl, dark: "" } });
-      }
+        return { staging_id: `browser-${crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`}`, file, bytes: raw, inspection, info, duplicates: duplicateRecords.map(record => ({ ...record })), preview_urls: { light: previewUrl, dark: "" } };
+      });
       state.review.push(...items);
       renderReview();
       operationMessage($("#reviewBatchStatus"), `本批 ${items.length} 个主题已在浏览器完成识别，可全选后确认。`);
@@ -833,9 +877,8 @@ async function commitThemes(ids = [...selections.review]) {
     if (browserSyncEnabled()) {
       const codec = await browserCodec();
       const selected = state.review.filter(item => chosen.includes(item.staging_id));
-      const completed = [];
-      const failures = [];
-      for (const item of selected) {
+      let finished = 0;
+      const results = await mapConcurrent(selected, 2, async item => {
         try {
           const raw = item.bytes || new Uint8Array(await item.file.arrayBuffer());
           const encrypted = item.info?.compression_supported === false || item.inspection?.format === "red_private_v2";
@@ -864,12 +907,16 @@ async function commitThemes(ids = [...selections.review]) {
             compressed_url: compressedPath, library_url: compressedPath, preview_light_url: previewPath, preview_dark_url: "", preview_details: previewDetails,
             saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: "", original_url: originalPath
           }, codec);
-          completed.push(record);
+          operationMessage($("#reviewBatchStatus"), `已完成主题 ${++finished} / ${selected.length}…`);
+          return { item, record };
         } catch (error) {
-          failures.push({ item, error });
           item.commitError = error.message || "浏览器处理失败";
+          operationMessage($("#reviewBatchStatus"), `已完成主题 ${++finished} / ${selected.length}…`);
+          return { item, error };
         }
-      }
+      });
+      const completed = results.filter(result => result.record).map(result => result.record);
+      const failures = results.filter(result => result.error);
       state.themes = [...completed, ...state.themes];
       // Match completed records back to staging items by insertion order/name;
       // failed items remain visible for retry.
@@ -953,51 +1000,56 @@ async function importFonts(files) {
   try {
     const hashes = new Set(state.fonts.map(font => font.sha256).filter(Boolean));
     const unique = [];
-    for (let index = 0; index < valid.length; index++) {
-      operationMessage(output, `正在按 SHA-256 检查字体 ${index + 1} / ${valid.length}…`);
-      const file = valid[index];
-      // The server repeats this check against its current local and remote index.
-      if (crypto.subtle) {
-        const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
-        const hash = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join(""); // taste-skill-ignore: SHA-256 bytes require two hexadecimal digits.
-        if (hashes.has(hash)) { duplicates++; continue; }
-        hashes.add(hash);
-      }
+    const hashed = crypto.subtle ? await mapConcurrent(valid, 4, async file => {
+      const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+      return { file, hash: [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("") }; // taste-skill-ignore: SHA-256 bytes require two hexadecimal digits.
+    }) : valid.map(file => ({ file, hash: "" }));
+    for (const {file, hash} of hashed) {
+      if (hash && hashes.has(hash)) { duplicates++; continue; }
+      if (hash) hashes.add(hash);
       unique.push(file);
     }
     if (!unique.length) { operationMessage(output, `全部 ${duplicates} 个字体已存在，未重复上传。`); toast("所选字体均已存在"); return; }
     if (browserSyncEnabled()) {
       const codec = await browserCodec();
-      const added = [];
-      for (let index = 0; index < unique.length; index++) {
-        const file = unique[index];
-        operationMessage(output, `正在上传字体 ${index + 1} / ${unique.length}…`);
-        const info = await codec.inspectFont(file);
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        const fontPath = await uploadBrowserObject("fonts", info.sha256, info.extension, bytes, `font/${info.extension}`);
-        let previewPath = "";
+      let finished = 0;
+      const uploaded = await mapConcurrent(unique, 2, async file => {
         try {
-          const preview = await codec.fontPreview(file);
-          const previewBytes = await jpegBytesFromBlob(preview.blob);
-          preview.release?.();
-          if (previewBytes) {
-            const previewSha = await codec.sha256Hex(previewBytes);
-            previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg");
-          }
-        } catch { /* Font preview is optional; the original font remains usable. */ }
-        const record = await uploadBrowserRecord({
-          kind: "font", id: `font-${info.sha256.slice(0, 16)}`, sha256: info.sha256, file_name: file.name,
-          family: file.name.replace(/\.[^.]+$/, ""), subfamily: "Regular", extension: info.extension, bytes: info.bytes,
-          url: fontPath, view_url: fontPath, preview_url: previewPath, saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
-        }, codec);
-        added.push(record);
-      }
+          const info = await codec.inspectFont(file);
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          const fontPath = await uploadBrowserObject("fonts", info.sha256, info.extension, bytes, `font/${info.extension}`);
+          let previewPath = "";
+          try {
+            const preview = await codec.fontPreview(file);
+            try {
+              const previewBytes = await jpegBytesFromBlob(preview.blob);
+              if (previewBytes) {
+                const previewSha = await codec.sha256Hex(previewBytes);
+                previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg");
+              }
+            } finally { preview.release?.(); }
+          } catch { /* Font preview is optional; the original font remains usable. */ }
+          const record = await uploadBrowserRecord({
+            kind: "font", id: `font-${info.sha256.slice(0, 16)}`, sha256: info.sha256, file_name: file.name,
+            family: file.name.replace(/\.[^.]+$/, ""), subfamily: "Regular", extension: info.extension, bytes: info.bytes,
+            url: fontPath, view_url: fontPath, preview_url: previewPath, saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
+          }, codec);
+          operationMessage(output, `已上传字体 ${++finished} / ${unique.length}…`);
+          return record;
+        } catch (error) {
+          operationMessage(output, `已完成字体 ${++finished} / ${unique.length}（有一项失败）…`);
+          return { error, file };
+        }
+      });
+      const added = uploaded.filter(item => !item?.error);
+      const failures = uploaded.filter(item => item?.error);
+      if (!added.length && failures.length) throw failures[0].error;
       state.fonts = [...added, ...state.fonts];
       state.importFontIds = added.map(font => font.id);
       saveSessionIds("reeden-import-fonts", state.importFontIds);
       renderFonts();
-      const message = `已上传 ${added.length} 个字体，重复跳过 ${duplicates} 个。`;
-      operationMessage(output, message); toast(message);
+      const message = `已上传 ${added.length} 个字体，重复跳过 ${duplicates} 个${failures.length ? `，失败 ${failures.length} 个` : ""}。`;
+      operationMessage(output, message, Boolean(failures.length)); toast(message);
       return;
     }
     operationMessage(output, `查重完成，正在接收 ${unique.length} 个新字体，完成后交给后台…`);
@@ -1233,8 +1285,8 @@ $("#fontInput").addEventListener("change", async e => { await importFonts(e.targ
 $("#fontFolderInput").addEventListener("change", async e => { await importFonts(e.target.files); e.target.value = ""; });
 setupDropZone($("#fontDropZone"), importFonts);
 $("#fontDropZone").addEventListener("click", () => { if (!state.operation) $("#fontInput").click(); });
-$("#refreshThemes").addEventListener("click", loadThemes);
-$("#refreshFonts").addEventListener("click", loadFonts);
+$("#refreshThemes").addEventListener("click", () => loadThemes(true));
+$("#refreshFonts").addEventListener("click", () => loadFonts(true));
 $("#selectAllReview").addEventListener("change", event => toggleAll("review", event.target.checked));
 $("#selectAllThemes").addEventListener("change", event => toggleAll("theme", event.target.checked));
 $("#selectAllFonts").addEventListener("change", event => toggleAll("font", event.target.checked));

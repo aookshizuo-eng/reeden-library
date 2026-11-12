@@ -105,6 +105,29 @@
   function textBytes(value) { if (!te) throw new FreeCodecError("当前浏览器没有 TextEncoder", "text_encoder_unavailable"); return te.encode(value); }
   function startsWith(bytes, signature) { return signature.every((value, index) => bytes[index] === value); }
 
+  // Keep browser work bounded.  A small pool is faster than a long serial
+  // chain while avoiding hundreds of simultaneous ImageBitmap/ZIP streams on
+  // phones with limited memory.
+  async function mapConcurrent(items, limit, worker) {
+    const values = Array.from(items || []), result = new Array(values.length);
+    const width = Math.max(1, Math.min(Number(limit) || 1, values.length || 1));
+    let next = 0;
+    async function consume() {
+      while (true) {
+        const index = next++;
+        if (index >= values.length) return;
+        result[index] = await worker(values[index], index);
+      }
+    }
+    await Promise.all(Array.from({length: width}, consume));
+    return result;
+  }
+
+  function defaultConcurrency(fallback = 3) {
+    const cores = Number(root.navigator?.hardwareConcurrency);
+    return Number.isFinite(cores) && cores > 1 ? Math.min(4, Math.max(2, cores - 1)) : fallback;
+  }
+
   function mimeFromBytes(bytes, name = "") {
     const lower = String(name).toLowerCase();
     if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png";
@@ -157,11 +180,14 @@
       if (startsWith(raw, RED_PRIVATE)) throw new FreeCodecError("加密 RED v2 当前浏览器版本只做结构识别，暂不重新封包", "private_red_unsupported");
       throw new FreeCodecError("不是 RED\\x04 普通 ZIP 封装", "red_header_invalid");
     }
-    const zip = raw.slice(4), end = findEndOfCentralDirectory(zip);
+    // Keep a view over the caller's buffer instead of copying the complete
+    // package before reading its central directory. This matters for phone
+    // browsers where a RED can be tens of megabytes.
+    const zip = raw.subarray(4), end = findEndOfCentralDirectory(zip);
     const count = u16(zip, end + 10), cdSize = u32(zip, end + 12), cdOffset = u32(zip, end + 16);
     if (count === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) throw new FreeCodecError("ZIP64 RED 暂未支持", "zip64_unsupported");
     if (cdOffset + cdSize > zip.length) throw new FreeCodecError("RED ZIP 中央目录越界", "zip_directory_invalid");
-    const entries = []; let cursor = cdOffset;
+    const entries = []; let cursor = cdOffset; const pending = [];
     for (let index = 0; index < count; index++) {
       if (u32(zip, cursor) !== 0x02014b50) throw new FreeCodecError("RED ZIP 中央目录项无效", "zip_entry_invalid");
       const flags = u16(zip, cursor + 8), method = u16(zip, cursor + 10), crc = u32(zip, cursor + 16);
@@ -169,29 +195,33 @@
       const externalAttr = u32(zip, cursor + 38), localOffset = u32(zip, cursor + 42);
       if (flags & 1) throw new FreeCodecError("加密 ZIP 资源暂不支持", "zip_entry_encrypted");
       if ([compressedSize, size, localOffset].some(value => value === 0xffffffff)) throw new FreeCodecError("ZIP64 RED 暂未支持", "zip64_unsupported");
-      const nameBytes = zip.slice(cursor + 46, cursor + 46 + nameLength), name = text(nameBytes);
+      const nameBytes = zip.subarray(cursor + 46, cursor + 46 + nameLength), name = text(nameBytes);
       if (!name || name.includes("\\") || name.split("/").some(part => part === "..")) throw new FreeCodecError("RED ZIP 资源路径不安全", "zip_path_invalid");
-      const comment = zip.slice(cursor + 46 + nameLength + extraLength, cursor + 46 + nameLength + extraLength + commentLength);
+      const comment = zip.subarray(cursor + 46 + nameLength + extraLength, cursor + 46 + nameLength + extraLength + commentLength);
       if (u32(zip, localOffset) !== 0x04034b50) throw new FreeCodecError("RED ZIP 本地项无效", "zip_local_invalid");
       const localNameLength = u16(zip, localOffset + 26), localExtraLength = u16(zip, localOffset + 28);
       const start = localOffset + 30 + localNameLength + localExtraLength, endData = start + compressedSize;
       if (endData > zip.length) throw new FreeCodecError("RED ZIP 资源越界", "zip_resource_invalid");
-      const compressed = zip.slice(start, endData);
-      let data;
-      if (method === 0) data = compressed;
-      else if (method === 8) data = await inflateRaw(compressed);
-      else throw new FreeCodecError(`RED ZIP 压缩方法 ${method} 暂未支持`, "zip_method_unsupported");
-      if (data.length !== size || crc32(data) !== crc) throw new FreeCodecError(`RED ZIP 资源校验失败：${name}`, "zip_crc_invalid");
-      entries.push({ name, bytes: data, method, flags, crc, externalAttr, comment });
+      const compressed = zip.subarray(start, endData);
+      pending.push({ name, compressed, method, size, crc, flags, externalAttr, comment });
       cursor += 46 + nameLength + extraLength + commentLength;
     }
     if (cursor !== cdOffset + cdSize) throw new FreeCodecError("RED ZIP 中央目录长度不一致", "zip_directory_length");
+    const decoded = await mapConcurrent(pending, defaultConcurrency(4), async item => {
+      let data;
+      if (item.method === 0) data = item.compressed;
+      else if (item.method === 8) data = await inflateRaw(item.compressed);
+      else throw new FreeCodecError(`RED ZIP 压缩方法 ${item.method} 暂未支持`, "zip_method_unsupported");
+      if (data.length !== item.size || crc32(data) !== item.crc) throw new FreeCodecError(`RED ZIP 资源校验失败：${item.name}`, "zip_crc_invalid");
+      return { name: item.name, bytes: data, method: item.method, flags: item.flags, crc: item.crc, externalAttr: item.externalAttr, comment: item.comment };
+    });
+    entries.push(...decoded);
     return entries;
   }
 
-  async function writeZipEntries(entries) {
+  async function writeZipEntries(entries, options = {}) {
     const local = [], central = []; let offset = 0;
-    for (const source of entries) {
+    const prepared = await mapConcurrent(entries, options.concurrency || defaultConcurrency(4), async source => {
       const data = bytesOf(source.bytes), name = textBytes(source.name);
       if (name.length > 65535 || data.length > 0xffffffff) throw new FreeCodecError("资源超过普通 ZIP 上限", "zip_size_limit");
       let compressed = data, method = 0;
@@ -200,6 +230,10 @@
         if (candidate.length < data.length) { compressed = candidate; method = 8; }
       }
       const crc = crc32(data), comment = source.comment ? bytesOf(source.comment) : new Uint8Array();
+      return { source, data, name, compressed, method, crc, comment };
+    });
+    for (const item of prepared) {
+      const {source, data, name, compressed, method, crc, comment} = item;
       const time = source.dosTime || 0, date = source.dosDate || 0, flags = 0x0800;
       const localHeader = concat([new Uint8Array([0x50, 0x4b, 0x03, 0x04]), put16(20), put16(flags), put16(method), put16(time), put16(date), put32(crc), put32(compressed.length), put32(data.length), put16(name.length), put16(0), name]);
       local.push(localHeader, compressed);
@@ -230,7 +264,7 @@
     const original = bytesOf(bytes), mime = mimeFromBytes(original, name), skipped = isSkippableImage(original, mime, name);
     const decision = { path: name, mime, used: false, originalBytes: original.length };
     if (skipped) { decision.reason = skipped; return { bytes: original, mime, decision }; }
-    if (!new Set(["image/png", "image/jpeg", "image/webp"]).has(mime)) { decision.reason = "格式不在浏览器兼容压缩范围"; return { bytes: original, mime, decision }; }
+    if (!(mime === "image/png" || mime === "image/jpeg" || mime === "image/webp")) { decision.reason = "格式不在浏览器兼容压缩范围"; return { bytes: original, mime, decision }; }
     if (typeof root.createImageBitmap !== "function") throw new FreeCodecError("当前浏览器不支持 createImageBitmap，无法本地压缩图片", "image_decode_unavailable");
     const bitmap = await root.createImageBitmap(new Blob([original], { type: mime }));
     try {
@@ -271,21 +305,25 @@
     const raw = await readBytes(value);
     if (startsWith(raw, RED_PRIVATE)) throw new FreeCodecError("加密 RED v2 当前浏览器版本只做结构识别，暂不重新封包；请使用电脑后台版本", "private_red_unsupported");
     const entries = await readZipEntries(raw), replacements = {}, decisions = [], output = [];
-    for (const entry of entries) {
-      let bytes = entry.bytes, result = { bytes, decision: { path: entry.name, mime: mimeFromBytes(bytes, entry.name), used: false, reason: "非图片资源" } };
+    const processed = await mapConcurrent(entries, options.concurrency || defaultConcurrency(3), async entry => {
+      const bytes = entry.bytes;
+      let result = { bytes, decision: { path: entry.name, mime: mimeFromBytes(bytes, entry.name), used: false, reason: "非图片资源" } };
       if (result.decision.mime.startsWith("image/")) result = await compressImage(bytes, entry.name, options);
       if (result.decision.used) {
-        replacements[md5Hex(bytes)] = md5Hex(result.bytes); replacements[await sha256Hex(bytes)] = await sha256Hex(result.bytes);
+        const [oldSha, newSha] = await Promise.all([sha256Hex(bytes), sha256Hex(result.bytes)]);
+        replacements[md5Hex(bytes)] = md5Hex(result.bytes);
+        replacements[oldSha] = newSha;
       }
-      decisions.push(result.decision); output.push({ ...entry, bytes: result.bytes });
-    }
+      return {entry, result};
+    });
+    for (const {entry, result} of processed) { decisions.push(result.decision); output.push({ ...entry, bytes: result.bytes }); }
     if (Object.keys(replacements).length) {
       for (const entry of output) if (entry.name.toLowerCase().endsWith(".json")) {
         try { const value = JSON.parse(text(entry.bytes)), mapped = mapHashes(value, replacements); entry.bytes = textBytes(JSON.stringify(mapped)); }
         catch { /* Non-JSON resources keep their original bytes. */ }
       }
     }
-    const candidate = await writeZipEntries(output);
+    const candidate = await writeZipEntries(output, { concurrency: options.concurrency || defaultConcurrency(3) });
     const selected = candidate.length < raw.length ? candidate : raw;
     return { bytes: selected, originalBytes: raw.length, compressedBytes: selected.length, savedBytes: raw.length - selected.length, packageSelected: selected !== raw, decisions, format: "red_v4" };
   }
