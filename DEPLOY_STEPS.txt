@@ -1,0 +1,6 @@
+# Free deployment helper (does not contain credentials)
+# 1. Create GitHub repository and push this directory.
+# 2. Enable Settings > Pages > GitHub Actions.
+# 3. In worker/, copy wrangler.toml.example to wrangler.toml and fill bucket/origin.
+# 4. Run npx wrangler login; npx wrangler secret put SYNC_WRITE_TOKEN; npx wrangler deploy.
+# 5. Fill the resulting workers.dev URL in the Pages site's storage settings.
