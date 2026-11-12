@@ -14,6 +14,15 @@ android {
         versionName "1.0.0"
     }
 
+    // Bundle the same static site into the APK. The WebView still opens it
+    // under the GitHub Pages origin, so the R2 Worker sees the same allowed
+    // Origin as the desktop/mobile browser.
+    sourceSets {
+        main {
+            assets.srcDirs = ["../../site"]
+        }
+    }
+
     buildTypes {
         debug {
             applicationIdSuffix ".debug"
