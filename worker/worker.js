@@ -13,6 +13,24 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const SAFE_EXT = new Set(["ttf", "otf", "woff", "woff2"]);
 const KINDS = new Set(["originals", "compressed", "fonts", "previews", "records"]);
 
+// R2 list() returns object keys, so records still need individual reads. Keep
+// those reads bounded but concurrent; serial reads made a library refresh take
+// roughly one network round trip per asset.
+async function mapConcurrent(items, limit, worker) {
+  const values = Array.from(items || []), result = new Array(values.length);
+  const width = Math.max(1, Math.min(Number(limit) || 1, values.length || 1));
+  let next = 0;
+  async function consume() {
+    while (true) {
+      const index = next++;
+      if (index >= values.length) return;
+      result[index] = await worker(values[index], index);
+    }
+  }
+  await Promise.all(Array.from({length: width}, consume));
+  return result;
+}
+
 function configuredOrigins(env) {
   return String(env.ALLOWED_ORIGINS || "")
     .split(",")
@@ -136,18 +154,18 @@ async function listRecords(request, env, wantedKind = null) {
   const url = new URL(request.url);
   const cursor = url.searchParams.get("cursor") || undefined;
   const listed = await env.ASSETS.list({prefix: "records/", cursor, limit: MAX_LIST_RECORDS});
-  const records = [];
-  for (const item of listed.objects || []) {
+  const loaded = await mapConcurrent(listed.objects || [], 16, async (item) => {
     const object = await env.ASSETS.get(item.key);
-    if (!object) continue;
+    if (!object) return null;
     try {
       const record = JSON.parse(await object.text());
-      if (record && typeof record === "object"
-          && (!wantedKind || record.kind === wantedKind)) records.push(record);
+      if (record && typeof record === "object" && (!wantedKind || record.kind === wantedKind)) return record;
     } catch {
       // A malformed record must not prevent the rest of the library loading.
     }
-  }
+    return null;
+  });
+  const records = loaded.filter(Boolean);
   // `items` keeps the existing library UI contract; `records` is the clearer
   // name used by the standalone free-sync client.
   return json({records, items: records, cursor: listed.truncated ? listed.cursor : null}, 200, request, env);
