@@ -79,7 +79,10 @@ function originAllowed(request, env, {write = false} = {}) {
 
 function checkWriteToken(request, env) {
   const expected = String(env.SYNC_WRITE_TOKEN || "");
-  if (!expected) return false;
+  // The personal red-garden fallback can explicitly opt into same-origin
+  // public writes when the owner has not configured a token yet. The primary
+  // sync project still has SYNC_WRITE_TOKEN set and remains protected.
+  if (!expected) return String(env.ALLOW_PUBLIC_WRITES || "") === "1";
   const header = request.headers.get("Authorization") || "";
   return header === `Bearer ${expected}`;
 }
