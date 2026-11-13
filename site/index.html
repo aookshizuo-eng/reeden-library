@@ -16,6 +16,7 @@
           <button class="nav-item is-active" data-view="import"><span class="nav-dot"></span>导入</button>
           <button class="nav-item" data-view="themes"><span class="nav-dot"></span>主题库</button>
           <button class="nav-item" data-view="fonts"><span class="nav-dot"></span>字体库</button>
+          <button class="nav-item" data-view="assets"><span class="nav-dot"></span>收藏库</button>
           <button class="nav-item" data-view="jobs"><span class="nav-dot"></span>后台任务 <span id="jobNavCount" class="nav-count" hidden></span></button>
           <button class="nav-item" data-view="storage"><span class="nav-dot"></span>存储设置</button>
         </nav>
@@ -42,7 +43,7 @@
         <section class="view" id="importView" data-view-panel="import">
           <div class="title-row"><div><h1>导入文件</h1><p class="lede">主题先查重并确认，字体查重后自动收录。确认后在当前设备处理并同步 R2，已有资源在各自库中查看。</p></div></div>
           <p class="static-mode-note" id="staticModeNote" role="status" hidden></p>
-          <div class="import-tabs" role="tablist" aria-label="导入类型"><button class="import-tab is-active" id="themeImportTab" role="tab" aria-selected="true" aria-controls="themeImportPane" data-import-kind="theme">RED 主题</button><button class="import-tab" id="fontImportTab" role="tab" aria-selected="false" aria-controls="fontImportPane" data-import-kind="font" tabindex="-1">字体文件</button></div>
+          <div class="import-tabs" role="tablist" aria-label="导入类型"><button class="import-tab is-active" id="themeImportTab" role="tab" aria-selected="true" aria-controls="themeImportPane" data-import-kind="theme">RED 主题</button><button class="import-tab" id="fontImportTab" role="tab" aria-selected="false" aria-controls="fontImportPane" data-import-kind="font" tabindex="-1">字体文件</button><button class="import-tab" id="assetImportTab" role="tab" aria-selected="false" aria-controls="assetImportPane" data-import-kind="asset" tabindex="-1">SVG / HTML 收藏</button></div>
           <div id="themeImportPane" role="tabpanel" aria-labelledby="themeImportTab">
             <section class="ingest-panel" aria-labelledby="ingestTitle">
               <div class="drop-zone" id="themeDropZone" tabindex="0" role="button" aria-label="拖入 RED 主题文件">
@@ -71,6 +72,14 @@
             <p class="operation-status ingest-status" id="fontImportStatus" role="status" hidden></p>
             <section class="import-results" id="fontImportResults" hidden><div class="section-heading"><div><h2>本批字体</h2><p id="fontBatchDescription">这里只显示这次导入的新字体。</p></div><button class="text-button" data-open-view="fonts">查看字体库</button></div><div id="importedFontList" class="font-list"></div></section>
           </div>
+          <div id="assetImportPane" role="tabpanel" aria-labelledby="assetImportTab" hidden>
+            <section class="ingest-panel asset-ingest">
+              <div class="drop-zone" id="assetDropZone" tabindex="0" role="button" aria-label="拖入 SVG 或 HTML 文件"><span class="drop-icon">✦</span><strong>把 SVG / HTML 拖到这里</strong><span>支持批量收藏 .svg、.html、.htm</span><small>也可以点击选择文件</small></div>
+              <div class="ingest-copy"><h2>加入收藏</h2><p>原文件按 SHA-256 去重并保存到共享 R2。每个收藏可补充作者、风格和标签，之后按分类快速筛选。</p><div class="ingest-actions"><button class="primary-button" id="chooseAssets">选择 SVG / HTML</button><button class="secondary-button" id="chooseAssetFolder">选择收藏文件夹</button><input id="assetInput" type="file" accept=".svg,.html,.htm,image/svg+xml,text/html" multiple hidden /><input id="assetFolderInput" type="file" accept=".svg,.html,.htm,image/svg+xml,text/html" webkitdirectory multiple hidden /></div><p class="ingest-note">SVG 使用安全图片预览；HTML 使用无权限 sandbox 预览，不会在收藏库页面执行脚本。</p></div>
+            </section>
+            <p class="operation-status ingest-status" id="assetImportStatus" role="status" hidden></p>
+            <section class="import-results" id="assetImportResults" hidden><div class="section-heading"><div><h2>本批收藏</h2><p id="assetBatchDescription">这里只显示这次导入的文件。</p></div><button class="text-button" data-open-view="assets">查看收藏库</button></div><div id="importedAssetList" class="asset-list"></div></section>
+          </div>
         </section>
 
         <section class="view" id="themesView" data-view-panel="themes" hidden>
@@ -91,6 +100,16 @@
         <section class="view" id="fontsView" data-view-panel="fonts" hidden>
           <div class="title-row"><div><h1>字体库</h1><p class="lede">已收录字体按家族、样式和 SHA-256 保存，原字体可随时下载。</p></div><div class="title-meta"><span id="fontCount">0 个字体</span></div></div>
           <section class="font-area"><div class="section-heading"><div><h2>已收录字体</h2><p>预览使用原始文件，索引记录家族、样式和文件哈希。</p></div><button class="text-button" id="refreshFonts">刷新</button></div><div class="bulk-toolbar" id="fontToolbar" hidden><label class="select-label"><input type="checkbox" id="selectAllFonts" />全选</label><span class="selection-count" id="fontSelectedCount">已选 0 项</span><button class="secondary-button" id="syncSelectedFonts" type="button" disabled>后台同步所选</button><span class="bulk-status" id="fontBatchStatus" role="status"></span></div><div id="fontList" class="font-list"></div><div class="empty-state" id="fontEmpty"><div class="empty-mark font-mark">Aa</div><h3>还没有字体</h3><p>从单个文件或文件夹开始建立字体索引。</p></div></section>
+        </section>
+
+        <section class="view" id="assetsView" data-view-panel="assets" hidden>
+          <div class="title-row"><div><h1>收藏库</h1><p class="lede">SVG 与 HTML 原文件集中保存，按作者或风格分类。HTML 预览运行在隔离 sandbox 中。</p></div><div class="title-meta"><span id="assetCount">0 个收藏</span></div></div>
+          <section class="asset-area"><div class="section-heading"><div><h2>已收藏文件</h2><p>内容对象按 SHA-256 去重，编辑分类不会重新上传。</p></div><div class="section-actions"><button class="text-button" id="refreshAssets">刷新</button><button class="primary-button" id="addAssetButton">添加收藏</button></div></div>
+            <div class="asset-filters" role="toolbar" aria-label="收藏分类筛选"><button class="filter-chip is-active" type="button" data-asset-filter="all">全部</button><button class="filter-chip" type="button" data-asset-filter="ungrouped">未分组</button><button class="filter-chip" type="button" data-asset-filter="author">按作者</button><button class="filter-chip" type="button" data-asset-filter="style">按风格</button><label class="asset-search">搜索<input id="assetSearchInput" type="search" placeholder="名称、作者或标签" autocomplete="off" /></label></div>
+            <div class="bulk-toolbar" id="assetToolbar" hidden><label class="select-label"><input type="checkbox" id="selectAllAssets" />全选</label><span class="selection-count" id="assetSelectedCount">已选 0 项</span><button class="secondary-button" id="syncSelectedAssets" type="button" disabled>后台同步所选</button><span class="bulk-status" id="assetBatchStatus" role="status"></span></div>
+            <div id="assetList" class="asset-list asset-library-list"></div>
+            <div class="empty-state" id="assetEmpty"><div class="empty-mark">✦</div><h3>还没有收藏</h3><p>从导入页拖入 SVG 或 HTML 文件，完成后会在这里显示安全预览和分类。</p></div>
+          </section>
         </section>
 
 

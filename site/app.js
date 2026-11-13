@@ -93,7 +93,7 @@ function saveApiBaseSetting() {
   (async () => {
     try {
       await loadStorage();
-      await Promise.all([loadThemes(), loadFonts(), ...(browserSyncEnabled() ? [] : [loadPendingThemes()]), loadJobs()]);
+      await Promise.all([loadThemes(), loadFonts(), loadAssets(), ...(browserSyncEnabled() ? [] : [loadPendingThemes()]), loadJobs()]);
     } catch (error) { operationMessage($("#apiBaseStatus"), `连接失败：${error.message}`, true); }
   })();
 }
@@ -104,8 +104,8 @@ function requestHeaders(headers = {}) {
   return result;
 }
 
-const state = { themes: [], fonts: [], review: [], jobs: [], activeView: "import", importKind: "theme", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs") };
-const selections = { review: new Set(), theme: new Set(), font: new Set() };
+const state = { themes: [], fonts: [], assets: [], review: [], jobs: [], activeView: "import", importKind: "theme", assetFilter: "all", assetSearch: "", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs"), importAssetIds: readSessionIds("reeden-import-assets") };
+const selections = { review: new Set(), theme: new Set(), font: new Set(), asset: new Set() };
 const loadedFontFaces = new Set();
 const BROWSER_TASK_CONCURRENCY = 3;
 const BROWSER_RECORD_CACHE_TTL = 15000;
@@ -234,6 +234,9 @@ async function uploadBrowserObject(kind, sha, extension, body, contentType) {
 }
 
 async function uploadBrowserRecord(record, codec) {
+  // Records are immutable content-addressed objects. Keep a stable asset id
+  // and timestamp so a classification edit supersedes its older record.
+  if (!record.updated_at) record.updated_at = new Date().toISOString();
   const bytes = new TextEncoder().encode(JSON.stringify(record));
   const recordSha = await codec.sha256Hex(bytes);
   await uploadBrowserObject("records", recordSha, "json", bytes, "application/json");
@@ -443,7 +446,8 @@ function autoSyncEnabled() { return browserSyncEnabled() || (r2Enabled() && stat
 function savedToCloud(record) { return record.saved_to_cloud === true || (record.sync_status?.library === "synced" && record.local_status === "cloud_only" && !record.sync_error); }
 function eligibleIds(kind) {
   if (kind === "review") return state.review.filter(item => !isAssetBusy("staging", item.staging_id)).map(item => item.staging_id);
-  return state[kind === "theme" ? "themes" : "fonts"].filter(item => !savedToCloud(item) && !isAssetBusy(kind, item.id)).map(item => item.id);
+  const collection = kind === "theme" ? state.themes : kind === "font" ? state.fonts : state.assets;
+  return collection.filter(item => !savedToCloud(item) && !isAssetBusy(kind, item.id)).map(item => item.id);
 }
 
 function selectInput(kind, id, name, disabled = false) {
@@ -455,6 +459,7 @@ function updateBulkControls() {
     ["review", "selectAllReview", "reviewSelectedCount", "commitSelectedThemes"],
     ["theme", "selectAllThemes", "themeSelectedCount", "syncSelectedThemes"],
     ["font", "selectAllFonts", "fontSelectedCount", "syncSelectedFonts"],
+    ["asset", "selectAllAssets", "assetSelectedCount", "syncSelectedAssets"],
   ];
   toolbars.forEach(([kind, checkboxId, countId, buttonId]) => {
     const ids = eligibleIds(kind);
@@ -466,7 +471,7 @@ function updateBulkControls() {
     checkbox.indeterminate = count > 0 && count < ids.length;
     checkbox.disabled = Boolean(state.operation) || !ids.length;
     $("#" + countId).textContent = `已选 ${count} / ${ids.length} 项`;
-    $("#" + buttonId).disabled = Boolean(state.operation) || storageDirty || !count || (["theme", "font"].includes(kind) && !r2Enabled());
+    $("#" + buttonId).disabled = Boolean(state.operation) || storageDirty || !count || (["theme", "font", "asset"].includes(kind) && !r2Enabled());
     $("#" + buttonId).title = storageDirty ? "请先保存存储设置" : "";
   });
   const chosenReview = state.review.filter(item => selections.review.has(item.staging_id));
@@ -479,14 +484,15 @@ function updateBulkControls() {
   $$(".compression-controls input").forEach(input => { input.disabled = Boolean(state.operation); });
   $("#themeToolbar").hidden = !state.themes.length;
   $("#fontToolbar").hidden = !state.fonts.length;
+  $("#assetToolbar").hidden = !state.assets.length;
   const eligible = Object.fromEntries(Object.keys(selections).map(kind => [kind, new Set(eligibleIds(kind))]));
   $$("[data-selection]").forEach(input => {
     input.checked = selections[input.dataset.selection].has(input.dataset.id);
     input.disabled = Boolean(state.operation) || !eligible[input.dataset.selection].has(input.dataset.id);
     input.closest("article")?.classList.toggle("is-selected", input.checked);
   });
-  $$(".sync-theme, .sync-font").forEach(button => { button.disabled = Boolean(state.operation) || !r2Enabled() || storageDirty || button.dataset.completed === "true" || isAssetBusy(button.classList.contains("sync-font") ? "font" : "theme", button.dataset.id); });
-  $$(".commit-theme, .discard-review, .rebuild-preview, #chooseThemes, #chooseThemeFolder, #indexThemeFolder, #addThemeButton, #chooseFonts, #chooseFontFolder, #scanButton, #indexExistingCloud, #storageForm button[type='submit']").forEach(button => { button.disabled = Boolean(state.operation); });
+  $$(".sync-theme, .sync-font, .sync-asset").forEach(button => { const kind = button.classList.contains("sync-font") ? "font" : button.classList.contains("sync-asset") ? "asset" : "theme"; button.disabled = Boolean(state.operation) || !r2Enabled() || storageDirty || button.dataset.completed === "true" || isAssetBusy(kind, button.dataset.id); });
+  $$(".commit-theme, .discard-review, .rebuild-preview, #chooseThemes, #chooseThemeFolder, #indexThemeFolder, #addThemeButton, #chooseFonts, #chooseFontFolder, #chooseAssets, #chooseAssetFolder, #addAssetButton, #scanButton, #indexExistingCloud, #storageForm button[type='submit']").forEach(button => { button.disabled = Boolean(state.operation); });
   $$(".rebuild-preview").forEach(button => { button.disabled = Boolean(state.operation) || isAssetBusy("theme", button.dataset.id); });
   $("#storageForm button[type='submit']").disabled = Boolean(state.operation) || activeJobs().length > 0;
   $$(".commit-theme").forEach(button => { button.disabled = Boolean(state.operation) || storageDirty; button.title = storageDirty ? "请先保存存储设置" : ""; });
@@ -501,7 +507,7 @@ function toggleAll(kind, checked) {
   updateBulkControls();
 }
 
-const viewNames = { import: "导入", themes: "主题库", fonts: "字体库", jobs: "后台任务", storage: "存储设置" };
+const viewNames = { import: "导入", themes: "主题库", fonts: "字体库", assets: "收藏库", jobs: "后台任务", storage: "存储设置" };
 function setView(view) {
   if (!viewNames[view]) view = "import";
   const changed = state.activeView !== view;
@@ -514,6 +520,7 @@ function setView(view) {
   $("#topbarTitle").textContent = viewNames[view];
   if (view === "themes") loadThemes().catch(error => toast(error.message));
   if (view === "fonts") loadFonts().catch(error => toast(error.message));
+  if (view === "assets") loadAssets().catch(error => toast(error.message));
   if (view === "jobs") loadJobs().catch(() => {});
   if (view === "storage") loadStorage().catch(error => toast(error.message));
 }
@@ -521,12 +528,28 @@ function setImportKind(kind) {
   state.importKind = kind;
   $("#themeImportPane").hidden = kind !== "theme";
   $("#fontImportPane").hidden = kind !== "font";
+  $("#assetImportPane").hidden = kind !== "asset";
   $$("[data-import-kind]").forEach(button => {
     const selected = button.dataset.importKind === kind;
     button.classList.toggle("is-active", selected);
     button.setAttribute("aria-selected", String(selected));
     button.tabIndex = selected ? 0 : -1;
   });
+}
+
+function recordKindPath(kind) {
+  return kind === "asset" ? "assets" : kind === "theme" ? "themes" : "fonts";
+}
+
+function recordTags(record) {
+  return Array.isArray(record?.tags) ? record.tags.filter(Boolean).map(String) : [];
+}
+
+function classificationEditor(record, kind) {
+  const author = String(record?.author || "").trim();
+  const style = String(record?.style || "").trim();
+  const tags = recordTags(record);
+  return `<div class="record-classifications">${author ? `<span class="category-chip">作者：${escapeHtml(author)}</span>` : `<span class="category-chip is-empty">未分作者</span>`}${style ? `<span class="category-chip">风格：${escapeHtml(style)}</span>` : `<span class="category-chip is-empty">未分风格</span>`}${tags.map(tag => `<span class="category-chip">#${escapeHtml(tag)}</span>`).join("")}</div><form class="asset-meta-form record-classification-form" data-record-form="${escapeHtml(record?.id || "")}" data-record-kind="${escapeHtml(kind)}"><div class="asset-meta-fields"><label>作者<input name="author" value="${escapeHtml(author)}" placeholder="作者" /></label><label>风格<input name="style" value="${escapeHtml(style)}" placeholder="风格" /></label><label>标签<input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="标签，用逗号分隔" /></label></div><button class="text-button" type="submit">保存分类</button></form>`;
 }
 
 function renderThemes() {
@@ -544,7 +567,7 @@ function renderThemes() {
     const compressionText = compressionSummary(theme);
     return `<article class="theme-card">
       <div class="theme-preview">${previewImage(preview.url, `${theme.name} ${preview.label} · ${previewKind(theme.preview_details)}`, "", theme.preview_details)}<span class="preview-caption">${escapeHtml(previewKind(theme.preview_details))} · 点击放大</span></div>
-      <div class="theme-info"><label class="item-heading">${selectInput("theme", theme.id, `主题 ${theme.name || "未命名主题"}`, savedToCloud(theme))}<span class="theme-title">${escapeHtml(theme.name || "未命名主题")}</span></label><div class="theme-meta">${escapeHtml(theme.author || "作者未记录")}</div><p>${compressionText} · ${escapeHtml(syncLabel(theme))}</p>${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === "string" ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join("；"))}</p>` : ""}<div class="theme-badges">${roles.map(role => `<span class="badge">${escapeHtml(role)}</span>`).join("")}</div></div>
+      <div class="theme-info"><label class="item-heading">${selectInput("theme", theme.id, `主题 ${theme.name || "未命名主题"}`, savedToCloud(theme))}<span class="theme-title">${escapeHtml(theme.name || "未命名主题")}</span></label><div class="theme-meta">${escapeHtml(theme.author || "作者未记录")}</div><p>${compressionText} · ${escapeHtml(syncLabel(theme))}</p>${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === "string" ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join("；"))}</p>` : ""}<div class="theme-badges">${roles.map(role => `<span class="badge">${escapeHtml(role)}</span>`).join("")}</div>${classificationEditor(theme, "theme")}</div>
       <div class="theme-actions"><span class="size-line">${formatBytes(theme.compressed_size || theme.library_size || theme.original_size)}</span><button class="text-button rebuild-preview" data-id="${escapeHtml(theme.id)}">更新预览</button>${syncAction}${compressedLink}${libraryLink}${originalLink}</div>
     </article>`;
   }).join("");
@@ -574,7 +597,7 @@ function renderReview() {
 function renderFonts() {
   $("#fontCount").textContent = `${state.fonts.length} 个字体`;
   $("#fontEmpty").hidden = state.fonts.length > 0;
-    $("#fontList").innerHTML = state.fonts.map(font => `<article class="font-card"><div><label class="item-heading">${selectInput("font", font.id, `字体 ${font.family || font.file_name}`, savedToCloud(font))}<span class="theme-title">${escapeHtml(font.family || font.file_name)}</span></label><div class="font-meta"><span>${escapeHtml(font.subfamily || "Regular")}</span><span>${escapeHtml((font.extension || "font").toUpperCase())}</span><span>${formatBytes(font.bytes)}</span><span>${escapeHtml(syncLabel(font))}</span></div><div class="font-specimen" style="font-family: 'font-${escapeHtml(font.id)}', sans-serif">Aa 中文 0123 · Reeden Theme</div><div class="font-hash">SHA-256 ${escapeHtml(font.sha256)}</div>${font.sync_error ? `<p class="inline-error">${escapeHtml(typeof font.sync_error === "string" ? font.sync_error : Object.values(font.sync_error).join("；"))}</p>` : ""}${font.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof font.cleanup_warning === "string" ? font.cleanup_warning : Object.values(font.cleanup_warning).join("；"))}</p>` : ""}</div><div class="font-actions"><button class="text-button sync-font" data-id="${escapeHtml(font.id)}" data-completed="${savedToCloud(font)}">${savedToCloud(font) ? "R2 已保存" : "同步字体到 R2"}</button>${font.url ? `<a class="download-link" href="${escapeHtml(assetUrl(font.url))}">下载原字体</a>` : ""}</div></article>`).join("");
+    $("#fontList").innerHTML = state.fonts.map(font => `<article class="font-card"><div><label class="item-heading">${selectInput("font", font.id, `字体 ${font.family || font.file_name}`, savedToCloud(font))}<span class="theme-title">${escapeHtml(font.family || font.file_name)}</span></label><div class="font-meta"><span>${escapeHtml(font.subfamily || "Regular")}</span><span>${escapeHtml((font.extension || "font").toUpperCase())}</span><span>${formatBytes(font.bytes)}</span><span>${escapeHtml(syncLabel(font))}</span></div><div class="font-specimen" style="font-family: 'font-${escapeHtml(font.id)}', sans-serif">Aa 中文 0123 · Reeden Theme</div><div class="font-hash">SHA-256 ${escapeHtml(font.sha256)}</div>${font.sync_error ? `<p class="inline-error">${escapeHtml(typeof font.sync_error === "string" ? font.sync_error : Object.values(font.sync_error).join("；"))}</p>` : ""}${font.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof font.cleanup_warning === "string" ? font.cleanup_warning : Object.values(font.cleanup_warning).join("；"))}</p>` : ""}${classificationEditor(font, "font")}</div><div class="font-actions"><button class="text-button sync-font" data-id="${escapeHtml(font.id)}" data-completed="${savedToCloud(font)}">${savedToCloud(font) ? "R2 已保存" : "同步字体到 R2"}</button>${font.url ? `<a class="download-link" href="${escapeHtml(assetUrl(font.url))}">下载原字体</a>` : ""}</div></article>`).join("");
   // A FontFace preview works without a build step and keeps the original file untouched.
   state.fonts.forEach(font => {
     const url = assetUrl(font.view_url || font.url);
@@ -585,6 +608,117 @@ function renderFonts() {
   $$(".sync-font").forEach(button => button.addEventListener("click", () => syncFont(button.dataset.id)));
   renderImportedFonts();
   updateBulkControls();
+}
+
+function assetTypeLabel(asset) {
+  return String(asset.asset_type || asset.extension || "").toLowerCase() === "svg" ? "SVG" : "HTML";
+}
+
+function assetMatchesFilter(asset) {
+  const mode = state.assetFilter || "all";
+  if (mode === "ungrouped" && (String(asset.author || "").trim() || String(asset.style || "").trim())) return false;
+  if (mode === "author" && !String(asset.author || "").trim()) return false;
+  if (mode === "style" && !String(asset.style || "").trim()) return false;
+  const needle = String(state.assetSearch || "").trim().toLocaleLowerCase("zh-CN");
+  if (!needle) return true;
+  return [asset.name, asset.file_name, asset.author, asset.style, ...(asset.tags || [])].some(value => String(value || "").toLocaleLowerCase("zh-CN").includes(needle));
+}
+
+function assetPreview(asset, compact = false) {
+  const url = assetUrl(asset.preview_url || asset.object_url || asset.url || "");
+  if (!url) return `<div class="asset-preview-empty">暂无预览</div>`;
+  const type = assetTypeLabel(asset);
+  if (type === "SVG") return `<button class="preview-open asset-preview-button" type="button" aria-label="${escapeHtml(asset.name || asset.file_name || "SVG")}，点击放大" data-preview-url="${escapeHtml(url)}" data-preview-title="${escapeHtml(asset.name || asset.file_name || "SVG")}" data-preview-description="SVG 收藏预览。"><img src="${escapeHtml(url)}" alt="${escapeHtml(asset.name || asset.file_name || "SVG")}" loading="lazy" /></button>`;
+  // A blank sandbox keeps user HTML isolated from the library page while still
+  // allowing CSS and markup to render for a useful thumbnail.
+  return `<iframe class="asset-html-preview ${compact ? "is-compact" : ""}" title="${escapeHtml(asset.name || asset.file_name || "HTML")} 预览" src="${escapeHtml(url)}" sandbox="" loading="lazy"></iframe>`;
+}
+
+function assetCard(asset, imported = false) {
+  const author = String(asset.author || "").trim();
+  const style = String(asset.style || "").trim();
+  const tags = Array.isArray(asset.tags) ? asset.tags.filter(Boolean) : [];
+  const objectUrl = assetUrl(asset.object_url || asset.url || "");
+  return `<article class="asset-card ${imported ? "asset-card-imported" : ""}" data-asset-id="${escapeHtml(asset.id || asset.sha256 || "")}">
+    <div class="asset-card-preview">${assetPreview(asset, imported)}<span class="preview-caption">${assetTypeLabel(asset)} · ${asset.bytes ? formatBytes(asset.bytes) : ""}</span></div>
+    <div class="asset-card-body"><div class="asset-card-head"><label class="item-heading">${imported ? "" : selectInput("asset", asset.id, `收藏 ${asset.name || asset.file_name}`, savedToCloud(asset))}<span class="theme-title">${escapeHtml(asset.name || asset.file_name || "未命名收藏")}</span></label><span class="badge">${assetTypeLabel(asset)}</span></div>
+      <div class="asset-meta">${escapeHtml(asset.file_name || "")} · SHA ${escapeHtml(String(asset.sha256 || "").slice(0, 12))}</div>
+      <div class="asset-classifications">${author ? `<span class="category-chip">作者：${escapeHtml(author)}</span>` : `<span class="category-chip is-empty">未分作者</span>`}${style ? `<span class="category-chip">风格：${escapeHtml(style)}</span>` : `<span class="category-chip is-empty">未分风格</span>`}${tags.map(tag => `<span class="category-chip">#${escapeHtml(tag)}</span>`).join("")}</div>
+      <form class="asset-meta-form" data-record-form="${escapeHtml(asset.id || "")}" data-record-kind="asset"><div class="asset-meta-fields"><label>作者<input name="author" value="${escapeHtml(author)}" placeholder="作者" /></label><label>风格<input name="style" value="${escapeHtml(style)}" placeholder="风格" /></label><label>标签<input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="标签，用逗号分隔" /></label></div><button class="text-button" type="submit">保存分类</button></form>
+    </div><div class="asset-actions"><button class="text-button sync-asset" data-id="${escapeHtml(asset.id || "")}" data-completed="${savedToCloud(asset)}">${savedToCloud(asset) ? "R2 已保存" : "同步到 R2"}</button>${objectUrl ? `<a class="download-link" href="${escapeHtml(objectUrl)}" download="${escapeHtml(asset.file_name || asset.name || "asset")}">下载原文件</a>` : ""}</div>
+  </article>`;
+}
+
+function renderAssets() {
+  const list = $("#assetList");
+  const visible = state.assets.filter(assetMatchesFilter);
+  $("#assetCount").textContent = `${state.assets.length} 个收藏`;
+  $("#assetEmpty").hidden = visible.length > 0;
+  list.innerHTML = visible.map(asset => assetCard(asset)).join("");
+  $$(".asset-filters .filter-chip").forEach(button => button.classList.toggle("is-active", button.dataset.assetFilter === state.assetFilter));
+  $$(".sync-asset").forEach(button => button.addEventListener("click", () => syncAsset(button.dataset.id)));
+  updateBulkControls();
+}
+
+function renderImportedAssets() {
+  const assets = state.importAssetIds.map(id => state.assets.find(asset => asset.id === id)).filter(Boolean);
+  $("#assetImportResults").hidden = !assets.length;
+  $("#assetBatchDescription").textContent = `本批 ${assets.length} 个收藏；此前收录的文件在收藏库中单独查看。`;
+  $("#importedAssetList").innerHTML = assets.map(asset => assetCard(asset, true)).join("");
+}
+
+async function loadAssets(force = false) {
+  let records = [];
+  if (browserSyncEnabled()) records = await loadBrowserLibraryRecords(force);
+  else {
+    // The legacy local service predates SVG/HTML collections. Keep its other
+    // pages usable instead of surfacing a noisy 404 during app startup.
+    try { records = (await api("/api/assets")).items || []; }
+    catch (error) { if (!/404|Not found|不存在/i.test(String(error?.message || ""))) throw error; }
+  }
+  const latest = new Map();
+  records.filter(item => item.kind === "asset" || item.asset_type === "svg" || item.asset_type === "html").forEach(item => {
+    const key = item.id || item.sha256;
+    const current = latest.get(key);
+    const nextTime = Date.parse(item.updated_at || item.created_at || "") || 0;
+    const currentTime = Date.parse(current?.updated_at || current?.created_at || "") || 0;
+    if (!current || nextTime >= currentTime) latest.set(key, item);
+  });
+  state.assets = [...latest.values()];
+  renderAssets();
+  renderImportedAssets();
+}
+
+async function saveAssetClassification(form) { return saveRecordClassification(form); }
+
+async function saveRecordClassification(form) {
+  const kind = form.dataset.recordKind;
+  const id = form.dataset.recordForm;
+  const collection = kind === "theme" ? state.themes : kind === "font" ? state.fonts : state.assets;
+  const record = collection.find(item => item.id === id);
+  if (!record || state.operation) return;
+  const fields = new FormData(form);
+  const next = {
+    ...record,
+    author: String(fields.get("author") || "").trim(),
+    style: String(fields.get("style") || "").trim(),
+    tags: String(fields.get("tags") || "").split(",").map(tag => tag.trim()).filter(Boolean),
+    updated_at: new Date().toISOString(),
+  };
+  setOperation("record-classification");
+  try {
+    const result = await api(`/api/${recordKindPath(kind)}/${encodeURIComponent(id)}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ author: next.author, style: next.style, tags: next.tags }),
+    });
+    Object.assign(next, result.item || result.record || result.asset || {});
+    if (browserSyncEnabled()) invalidateBrowserLibraryRecords();
+    const index = collection.findIndex(item => item.id === id);
+    if (index >= 0) collection[index] = next;
+    if (kind === "theme") renderThemes(); else if (kind === "font") renderFonts(); else renderAssets();
+    toast("分类已保存");
+  } catch (error) { toast(`分类保存失败：${error.message}`); }
+  finally { setOperation(""); }
 }
 
 function renderImportedFonts() {
@@ -602,7 +736,7 @@ function jobTitle(job) {
   if (job.action === "commit-themes") return "主题入库";
   if (job.action === "sync-all") return "全部资产同步";
   if (job.action === "archive-probe") return "123 备份验证";
-  return job.kind === "font" ? "字体同步" : "主题同步";
+  return job.kind === "font" ? "字体同步" : job.kind === "asset" ? "收藏同步" : "主题同步";
 }
 function jobStatus(job) {
   return { queued: "等待处理", running: "正在处理", completed: "已完成", partial: "部分失败", failed: "处理失败" }[job.status] || "等待处理";
@@ -695,9 +829,19 @@ async function loadBrowserLibraryRecords(force = false) {
       records.push(...(data.items || data.records || []));
       cursor = data.cursor || "";
     } while (cursor);
-    browserLibraryRecordsCache = records;
+    // A classification edit writes a new immutable record with the same
+    // stable id. Pick the newest record before any library view consumes it.
+    const latest = new Map();
+    for (const record of records) {
+      const key = `${record.kind || "unknown"}:${record.id || record.sha256 || JSON.stringify(record)}`;
+      const current = latest.get(key);
+      const nextTime = Date.parse(record.updated_at || record.created_at || "") || 0;
+      const currentTime = Date.parse(current?.updated_at || current?.created_at || "") || 0;
+      if (!current || nextTime >= currentTime) latest.set(key, record);
+    }
+    browserLibraryRecordsCache = [...latest.values()];
     browserLibraryRecordsLoadedAt = Date.now();
-    return records;
+    return browserLibraryRecordsCache;
   })();
   try { return await browserLibraryRecordsPromise; }
   finally { browserLibraryRecordsPromise = undefined; }
@@ -752,7 +896,7 @@ async function loadStorage() {
 
 function renderStorageSummary(data) {
   if (data.mode === "browser-local") {
-    $("#storageInventory").innerHTML = `<div class="inventory-row"><div><strong>共享 R2 库</strong><span>记录、压缩主题、字体和预览</span></div><div><strong>同一 Worker</strong><span>手机与电脑共用</span></div></div><p class="inventory-summary">免费模式：压缩、重新封包、预览和 SHA-256 查重都在当前浏览器执行；Worker 只负责 R2 对象读写和记录索引。</p>`;
+    $("#storageInventory").innerHTML = `<div class="inventory-row"><div><strong>共享 R2 库</strong><span>记录、压缩主题、字体、SVG / HTML 收藏和预览</span></div><div><strong>同一 Worker</strong><span>手机与电脑共用</span></div></div><p class="inventory-summary">免费模式：压缩、重新封包、预览和 SHA-256 查重都在当前浏览器执行；Worker 只负责 R2 对象读写和记录索引。</p>`;
     $("#storageDestination").textContent = "Cloudflare R2：通过当前同步 API 公开读取、令牌写入。原始 RED 目前按确认后的压缩/原样对象保存。";
     $("#storageHint").textContent = "浏览器本地处理 · 多设备共享 R2";
     $("#storageState").textContent = "免费浏览器同步已启用";
@@ -768,8 +912,8 @@ function renderStorageSummary(data) {
   const archive = data.archive || {};
   const status = data.status || {};
   const local = status.local || {};
-  const rows = [["原始 RED", "originals", "data/originals/"], ["压缩 RED", "compressed", "data/compressed/"], ["主题预览", "previews", "data/previews/"], ["原始字体", "fonts", "data/fonts/"]];
-  $("#storageInventory").innerHTML = rows.map(([label, key, path]) => `<div class="inventory-row"><div><strong>${label}</strong><span>${escapeHtml(local[key]?.path || path)}</span></div><div><strong>${Number(local[key]?.count || 0).toLocaleString()} 个文件</strong><span>${formatBytes(Number(local[key]?.bytes || 0))}</span></div></div>`).join("") + `<p class="inventory-summary">库清单：${Number(status.themes || 0)} 个主题、${Number(status.fonts || 0)} 个字体。已读取云端：${Number(status.remoteThemes || 0)} 个主题、${Number(status.remoteFonts || 0)} 个字体。</p>`;
+  const rows = [["原始 RED", "originals", "data/originals/"], ["压缩 RED", "compressed", "data/compressed/"], ["主题预览", "previews", "data/previews/"], ["原始字体", "fonts", "data/fonts/"], ["SVG / HTML 收藏", "assets", "data/assets/"]];
+  $("#storageInventory").innerHTML = rows.map(([label, key, path]) => `<div class="inventory-row"><div><strong>${label}</strong><span>${escapeHtml(local[key]?.path || path)}</span></div><div><strong>${Number(local[key]?.count || 0).toLocaleString()} 个文件</strong><span>${formatBytes(Number(local[key]?.bytes || 0))}</span></div></div>`).join("") + `<p class="inventory-summary">库清单：${Number(status.themes || 0)} 个主题、${Number(status.fonts || 0)} 个字体、${Number(status.assets || 0)} 个收藏。已读取云端：${Number(status.remoteThemes || 0)} 个主题、${Number(status.remoteFonts || 0)} 个字体、${Number(status.remoteAssets || 0)} 个收藏。</p>`;
   const r2 = library.provider === "cloudflare_r2";
   const prefix = (library.rootPath || "").replace(/^\/+|\/+$/g, "");
   const archiveLocation = archive.provider === "r2_library" ? `R2 原包目录 ${(archive.rootPath || "originals").replace(/^\/+|\/+$/g, "")}/` : archive.provider === "123pan" ? `123 云盘 ${(archive.rootPath || "Red-Garden-Backup").replace(/^\/+|\/+$/g, "")}/` : archive.provider === "123pan_webdav" ? "旧 WebDAV 服务" : "本地独立目录";
@@ -968,10 +1112,11 @@ async function commitThemes(ids = [...selections.review]) {
 
 async function syncTheme(themeId) { return syncSelectedAssets("theme", [themeId]); }
 async function syncFont(fontId) { return syncSelectedAssets("font", [fontId]); }
+async function syncAsset(assetId) { return syncSelectedAssets("asset", [assetId]); }
 async function syncSelectedAssets(kind, ids = [...selections[kind]]) {
   if (state.operation || !r2Enabled() || storageDirty || !ids.length) return;
   if (browserSyncEnabled()) {
-    const output = $(kind === "theme" ? "#themeBatchStatus" : "#fontBatchStatus");
+    const output = $(kind === "theme" ? "#themeBatchStatus" : kind === "font" ? "#fontBatchStatus" : "#assetBatchStatus");
     operationMessage(output, "免费浏览器模式会在导入/确认时直接上传到 R2；已有记录无需再次排队。", false);
     ids.forEach(id => selections[kind].delete(id));
     updateBulkControls();
@@ -980,14 +1125,14 @@ async function syncSelectedAssets(kind, ids = [...selections[kind]]) {
   const eligible = new Set(eligibleIds(kind));
   const chosen = [...new Set(ids)].filter(id => eligible.has(id));
   if (!chosen.length) return;
-  const output = $(kind === "theme" ? "#themeBatchStatus" : "#fontBatchStatus");
+  const output = $(kind === "theme" ? "#themeBatchStatus" : kind === "font" ? "#fontBatchStatus" : "#assetBatchStatus");
   setOperation("enqueue");
   try {
     const result = await api("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "sync", kind, ids: chosen }) });
     rememberJob(result.job);
     chosen.forEach(id => selections[kind].delete(id));
     operationMessage(output, `${chosen.length} 项已加入后台同步，可切换页面或关闭网页。进度在“后台任务”中查看。`);
-    renderThemes(); renderFonts(); renderJobs();
+    renderThemes(); renderFonts(); renderAssets(); renderJobs();
     toast("已加入后台同步队列");
     loadJobs().catch(() => {});
   } catch (error) { operationMessage(output, error.message, true); toast(error.message); }
@@ -1091,6 +1236,93 @@ async function importFonts(files) {
     operationMessage(output, message, Boolean(warning));
     toast(message);
   } catch (error) { operationMessage(output, `字体导入失败：${error.message}`, true); toast(error.message); }
+  finally { setOperation(""); }
+}
+
+function assetExtension(file) {
+  const match = String(file?.name || "").toLowerCase().match(/\.([a-z0-9]+)$/);
+  return match?.[1] === "htm" ? "html" : match?.[1] || "";
+}
+
+async function importAssets(files) {
+  if (state.operation) { toast("请等待当前批次处理完成"); return; }
+  const valid = [...files].filter(file => ["svg", "html", "htm"].includes(assetExtension(file)));
+  if (!valid.length) { toast("请选择 SVG、HTML 或 HTM 文件"); return; }
+  state.importAssetIds = [];
+  saveSessionIds("reeden-import-assets", []);
+  renderImportedAssets();
+  setOperation("asset-import");
+  const output = $("#assetImportStatus");
+  output.hidden = false;
+  let duplicates = 0;
+  try {
+    const hashes = new Set(state.assets.map(asset => asset.sha256).filter(Boolean));
+    const unique = [];
+    const hashed = await mapConcurrent(valid, 4, async file => {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      if (!crypto.subtle) throw new Error("当前环境不支持 SHA-256，无法安全去重");
+      const hash = await crypto.subtle.digest("SHA-256", bytes).then(value => [...new Uint8Array(value)].map(byte => byte.toString(16).padStart(2, "0")).join(""));
+      return { file, bytes, hash };
+    });
+    for (const item of hashed) {
+      if (item.hash && hashes.has(item.hash)) { duplicates++; continue; }
+      if (item.hash) hashes.add(item.hash);
+      unique.push(item);
+    }
+    if (!unique.length) { operationMessage(output, `全部 ${duplicates} 个收藏已存在，未重复上传。`); toast("所选收藏均已存在"); return; }
+    if (browserSyncEnabled()) {
+      const codec = await browserCodec();
+      let finished = 0;
+      const uploaded = await mapConcurrent(unique, 2, async ({file, bytes, hash}) => {
+        try {
+          const extension = assetExtension(file);
+          const mime = extension === "svg" ? "image/svg+xml" : "text/html; charset=utf-8";
+          const objectPath = await uploadBrowserObject("assets", hash, extension, bytes, mime);
+          let previewPath = "";
+          if (extension === "svg") {
+            try {
+              const previewBlob = await imagePreviewBlob(bytes, "image/svg+xml");
+              const previewBytes = await jpegBytesFromBlob(previewBlob);
+              if (previewBytes) {
+                const previewSha = await codec.sha256Hex(previewBytes);
+                previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg");
+              }
+            } catch { /* The SVG remains downloadable if thumbnail creation fails. */ }
+          }
+          const record = await uploadBrowserRecord({
+            kind: "asset", id: `asset-${hash.slice(0, 16)}`, asset_type: extension === "svg" ? "svg" : "html", extension,
+            file_name: file.name, name: file.name.replace(/\.[^.]+$/, ""), author: "", style: "", tags: [], sha256: hash, bytes: bytes.length,
+            mime, object_url: objectPath, url: objectPath, preview_url: previewPath, saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
+          }, codec);
+          operationMessage(output, `已上传收藏 ${++finished} / ${unique.length}…`);
+          return record;
+        } catch (error) { operationMessage(output, `已完成收藏 ${++finished} / ${unique.length}（有一项失败）…`); return { error, file }; }
+      });
+      const added = uploaded.filter(item => !item?.error);
+      const failures = uploaded.filter(item => item?.error);
+      if (!added.length && failures.length) throw failures[0].error;
+      state.assets = [...added, ...state.assets];
+      state.importAssetIds = added.map(asset => asset.id);
+      saveSessionIds("reeden-import-assets", state.importAssetIds);
+      renderAssets(); renderImportedAssets();
+      const message = `已上传 ${added.length} 个收藏，重复跳过 ${duplicates} 个${failures.length ? `，失败 ${failures.length} 个` : ""}。`;
+      operationMessage(output, message, Boolean(failures.length)); toast(message);
+      return;
+    }
+    operationMessage(output, `查重完成，正在接收 ${unique.length} 个新收藏…`);
+    const body = new FormData();
+    unique.forEach(({file}) => body.append("file", file, file.name));
+    const result = await api("/api/assets/import?background=1", { method: "POST", body });
+    state.importAssetIds = (result.added || []).map(asset => asset.id);
+    saveSessionIds("reeden-import-assets", state.importAssetIds);
+    if (result.job) rememberJob(result.job);
+    await loadAssets();
+    renderJobs();
+    const warning = resultWarning(result);
+    const message = `已加入 ${result.added?.length || 0} 个收藏，重复跳过 ${duplicates + (result.skipped?.length || 0)} 个。${result.job ? "同步已交给后台，可以离开此页。" : ""}${warning ? ` ${warning}` : ""}`;
+    operationMessage(output, message, Boolean(warning));
+    toast(message);
+  } catch (error) { operationMessage(output, `收藏导入失败：${error.message}`, true); toast(error.message); }
   finally { setOperation(""); }
 }
 
@@ -1311,14 +1543,23 @@ $("#fontInput").addEventListener("change", async e => { await importFonts(e.targ
 $("#fontFolderInput").addEventListener("change", async e => { await importFonts(e.target.files); e.target.value = ""; });
 setupDropZone($("#fontDropZone"), importFonts);
 $("#fontDropZone").addEventListener("click", () => { if (!state.operation) $("#fontInput").click(); });
+$("#chooseAssets").addEventListener("click", () => $("#assetInput").click());
+$("#chooseAssetFolder").addEventListener("click", () => $("#assetFolderInput").click());
+$("#assetInput").addEventListener("change", async e => { await importAssets(e.target.files); e.target.value = ""; });
+$("#assetFolderInput").addEventListener("change", async e => { await importAssets(e.target.files); e.target.value = ""; });
+setupDropZone($("#assetDropZone"), importAssets);
+$("#assetDropZone").addEventListener("click", () => { if (!state.operation) $("#assetInput").click(); });
 $("#refreshThemes").addEventListener("click", () => loadThemes(true));
 $("#refreshFonts").addEventListener("click", () => loadFonts(true));
+$("#refreshAssets").addEventListener("click", () => loadAssets(true));
 $("#selectAllReview").addEventListener("change", event => toggleAll("review", event.target.checked));
 $("#selectAllThemes").addEventListener("change", event => toggleAll("theme", event.target.checked));
 $("#selectAllFonts").addEventListener("change", event => toggleAll("font", event.target.checked));
+$("#selectAllAssets").addEventListener("change", event => toggleAll("asset", event.target.checked));
 $("#commitSelectedThemes").addEventListener("click", () => commitThemes());
 $("#syncSelectedThemes").addEventListener("click", () => syncSelectedAssets("theme"));
 $("#syncSelectedFonts").addEventListener("click", () => syncSelectedAssets("font"));
+$("#syncSelectedAssets").addEventListener("click", () => syncSelectedAssets("asset"));
 document.addEventListener("change", event => {
   const input = event.target.closest("[data-selection]");
   if (!input || state.operation) return;
@@ -1337,9 +1578,11 @@ $$("[data-import-kind]").forEach(button => {
   button.addEventListener("keydown", event => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
-    const kind = event.key === "Home" ? "theme" : event.key === "End" ? "font" : state.importKind === "theme" ? "font" : "theme";
+    const kinds = ["theme", "font", "asset"];
+    const current = kinds.indexOf(state.importKind);
+    const kind = event.key === "Home" ? kinds[0] : event.key === "End" ? kinds[kinds.length - 1] : kinds[(current + (event.key === "ArrowLeft" ? -1 : 1) + kinds.length) % kinds.length];
     setImportKind(kind);
-    $(kind === "theme" ? "#themeImportTab" : "#fontImportTab").focus();
+    $(`#${kind}ImportTab`).focus();
   });
 });
 document.addEventListener("click", event => {
@@ -1350,6 +1593,15 @@ document.addEventListener("click", event => {
   const button = event.target.closest(".preview-open");
   if (button) showPreview(button);
 });
+document.addEventListener("submit", event => {
+  const form = event.target.closest("[data-asset-form]");
+  if (form) { event.preventDefault(); saveAssetClassification(form); }
+  const recordForm = event.target.closest("[data-record-form]");
+  if (recordForm) { event.preventDefault(); saveRecordClassification(recordForm); }
+});
+$$('[data-asset-filter]').forEach(button => button.addEventListener("click", () => { state.assetFilter = button.dataset.assetFilter || "all"; renderAssets(); }));
+$("#assetSearchInput").addEventListener("input", event => { state.assetSearch = event.target.value; renderAssets(); });
+$("#addAssetButton").addEventListener("click", () => { setView("import"); setImportKind("asset"); });
 $("#closePreviewDialog").addEventListener("click", () => $("#previewDialog").close());
 $("#previewDialog").addEventListener("click", event => {
   if (event.target !== event.currentTarget) return;
@@ -1396,7 +1648,7 @@ window.addEventListener("hashchange", () => {
 (async () => {
   try {
     await loadStorage();
-    await Promise.all([loadThemes(), loadFonts(), ...(browserSyncEnabled() ? [] : [loadPendingThemes()])]);
+    await Promise.all([loadThemes(), loadFonts(), loadAssets(), ...(browserSyncEnabled() ? [] : [loadPendingThemes()])]);
   } catch (error) { toast(error.message); }
 })();
 loadJobs().catch(() => {});

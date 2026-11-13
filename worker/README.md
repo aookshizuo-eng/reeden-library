@@ -9,6 +9,7 @@ originals/<SHA-256>.red
 compressed/<SHA-256>.red
 fonts/<SHA-256>.<ttf|otf|woff|woff2>
 previews/<SHA-256>.jpg
+assets/<SHA-256>.<svg|html>
 records/<SHA-256>.json
 ```
 
@@ -29,11 +30,13 @@ GET 读取可以公开；PUT 上传需要 `Authorization: Bearer <SYNC_WRITE_TOK
 - `GET /healthz`：返回 `{ "ok": true }`。
 - `GET /api/library`：读取 `records/`，支持 `?cursor=`。
 - `GET /api/themes` / `GET /api/fonts`：从共享记录中过滤主题或字体。
+- `GET /api/assets`：从共享记录中过滤 SVG/HTML 收藏。
 - `GET /api/storage`：返回 `browser-local` 同步模式；用于让前端明确显示当前没有云端后台任务。
 - `GET /api/jobs`：返回空任务列表和本地处理说明。
 - `POST /api/jobs`：返回 501，明确拒绝创建云端后台任务，不伪造成功状态。
 - `GET /api/objects/<kind>/<sha>.<ext>`：读取对象。
 - `PUT` 或 `POST /api/objects/<kind>/<sha>.<ext>`：上传对象，Worker 会读取内容并校验 SHA-256。PUT 是标准方法，POST 用于兼容部分手机 WebView 或代理对 PUT 返回 405 的情况。
+- `PATCH /api/assets/<id>`、`PATCH /api/themes/<id>`、`PATCH /api/fonts/<id>`：更新作者、风格和标签；记录以新的内容寻址 JSON 保存，原文件不会重复上传。
 - `OPTIONS ...`：返回配置的 CORS 头。
 
 上传大小默认为 96 MiB，最多可通过 `MAX_UPLOAD_BYTES` 调到 100 MiB。手机上传时建议分批，一个主题完成后再上传下一个。
