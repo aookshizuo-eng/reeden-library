@@ -44,7 +44,7 @@ function corsHeaders(request, env) {
   if (!origin || !allowed.includes(origin)) return {};
   return {
     "Access-Control-Allow-Origin": origin,
-    "Access-Control-Allow-Methods": "GET,HEAD,PUT,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,HEAD,PUT,POST,OPTIONS",
     "Access-Control-Allow-Headers": "Authorization,Content-Type,Content-Length",
     "Access-Control-Max-Age": "600",
     Vary: "Origin",
@@ -201,8 +201,8 @@ export async function handle(request, env) {
     return json({error: "此免费模式不提供云端后台队列", ...LOCAL_PROCESSING_NOTICE}, 501, request, env);
   }
   const spec = objectSpec(url.pathname);
-  if (!spec || !["GET", "HEAD", "PUT"].includes(request.method)) return json({error: "Not found"}, 404, request, env);
-  if (request.method === "PUT") return putObject(request, env, spec);
+  if (!spec || !["GET", "HEAD", "PUT", "POST"].includes(request.method)) return json({error: "Not found"}, 404, request, env);
+  if (request.method === "PUT" || request.method === "POST") return putObject(request, env, spec);
   return getObject(request, env, spec);
 }
 

@@ -41,14 +41,20 @@ function apiUrl(path) {
   if (/^(?:https?:|data:|blob:)/i.test(String(path))) return String(path);
   return `${apiBase}${String(path).startsWith("/") ? path : `/${path}`}`;
 }
+function staticHostedWithoutApi() {
+  const host = String(window.location.hostname || "").toLowerCase();
+  return !apiBase && window.location.protocol === "https:" && (host.endsWith(".github.io") || host.endsWith(".pages.dev"));
+}
 function assetUrl(path) { return path ? apiUrl(path) : ""; }
 function updateRuntimeMode() {
   const label = $("#runtimeModeLabel");
-  if (label) label.textContent = remoteUnavailable ? "本地浏览器处理模式" : apiBase ? "设备同步模式 · R2 API" : "本地处理模式";
+  if (label) label.textContent = remoteUnavailable ? "本地浏览器处理模式" : apiBase ? "设备同步模式 · R2 API" : staticHostedWithoutApi() ? "等待连接同步 Worker" : "本地处理模式";
   const note = $("#staticModeNote");
   if (note) {
-    note.hidden = !apiBase && !remoteUnavailable;
-    note.textContent = remoteUnavailable
+    note.hidden = !apiBase && !remoteUnavailable && !staticHostedWithoutApi();
+    note.textContent = staticHostedWithoutApi()
+      ? "当前 APK/静态网页没有本机后端。请在“存储设置 → 多设备访问”填写 Cloudflare Worker 地址和同步 Token 后，手机与电脑才会共用 R2。"
+      : remoteUnavailable
       ? (freeCodecReady() ? "同步 API 暂时不可用，已切换为本地浏览器处理模式。处理结果会在 API 恢复后同步；页面关闭会暂停本地任务。" : "同步 API 不可用；本地浏览器处理器尚未加载，未执行压缩或上传。请清除同步地址使用电脑本地服务，或稍后重试。")
       : "当前为多设备同步模式：手机和电脑共用同一个 API 与 R2。压缩和重新封包在当前设备浏览器中进行，页面关闭后处理会暂停。";
   }
@@ -167,6 +173,9 @@ function toast(message) {
 }
 
 async function api(path, options = {}) {
+  if (staticHostedWithoutApi()) {
+    throw new Error("当前 APK/静态网页尚未连接同步 Worker；请到“存储设置 → 多设备访问”填写 Worker 地址和同步 Token");
+  }
   if (apiBase && remoteUnavailable) throw new Error("同步 API 不可用，未执行远程操作；请检查地址或清除同步地址使用本机服务");
   const request = { ...options, headers: requestHeaders(options.headers || {}) };
   let response;
@@ -177,6 +186,11 @@ async function api(path, options = {}) {
   }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 405) {
+      const message = "同步地址返回 405：请在“设置 → 多设备访问”填写 Cloudflare Worker 的 workers.dev 地址，而不是 GitHub Pages 网页地址或 Cloudflare 控制台地址；修改 Worker 后还要重新部署。";
+      if (apiBase) markRemoteUnavailable(message);
+      throw new Error(message);
+    }
     if (apiBase && [404, 405, 502, 503].includes(response.status)) {
       markRemoteUnavailable(`HTTP ${response.status}`);
       throw new Error(`同步 API 暂不可用（HTTP ${response.status}），未执行压缩或上传`);
@@ -199,9 +213,21 @@ async function browserCodec() {
 
 async function uploadBrowserObject(kind, sha, extension, body, contentType) {
   const path = `/api/objects/${encodeURIComponent(kind)}/${encodeURIComponent(sha)}.${extension}`;
-  const response = await fetch(apiUrl(path), { method: "PUT", headers: requestHeaders({ "Content-Type": contentType || "application/octet-stream" }), body });
+  const request = (method) => fetch(apiUrl(path), {
+    method,
+    headers: requestHeaders({ "Content-Type": contentType || "application/octet-stream" }),
+    body,
+  });
+  // PUT is the canonical R2 object method. A few WebView proxies and older
+  // Worker deployments reject PUT with 405; retrying as POST keeps the same
+  // content-addressed endpoint while the Worker accepts both methods.
+  let response = await request("PUT");
+  if (response.status === 405) response = await request("POST");
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
+    if (response.status === 405) {
+      throw new Error("同步 API 返回 405：请确认填写的是 Worker 地址而不是 Pages 或 Cloudflare 控制台地址，并重新部署最新 Worker");
+    }
     throw new Error(data.error || `上传失败（${response.status}）`);
   }
   return path;

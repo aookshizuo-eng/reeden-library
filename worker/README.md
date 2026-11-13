@@ -33,7 +33,7 @@ GET 读取可以公开；PUT 上传需要 `Authorization: Bearer <SYNC_WRITE_TOK
 - `GET /api/jobs`：返回空任务列表和本地处理说明。
 - `POST /api/jobs`：返回 501，明确拒绝创建云端后台任务，不伪造成功状态。
 - `GET /api/objects/<kind>/<sha>.<ext>`：读取对象。
-- `PUT /api/objects/<kind>/<sha>.<ext>`：上传对象，Worker 会读取内容并校验 SHA-256。
+- `PUT` 或 `POST /api/objects/<kind>/<sha>.<ext>`：上传对象，Worker 会读取内容并校验 SHA-256。PUT 是标准方法，POST 用于兼容部分手机 WebView 或代理对 PUT 返回 405 的情况。
 - `OPTIONS ...`：返回配置的 CORS 头。
 
 上传大小默认为 96 MiB，最多可通过 `MAX_UPLOAD_BYTES` 调到 100 MiB。手机上传时建议分批，一个主题完成后再上传下一个。
