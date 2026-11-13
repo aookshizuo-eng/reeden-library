@@ -531,7 +531,7 @@ function updateBulkControls() {
     input.closest("article")?.classList.toggle("is-selected", input.checked);
   });
   $$(".sync-theme, .sync-font, .sync-asset").forEach(button => { const kind = button.classList.contains("sync-font") ? "font" : button.classList.contains("sync-asset") ? "asset" : "theme"; button.disabled = Boolean(state.operation) || !r2Enabled() || storageDirty || button.dataset.completed === "true" || isAssetBusy(kind, button.dataset.id); });
-  $$(".commit-theme, .discard-review, .rebuild-preview, #chooseThemes, #chooseThemeFolder, #indexThemeFolder, #addThemeButton, #chooseFonts, #chooseFontFolder, #chooseAssets, #chooseAssetFolder, #addAssetButton, #scanButton, #indexExistingCloud, #storageForm button[type='submit']").forEach(button => { button.disabled = Boolean(state.operation); });
+  $$(".commit-theme, .discard-review, .rebuild-preview, #chooseThemes, #chooseThemeFolder, #indexThemeFolder, #addThemeButton, #chooseFonts, #chooseFontFolder, #chooseAssets, #chooseAssetFolder, #addAssetButton, #chooseUnifiedFiles, #chooseUnifiedFolder, #scanButton, #indexExistingCloud, #storageForm button[type='submit']").forEach(button => { button.disabled = Boolean(state.operation); });
   $$(".rebuild-preview").forEach(button => { button.disabled = Boolean(state.operation) || isAssetBusy("theme", button.dataset.id); });
   $("#storageForm button[type='submit']").disabled = Boolean(state.operation) || activeJobs().length > 0;
   $$(".commit-theme").forEach(button => { button.disabled = Boolean(state.operation) || storageDirty; button.title = storageDirty ? "请先保存存储设置" : ""; });
@@ -565,9 +565,6 @@ function setView(view) {
 }
 function setImportKind(kind) {
   state.importKind = kind;
-  $("#themeImportPane").hidden = kind !== "theme";
-  $("#fontImportPane").hidden = kind !== "font";
-  $("#assetImportPane").hidden = kind !== "asset";
   $$("[data-import-kind]").forEach(button => {
     const selected = button.dataset.importKind === kind;
     button.classList.toggle("is-active", selected);
@@ -1570,6 +1567,30 @@ function setupDropZone(element, onFiles) {
   element.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); element.click(); } });
 }
 
+async function importUnifiedFiles(fileList) {
+  if (state.operation) { toast("请等待当前批次处理完成"); return; }
+  const groups = { theme: [], font: [], asset: [] }, unsupported = [];
+  for (const file of [...(fileList || [])]) {
+    const extension = String(file.name || "").toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] || "";
+    if (extension === "red") groups.theme.push(file);
+    else if (["ttf", "otf", "woff", "woff2"].includes(extension)) groups.font.push(file);
+    else if (["svg", "html", "htm"].includes(extension)) groups.asset.push(file);
+    else unsupported.push(file.name || "未命名文件");
+  }
+  const total = groups.theme.length + groups.font.length + groups.asset.length;
+  const status = $("#unifiedImportStatus");
+  status.hidden = false;
+  if (!total) {
+    operationMessage(status, `没有识别到支持的后缀：${unsupported.join("、") || "请拖入文件"}`, true);
+    return;
+  }
+  operationMessage(status, `已识别 ${groups.theme.length} 个主题、${groups.font.length} 个字体、${groups.asset.length} 个收藏，正在依次处理…`);
+  if (groups.theme.length) await analyzeFiles(groups.theme);
+  if (groups.font.length) await importFonts(groups.font);
+  if (groups.asset.length) await importAssets(groups.asset);
+  operationMessage(status, `本批已分流：${groups.theme.length} 个主题、${groups.font.length} 个字体、${groups.asset.length} 个收藏。${unsupported.length ? `已跳过不支持的文件：${unsupported.join("、")}` : ""}`, Boolean(unsupported.length));
+}
+
 $("#chooseThemes").addEventListener("click", () => $("#themeInput").click());
 $("#chooseThemeFolder").addEventListener("click", () => $("#themeFolderInput").click());
 $("#indexThemeFolder").addEventListener("click", () => $("#existingThemeFolderInput").click());
@@ -1591,6 +1612,12 @@ $("#assetInput").addEventListener("change", async e => { await importAssets(e.ta
 $("#assetFolderInput").addEventListener("change", async e => { await importAssets(e.target.files); e.target.value = ""; });
 setupDropZone($("#assetDropZone"), importAssets);
 $("#assetDropZone").addEventListener("click", () => { if (!state.operation) $("#assetInput").click(); });
+setupDropZone($("#unifiedDropZone"), importUnifiedFiles);
+$("#unifiedDropZone").addEventListener("click", () => { if (!state.operation) $("#unifiedInput").click(); });
+$("#unifiedInput").addEventListener("change", async event => { await importUnifiedFiles(event.target.files); event.target.value = ""; });
+$("#chooseUnifiedFiles").addEventListener("click", () => { if (!state.operation) $("#unifiedInput").click(); });
+$("#chooseUnifiedFolder").addEventListener("click", () => { if (!state.operation) $("#unifiedFolderInput").click(); });
+$("#unifiedFolderInput").addEventListener("change", async event => { await importUnifiedFiles(event.target.files); event.target.value = ""; });
 $("#refreshThemes").addEventListener("click", () => loadThemes(true));
 $("#refreshFonts").addEventListener("click", () => loadFonts(true));
 $("#refreshAssets").addEventListener("click", () => loadAssets(true));
@@ -1643,7 +1670,7 @@ document.addEventListener("submit", event => {
 });
 $$('[data-asset-filter]').forEach(button => button.addEventListener("click", () => { state.assetFilter = button.dataset.assetFilter || "all"; renderAssets(); }));
 $("#assetSearchInput").addEventListener("input", event => { state.assetSearch = event.target.value; renderAssets(); });
-$("#addAssetButton").addEventListener("click", () => { setView("import"); setImportKind("asset"); });
+$("#addAssetButton").addEventListener("click", () => { setView("import"); });
 $("#closePreviewDialog").addEventListener("click", () => $("#previewDialog").close());
 $("#previewDialog").addEventListener("click", event => {
   if (event.target !== event.currentTarget) return;

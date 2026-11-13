@@ -27,7 +27,7 @@ const preview = await ReedenFreeCodec.fontPreview(file, { text: "Aa 中文 0123"
 document.querySelector("img").src = URL.createObjectURL(preview.blob);
 preview.release();
 
-const result = await ReedenFreeCodec.compressRed(redFile, { quality: 88, maxEdge: 1600 });
+const result = await ReedenFreeCodec.compressRed(redFile, { quality: 88, maxEdge: 2048 });
 const download = URL.createObjectURL(new Blob([result.bytes], { type: "application/octet-stream" }));
 ```
 
@@ -37,7 +37,7 @@ const download = URL.createObjectURL(new Blob([result.bytes], { type: "applicati
 
 ```js
 const worker = new Worker("./free_codec_worker.js");
-worker.postMessage({ id: "one", command: "compressRed", bytes: await file.arrayBuffer(), options: { quality: 88, maxEdge: 1600 } }, [buffer]);
+worker.postMessage({ id: "one", command: "compressRed", bytes: await file.arrayBuffer(), options: { quality: 88, maxEdge: 2048 } }, [buffer]);
 worker.onmessage = ({ data }) => { if (!data.ok) console.error(data.error.code, data.error.message); };
 ```
 

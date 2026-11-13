@@ -43,9 +43,16 @@
         <section class="view" id="importView" data-view-panel="import">
           <div class="title-row"><div><h1>导入文件</h1><p class="lede">主题先查重并确认，字体查重后自动收录。确认后在当前设备处理并同步 R2，已有资源在各自库中查看。</p></div></div>
           <p class="static-mode-note" id="staticModeNote" role="status" hidden></p>
-          <div class="import-tabs" role="tablist" aria-label="导入类型"><button class="import-tab is-active" id="themeImportTab" role="tab" aria-selected="true" aria-controls="themeImportPane" data-import-kind="theme">RED 主题</button><button class="import-tab" id="fontImportTab" role="tab" aria-selected="false" aria-controls="fontImportPane" data-import-kind="font" tabindex="-1">字体文件</button><button class="import-tab" id="assetImportTab" role="tab" aria-selected="false" aria-controls="assetImportPane" data-import-kind="asset" tabindex="-1">SVG / HTML 收藏</button></div>
+          <div class="unified-import" aria-labelledby="unifiedDropTitle">
+            <div class="drop-zone unified-drop-zone" id="unifiedDropZone" tabindex="0" role="button" aria-label="拖入主题、字体或 SVG、HTML 文件">
+              <span class="drop-icon">↓</span><strong id="unifiedDropTitle">把主题、字体或收藏文件拖到这里</strong><span>自动按后缀识别并分流</span><small>.red · .ttf · .otf · .woff · .woff2 · .svg · .html · .htm</small>
+            </div>
+            <div class="ingest-actions unified-actions"><button class="primary-button" id="chooseUnifiedFiles" type="button">选择文件</button><button class="secondary-button" id="chooseUnifiedFolder" type="button">选择文件夹</button></div>
+            <input id="unifiedInput" type="file" accept=".red,.ttf,.otf,.woff,.woff2,.svg,.html,.htm" multiple hidden /><input id="unifiedFolderInput" type="file" accept=".red,.ttf,.otf,.woff,.woff2,.svg,.html,.htm" webkitdirectory multiple hidden />
+            <p class="operation-status unified-import-status" id="unifiedImportStatus" role="status" hidden></p>
+          </div>
           <div id="themeImportPane" role="tabpanel" aria-labelledby="themeImportTab">
-            <section class="ingest-panel" aria-labelledby="ingestTitle">
+            <section class="ingest-panel theme-ingest legacy-import-panel" aria-labelledby="ingestTitle">
               <div class="drop-zone" id="themeDropZone" tabindex="0" role="button" aria-label="拖入 RED 主题文件">
                 <span class="drop-icon">↓</span><strong>把 RED 主题拖到这里</strong><span>支持批量拖入 .red 文件</span><small>也可以点击选择文件</small>
               </div>
@@ -53,7 +60,7 @@
             </section>
             <section class="compression-panel" aria-labelledby="compressionTitle">
               <div class="compression-copy"><h2 id="compressionTitle">RED 图片压缩</h2><p>选择主题并确认后，在当前设备压缩图片、重新封包，再生成书架与书封预览。完成后按存储设置同步。</p><p class="field-help">透明图片保留透明度，动画保留原样；整包没有变小时保留原字节。加密 RED 是否能重新封包取决于当前处理器；免费浏览器模式只识别并明确提示，不会把密文当普通 ZIP。</p></div>
-              <div class="compression-controls"><label>图片质量（1–100）<input id="compressionQuality" type="number" min="1" max="100" step="1" value="88" aria-describedby="compressionQualityHelp" /><span id="compressionQualityHelp">用于 JPEG / WebP，数值越高越清晰。</span></label><label>图片长边上限（像素）<input id="compressionMaxEdge" type="number" min="64" max="8192" step="1" value="1600" aria-describedby="compressionMaxEdgeHelp" /><span id="compressionMaxEdgeHelp">超出时等比缩小；动画与九宫格保留。</span></label></div>
+              <div class="compression-controls"><label>图片质量（1–100）<input id="compressionQuality" type="number" min="1" max="100" step="1" value="88" aria-describedby="compressionQualityHelp" /><span id="compressionQualityHelp">用于 JPEG / WebP，数值越高越清晰。</span></label><label>图片长边上限（像素）<input id="compressionMaxEdge" type="number" min="64" max="8192" step="1" value="2048" aria-describedby="compressionMaxEdgeHelp" /><span id="compressionMaxEdgeHelp">超出时等比缩小；动画与九宫格保留。</span></label></div>
             </section>
           <section class="review-area" id="reviewArea" hidden>
             <div class="section-heading"><div><h2>待确认并压缩</h2><p>确认后压缩图片并重新封包；加密主题保留原有权限。</p></div><span class="review-count" id="reviewCount">0</span></div>
@@ -64,16 +71,16 @@
 
             <section class="import-results" id="themeImportResults" hidden><div class="section-heading"><div><h2>本批压缩与保存结果</h2><p>处理完成后显示压缩前后大小与节省比例。</p></div><button class="text-button" data-open-view="themes">查看主题库</button></div><div id="themeImportJobs" class="job-list"></div><div id="themeCompressionResults" class="compression-results"></div></section>
           </div>
-          <div id="fontImportPane" role="tabpanel" aria-labelledby="fontImportTab" hidden>
-            <section class="ingest-panel font-ingest">
+          <div id="fontImportPane" role="tabpanel" aria-labelledby="fontImportTab">
+            <section class="ingest-panel font-ingest legacy-import-panel">
               <div class="drop-zone" id="fontDropZone" tabindex="0" role="button" aria-label="拖入字体文件"><span class="drop-icon">Aa</span><strong>把字体文件拖到这里</strong><span>TTF、OTF、WOFF、WOFF2</span><small>也可以点击选择文件</small></div>
               <div class="ingest-copy"><h2>加入新字体</h2><p>按 SHA-256 检查本地与云端已有库，重复跳过。新字体自动收录并同步 R2。</p><div class="ingest-actions"><button class="primary-button" id="chooseFonts">选择字体文件</button><button class="secondary-button" id="chooseFontFolder">选择字体文件夹</button><input id="fontInput" type="file" accept=".ttf,.otf,.woff,.woff2" multiple hidden /><input id="fontFolderInput" type="file" accept=".ttf,.otf,.woff,.woff2" webkitdirectory multiple hidden /></div><p class="ingest-note">原字体不压缩，预览使用原文件渲染。</p></div>
             </section>
             <p class="operation-status ingest-status" id="fontImportStatus" role="status" hidden></p>
             <section class="import-results" id="fontImportResults" hidden><div class="section-heading"><div><h2>本批字体</h2><p id="fontBatchDescription">这里只显示这次导入的新字体。</p></div><button class="text-button" data-open-view="fonts">查看字体库</button></div><div id="importedFontList" class="font-list"></div></section>
           </div>
-          <div id="assetImportPane" role="tabpanel" aria-labelledby="assetImportTab" hidden>
-            <section class="ingest-panel asset-ingest">
+          <div id="assetImportPane" role="tabpanel" aria-labelledby="assetImportTab">
+            <section class="ingest-panel asset-ingest legacy-import-panel">
               <div class="drop-zone" id="assetDropZone" tabindex="0" role="button" aria-label="拖入 SVG 或 HTML 文件"><span class="drop-icon">✦</span><strong>把 SVG / HTML 拖到这里</strong><span>支持批量收藏 .svg、.html、.htm</span><small>也可以点击选择文件</small></div>
               <div class="ingest-copy"><h2>加入收藏</h2><p>原文件按 SHA-256 去重并保存到共享 R2。每个收藏可补充作者、风格和标签，之后按分类快速筛选。</p><div class="ingest-actions"><button class="primary-button" id="chooseAssets">选择 SVG / HTML</button><button class="secondary-button" id="chooseAssetFolder">选择收藏文件夹</button><input id="assetInput" type="file" accept=".svg,.html,.htm,image/svg+xml,text/html" multiple hidden /><input id="assetFolderInput" type="file" accept=".svg,.html,.htm,image/svg+xml,text/html" webkitdirectory multiple hidden /></div><p class="ingest-note">SVG 使用安全图片预览；HTML 使用无权限 sandbox 预览，不会在收藏库页面执行脚本。</p></div>
             </section>

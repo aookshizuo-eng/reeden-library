@@ -85,6 +85,13 @@ h3 { font-size: 15px; line-height: 1.3; margin-bottom: 5px; }
 .drop-zone strong { font-size: 18px; color: var(--text); font-weight: 500; }
 .drop-icon { font-size: 32px; margin-bottom: 10px; line-height: 1; color: var(--accent); font-weight: 600; }
 .drop-zone small { color: var(--faint); }
+.unified-import { margin-bottom: 28px; }
+.unified-drop-zone { min-height: 190px; width: 100%; }
+.unified-drop-zone strong { font-size: 20px; }
+.unified-import-status { margin: 10px 2px 0; color: var(--muted); font-size: 12px; }
+.unified-import-status.is-error { color: var(--danger); }
+.legacy-import-panel { display: none; }
+#importView .import-tabs { display: none; }
 
 .review-area, .library-area, .font-area, .asset-area { margin-top: 32px; }
 .section-heading { display: flex; justify-content: space-between; align-items: flex-end; gap: 20px; margin-bottom: 14px; }
