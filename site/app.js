@@ -5,6 +5,7 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 // putting any R2 credential in the browser. The local Python service remains
 // the default when no API base is configured.
 const API_BASE_STORAGE_KEY = "reeden-api-base";
+const FALLBACK_API_BASE = "https://red-garden-sync.pages.dev";
 const SYNC_TOKEN_STORAGE_KEY = "reeden-sync-write-token";
 function normalizeApiBase(value) {
   const text = String(value || "").trim().replace(/\/+$/, "");
@@ -15,7 +16,12 @@ function normalizeApiBase(value) {
     return url.href.replace(/\/$/, "");
   } catch { return ""; }
 }
-let apiBase = normalizeApiBase(window.REEDEN_API_BASE || (() => { try { return localStorage.getItem(API_BASE_STORAGE_KEY) || ""; } catch { return ""; } })());
+let apiBase = normalizeApiBase(window.REEDEN_API_BASE || (() => {
+  try {
+    const saved = localStorage.getItem(API_BASE_STORAGE_KEY) || "";
+    return saved.includes("reeden-library-sync.773541521.workers.dev") ? FALLBACK_API_BASE : saved;
+  } catch { return ""; }
+})());
 let syncToken = (() => { try { return localStorage.getItem(SYNC_TOKEN_STORAGE_KEY) || ""; } catch { return ""; } })();
 let remoteUnavailable = false;
 let freeCodecModule;

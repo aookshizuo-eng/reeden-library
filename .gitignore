@@ -3,3 +3,6 @@ Thumbs.db
 android/manual-build/
 android/compile.err
 worker/.wrangler/
+.wrangler/
+cloudflare-pages/
+pages/.wrangler/

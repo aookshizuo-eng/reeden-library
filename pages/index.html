@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="本地 Reeden 主题与字体资产库" />
+    <title>Red Garden · Reeden 资产库</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-frame">
+      <aside class="sidebar" aria-label="主导航">
+        <div class="brand-mark"><span class="brand-glyph">R</span><span>Red Garden</span></div>
+        <p class="sidebar-note">Reeden 主题资产库</p>
+        <nav class="nav-list">
+          <button class="nav-item is-active" data-view="import"><span class="nav-dot"></span>导入</button>
+          <button class="nav-item" data-view="themes"><span class="nav-dot"></span>主题库</button>
+          <button class="nav-item" data-view="fonts"><span class="nav-dot"></span>字体库</button>
+          <button class="nav-item" data-view="assets"><span class="nav-dot"></span>收藏库</button>
+          <button class="nav-item" data-view="jobs"><span class="nav-dot"></span>后台任务 <span id="jobNavCount" class="nav-count" hidden></span></button>
+          <button class="nav-item" data-view="storage"><span class="nav-dot"></span>存储设置</button>
+        </nav>
+        <div class="sidebar-footer">
+          <span class="status-dot"></span>
+          <span id="runtimeModeLabel">本地处理模式</span>
+        </div>
+      </aside>
+
+      <main class="sheet">
+        <header class="topbar">
+          <button class="mobile-menu" id="mobileMenu" aria-label="打开导航">菜单</button>
+          <div class="crumbs"><span>库</span><span class="crumb-sep">/</span><strong id="topbarTitle">导入</strong></div>
+          <div class="top-actions">
+            <button class="text-button" id="scanButton">导入已有清单</button><input id="indexInput" type="file" accept=".json,application/json" hidden />
+            <button class="primary-button" id="addThemeButton">导入文件</button>
+          </div>
+        </header>
+
+        <section class="job-banner" id="jobBanner" aria-label="后台任务进度" hidden>
+          <div><strong id="jobBannerTitle">后台任务</strong><span id="jobBannerText"></span></div><button class="text-button" id="openJobs">查看任务</button>
+        </section>
+
+        <section class="view" id="importView" data-view-panel="import">
+          <div class="title-row"><div><h1>导入文件</h1><p class="lede">主题先查重并确认，字体查重后自动收录。确认后在当前设备处理并同步 R2，已有资源在各自库中查看。</p></div></div>
+          <p class="static-mode-note" id="staticModeNote" role="status" hidden></p>
+          <div class="import-tabs" role="tablist" aria-label="导入类型"><button class="import-tab is-active" id="themeImportTab" role="tab" aria-selected="true" aria-controls="themeImportPane" data-import-kind="theme">RED 主题</button><button class="import-tab" id="fontImportTab" role="tab" aria-selected="false" aria-controls="fontImportPane" data-import-kind="font" tabindex="-1">字体文件</button><button class="import-tab" id="assetImportTab" role="tab" aria-selected="false" aria-controls="assetImportPane" data-import-kind="asset" tabindex="-1">SVG / HTML 收藏</button></div>
+          <div id="themeImportPane" role="tabpanel" aria-labelledby="themeImportTab">
+            <section class="ingest-panel" aria-labelledby="ingestTitle">
+              <div class="drop-zone" id="themeDropZone" tabindex="0" role="button" aria-label="拖入 RED 主题文件">
+                <span class="drop-icon">↓</span><strong>把 RED 主题拖到这里</strong><span>支持批量拖入 .red 文件</span><small>也可以点击选择文件</small>
+              </div>
+              <div class="ingest-copy"><h2 id="ingestTitle">加入待确认主题</h2><p>整批识别后，按名称和作者显示疑似重复与预览。确认所选后，在当前设备压缩、保存并同步。</p><div class="ingest-actions"><button class="primary-button" id="chooseThemes">选择 RED 文件</button><button class="secondary-button" id="chooseThemeFolder">选择主题文件夹</button><button class="text-button" id="indexThemeFolder">索引已有文件夹</button><input id="themeInput" type="file" accept=".red" multiple hidden /><input id="themeFolderInput" type="file" accept=".red" webkitdirectory multiple hidden /><input id="existingThemeFolderInput" type="file" accept=".red" webkitdirectory multiple hidden /></div><p class="ingest-note">日间素材优先；普通主题支持本地压缩重封，加密主题会先识别并提示当前浏览器能力。</p></div>
+            </section>
+            <section class="compression-panel" aria-labelledby="compressionTitle">
+              <div class="compression-copy"><h2 id="compressionTitle">RED 图片压缩</h2><p>选择主题并确认后，在当前设备压缩图片、重新封包，再生成书架与书封预览。完成后按存储设置同步。</p><p class="field-help">透明图片保留透明度，动画保留原样；整包没有变小时保留原字节。加密 RED 是否能重新封包取决于当前处理器；免费浏览器模式只识别并明确提示，不会把密文当普通 ZIP。</p></div>
+              <div class="compression-controls"><label>图片质量（1–100）<input id="compressionQuality" type="number" min="1" max="100" step="1" value="88" aria-describedby="compressionQualityHelp" /><span id="compressionQualityHelp">用于 JPEG / WebP，数值越高越清晰。</span></label><label>图片长边上限（像素）<input id="compressionMaxEdge" type="number" min="64" max="8192" step="1" value="1600" aria-describedby="compressionMaxEdgeHelp" /><span id="compressionMaxEdgeHelp">超出时等比缩小；动画与九宫格保留。</span></label></div>
+            </section>
+          <section class="review-area" id="reviewArea" hidden>
+            <div class="section-heading"><div><h2>待确认并压缩</h2><p>确认后压缩图片并重新封包；加密主题保留原有权限。</p></div><span class="review-count" id="reviewCount">0</span></div>
+            <div class="bulk-toolbar" id="reviewToolbar"><label class="select-label"><input type="checkbox" id="selectAllReview" />全选</label><span class="selection-count" id="reviewSelectedCount">已选 0 项</span><button class="primary-button" id="commitSelectedThemes" type="button" disabled>确认所选并压缩保存</button><span class="bulk-status" id="reviewBatchStatus" role="status"></span></div>
+            <p class="compression-plan" id="compressionPlan" role="status"></p>
+            <div id="reviewList" class="review-list"></div>
+          </section>
+
+            <section class="import-results" id="themeImportResults" hidden><div class="section-heading"><div><h2>本批压缩与保存结果</h2><p>处理完成后显示压缩前后大小与节省比例。</p></div><button class="text-button" data-open-view="themes">查看主题库</button></div><div id="themeImportJobs" class="job-list"></div><div id="themeCompressionResults" class="compression-results"></div></section>
+          </div>
+          <div id="fontImportPane" role="tabpanel" aria-labelledby="fontImportTab" hidden>
+            <section class="ingest-panel font-ingest">
+              <div class="drop-zone" id="fontDropZone" tabindex="0" role="button" aria-label="拖入字体文件"><span class="drop-icon">Aa</span><strong>把字体文件拖到这里</strong><span>TTF、OTF、WOFF、WOFF2</span><small>也可以点击选择文件</small></div>
+              <div class="ingest-copy"><h2>加入新字体</h2><p>按 SHA-256 检查本地与云端已有库，重复跳过。新字体自动收录并同步 R2。</p><div class="ingest-actions"><button class="primary-button" id="chooseFonts">选择字体文件</button><button class="secondary-button" id="chooseFontFolder">选择字体文件夹</button><input id="fontInput" type="file" accept=".ttf,.otf,.woff,.woff2" multiple hidden /><input id="fontFolderInput" type="file" accept=".ttf,.otf,.woff,.woff2" webkitdirectory multiple hidden /></div><p class="ingest-note">原字体不压缩，预览使用原文件渲染。</p></div>
+            </section>
+            <p class="operation-status ingest-status" id="fontImportStatus" role="status" hidden></p>
+            <section class="import-results" id="fontImportResults" hidden><div class="section-heading"><div><h2>本批字体</h2><p id="fontBatchDescription">这里只显示这次导入的新字体。</p></div><button class="text-button" data-open-view="fonts">查看字体库</button></div><div id="importedFontList" class="font-list"></div></section>
+          </div>
+          <div id="assetImportPane" role="tabpanel" aria-labelledby="assetImportTab" hidden>
+            <section class="ingest-panel asset-ingest">
+              <div class="drop-zone" id="assetDropZone" tabindex="0" role="button" aria-label="拖入 SVG 或 HTML 文件"><span class="drop-icon">✦</span><strong>把 SVG / HTML 拖到这里</strong><span>支持批量收藏 .svg、.html、.htm</span><small>也可以点击选择文件</small></div>
+              <div class="ingest-copy"><h2>加入收藏</h2><p>原文件按 SHA-256 去重并保存到共享 R2。每个收藏可补充作者、风格和标签，之后按分类快速筛选。</p><div class="ingest-actions"><button class="primary-button" id="chooseAssets">选择 SVG / HTML</button><button class="secondary-button" id="chooseAssetFolder">选择收藏文件夹</button><input id="assetInput" type="file" accept=".svg,.html,.htm,image/svg+xml,text/html" multiple hidden /><input id="assetFolderInput" type="file" accept=".svg,.html,.htm,image/svg+xml,text/html" webkitdirectory multiple hidden /></div><p class="ingest-note">SVG 使用安全图片预览；HTML 使用无权限 sandbox 预览，不会在收藏库页面执行脚本。</p></div>
+            </section>
+            <p class="operation-status ingest-status" id="assetImportStatus" role="status" hidden></p>
+            <section class="import-results" id="assetImportResults" hidden><div class="section-heading"><div><h2>本批收藏</h2><p id="assetBatchDescription">这里只显示这次导入的文件。</p></div><button class="text-button" data-open-view="assets">查看收藏库</button></div><div id="importedAssetList" class="asset-list"></div></section>
+          </div>
+        </section>
+
+        <section class="view" id="themesView" data-view-panel="themes" hidden>
+          <div class="title-row"><div><h1>主题库</h1><p class="lede">已收录主题的预览、下载与保存状态。新主题请到导入页添加。</p></div><div class="title-meta"><span id="themeCount">0 个主题</span><span class="meta-sep">·</span><span id="storageHint">索引保存在本机</span></div></div>
+          <section class="library-area">
+            <div class="section-heading"><div><h2>已收录主题</h2><p>使用压缩副本，原始包单独归档；加密主题保持加密。</p></div><button class="text-button" id="refreshThemes">刷新</button></div>
+            <div class="bulk-toolbar" id="themeToolbar" hidden><label class="select-label"><input type="checkbox" id="selectAllThemes" />全选</label><span class="selection-count" id="themeSelectedCount">已选 0 项</span><button class="secondary-button" id="syncSelectedThemes" type="button" disabled>后台同步所选</button><span class="bulk-status" id="themeBatchStatus" role="status"></span></div>
+            <div id="themeList" class="theme-list"></div>
+            <div class="empty-state" id="themeEmpty">
+              <div class="empty-mark">R</div>
+              <h3>还没有已收录主题</h3>
+              <p>导入一个 `.red` 文件后，这里会显示书架优先的预览、资源清单和保存状态。日间资源优先，有启动图时一起拼图，点击可放大查看。</p>
+            </div>
+          </section>
+        </section>
+
+
+        <section class="view" id="fontsView" data-view-panel="fonts" hidden>
+          <div class="title-row"><div><h1>字体库</h1><p class="lede">已收录字体按家族、样式和 SHA-256 保存，原字体可随时下载。</p></div><div class="title-meta"><span id="fontCount">0 个字体</span></div></div>
+          <section class="font-area"><div class="section-heading"><div><h2>已收录字体</h2><p>预览使用原始文件，索引记录家族、样式和文件哈希。</p></div><button class="text-button" id="refreshFonts">刷新</button></div><div class="bulk-toolbar" id="fontToolbar" hidden><label class="select-label"><input type="checkbox" id="selectAllFonts" />全选</label><span class="selection-count" id="fontSelectedCount">已选 0 项</span><button class="secondary-button" id="syncSelectedFonts" type="button" disabled>后台同步所选</button><span class="bulk-status" id="fontBatchStatus" role="status"></span></div><div id="fontList" class="font-list"></div><div class="empty-state" id="fontEmpty"><div class="empty-mark font-mark">Aa</div><h3>还没有字体</h3><p>从单个文件或文件夹开始建立字体索引。</p></div></section>
+        </section>
+
+        <section class="view" id="assetsView" data-view-panel="assets" hidden>
+          <div class="title-row"><div><h1>收藏库</h1><p class="lede">SVG 与 HTML 原文件集中保存，按作者或风格分类。HTML 预览运行在隔离 sandbox 中。</p></div><div class="title-meta"><span id="assetCount">0 个收藏</span></div></div>
+          <section class="asset-area"><div class="section-heading"><div><h2>已收藏文件</h2><p>内容对象按 SHA-256 去重，编辑分类不会重新上传。</p></div><div class="section-actions"><button class="text-button" id="refreshAssets">刷新</button><button class="primary-button" id="addAssetButton">添加收藏</button></div></div>
+            <div class="asset-filters" role="toolbar" aria-label="收藏分类筛选"><button class="filter-chip is-active" type="button" data-asset-filter="all">全部</button><button class="filter-chip" type="button" data-asset-filter="ungrouped">未分组</button><button class="filter-chip" type="button" data-asset-filter="author">按作者</button><button class="filter-chip" type="button" data-asset-filter="style">按风格</button><label class="asset-search">搜索<input id="assetSearchInput" type="search" placeholder="名称、作者或标签" autocomplete="off" /></label></div>
+            <div class="bulk-toolbar" id="assetToolbar" hidden><label class="select-label"><input type="checkbox" id="selectAllAssets" />全选</label><span class="selection-count" id="assetSelectedCount">已选 0 项</span><button class="secondary-button" id="syncSelectedAssets" type="button" disabled>后台同步所选</button><span class="bulk-status" id="assetBatchStatus" role="status"></span></div>
+            <div id="assetList" class="asset-list asset-library-list"></div>
+            <div class="empty-state" id="assetEmpty"><div class="empty-mark">✦</div><h3>还没有收藏</h3><p>从导入页拖入 SVG 或 HTML 文件，完成后会在这里显示安全预览和分类。</p></div>
+          </section>
+        </section>
+
+
+        <section class="view" id="jobsView" data-view-panel="jobs" hidden>
+          <div class="title-row"><div><h1>后台任务</h1><p class="lede">本地服务模式可在后台继续处理；免费浏览器模式会在当前页面完成处理，关闭页面或切到后台可能暂停。</p></div><button class="text-button" id="refreshJobs">刷新任务</button></div>
+          <p class="operation-status" id="jobsStatus" role="status"></p><div id="jobList" class="job-list"></div><div class="empty-state" id="jobsEmpty"><h2>暂时没有后台任务</h2><p>确认主题或同步资产后，这里会显示进度和结果。</p></div>
+        </section>
+
+        <section class="view" id="storageView" data-view-panel="storage" hidden>
+          <div class="title-row"><div><h1>存储设置</h1><p class="lede">压缩 RED、预览图和字体存入 R2；原始 RED 可另存到 123 云盘。</p></div><div class="title-meta"><span id="storageState">正在读取配置</span></div></div>
+          <section class="settings-grid">
+            <div class="settings-label"><h2>多设备访问</h2><p>GitHub Pages 等静态站点可以把界面连接到单独的同步 API。API 地址只保存在当前浏览器，不在仓库中保存密钥。</p></div>
+            <div class="settings-panel static-api-panel"><label>同步 API 地址<input id="apiBaseInput" type="url" inputmode="url" placeholder="https://你的-worker.example.workers.dev" autocomplete="off" spellcheck="false" /></label><label>同步写入 Token（可选）<input id="syncTokenInput" type="password" inputmode="text" placeholder="仅在 Worker 要求时填写" autocomplete="off" spellcheck="false" /></label><p class="field-help">留空使用本机服务；填写 HTTPS 地址后，手机和电脑会读取同一个 R2 库。Token 只保存在当前浏览器并随写入请求发送；它可以被浏览器读取，不适合作为高强度秘密。</p><div class="form-actions"><button class="secondary-button" id="saveApiBase" type="button">保存同步地址</button><button class="text-button" id="clearApiBase" type="button">清除并使用本机</button></div><p class="operation-status" id="apiBaseStatus" role="status"></p></div>
+            <div class="settings-label"><h2>已有资产与存储地</h2><p>本地文件和已读取的云端清单分别计数。读取 R2 已有库后，新导入主题会与云端记录一起检查重复。</p><p class="settings-note" id="storageDestination">尚未连接云端存储。</p></div>
+            <div class="settings-panel"><div id="storageInventory" class="storage-inventory" aria-live="polite">正在读取本地资产…</div></div>
+            <div class="settings-label"><h2>Cloudflare R2</h2><p>一个私有 Bucket 存放主题文件、预览图、字体和库清单；普通主题可在设备本地压缩，加密主题会保留原包并显示能力提示。预览优先组合日间书架，有同模式启动图时一起展示，日间无可用资源才读取夜间。文件使用临时下载地址，Bucket 无需公开。</p><p class="settings-note" id="credentialState">尚未配置 R2 凭据。</p><p class="settings-note"><a class="download-link" href="https://dash.cloudflare.com/?to=/:account/r2/overview" target="_blank" rel="noreferrer">打开 Cloudflare R2 控制台</a></p><p class="settings-note"><a class="download-link" href="https://developers.cloudflare.com/r2/api/tokens/" target="_blank" rel="noreferrer">查看 R2 访问密钥说明</a></p></div>
+            <form class="settings-panel" id="storageForm" autocomplete="off">
+              <p class="operation-status" id="storageBusyNote" hidden>后台任务正在使用当前存储位置，完成后可修改配置。</p>
+              <label>资产存储<select name="libraryProvider"><option value="local">仅本地文件夹</option><option value="cloudflare_r2">Cloudflare R2（S3 兼容）</option></select></label>
+              <div id="r2Fields" class="storage-fields">
+                <div class="field-pair"><div class="field-group"><label>Cloudflare Account ID<input name="accountId" placeholder="32 位 Account ID" aria-describedby="accountIdHelp" spellcheck="false" /></label><p class="field-help" id="accountIdHelp">在 Cloudflare 控制台按 Ctrl + K，搜索 Copy account ID 并复制。<a class="download-link" href="https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/" target="_blank" rel="noreferrer">查看查找位置</a></p></div><div class="field-group"><label>Bucket 名称<input name="bucket" placeholder="你的 R2 Bucket 名称" aria-describedby="bucketHelp" spellcheck="false" /></label><p class="field-help" id="bucketHelp">R2 控制台 → Overview，复制已有存储桶的名称。</p></div></div>
+                <label>S3 Endpoint（可选）<input name="endpoint" type="url" placeholder="https://&lt;ACCOUNT_ID&gt;.r2.cloudflarestorage.com" aria-describedby="endpointHelp" spellcheck="false" /></label><p class="field-help" id="endpointHelp">普通 Bucket 留空即可，由 Account ID 自动生成。也可从 R2 Overview 或创建密钥完成页底部复制 S3 API 地址；特殊区域使用控制台给出的地址。</p>
+                <label>库目录前缀<input name="rootPath" placeholder="reeden-library" aria-describedby="rootPathHelp" spellcheck="false" /></label><p class="field-help" id="rootPathHelp">由你指定的库文件夹，默认 reeden-library。读取已有文件时填它们所在目录；若文件在 Bucket 根目录，留空。</p>
+                <div class="field-pair"><label>Access Key ID<input name="accessKeyId" type="password" autocomplete="off" spellcheck="false" aria-describedby="r2KeyHelp" /></label><label>Secret Access Key<input name="secretAccessKey" type="password" autocomplete="off" spellcheck="false" aria-describedby="r2KeyHelp" /></label></div>
+                <p class="field-help" id="r2KeyHelp">R2 Overview → API Tokens 旁的 Manage → 创建 Account 或 User API token。权限选 Object Read &amp; Write，仅授权此 Bucket；创建完成后分别复制 Access Key ID 和 Secret Access Key。Secret 只显示一次，丢失需创建新密钥。这里填写 R2 的 S3 密钥对，不填普通 Cloudflare API Token。密钥仅提交到本机后端，并由 Windows 当前用户加密保存；已有凭据时留空可保留。</p>
+                <label class="check-label"><input name="autoSync" type="checkbox" /><span>主题确认或字体导入后，自动同步到 R2</span></label>
+              </div>
+              <div class="archive-fields">
+                <h3>原始 RED 备份</h3>
+                <label>原始包存储<select name="archiveProvider"><option value="local">本地单独保存</option><option value="r2_library">R2 原包目录（复用上方连接）</option><option value="123pan">123 云盘（网页协议）</option><option value="123pan_webdav">旧配置：123 WebDAV（需自行提供服务）</option></select></label>
+                <label>备份目录<input name="archiveRootPath" placeholder="originals" spellcheck="false" aria-describedby="archiveHint" /></label>
+                <label id="archiveEndpointField" hidden>旧 WebDAV 服务地址<input name="archiveEndpoint" type="url" placeholder="https://你的-webdav-endpoint/" spellcheck="false" /></label>
+                <p class="field-help" id="archiveHint">原始 RED 保留在本机，切换到 R2 原包目录可直接上传云端。</p>
+                <label class="check-label"><input name="cloudOnly" type="checkbox" aria-describedby="cloudOnlyHelp" /><span>上传核验后，清理本机处理副本</span></label>
+                <p class="field-help" id="cloudOnlyHelp">需启用 R2 资产存储，并将原包备份到 R2 或 123 云盘。文件上传、回读 SHA-256 核验及清单保存成功后，才清理应用内的原包、压缩包、预览和字体副本；失败会保留。你选择文件前所在的原始文件夹不会被删除。本机仍保留库索引。</p>
+              </div>
+              <div class="form-actions"><button class="primary-button" type="submit">保存配置</button><button class="secondary-button" id="testStorage" type="button">测试 R2 连接</button><button class="text-button" id="testArchive" type="button">测试归档连接</button></div>
+              <p class="operation-status" id="configStatus" role="status">保存后请测试连接。</p>
+            </form>
+            <div class="settings-label" id="pan123Label" hidden><h2>连接 123 云盘</h2><p>123 云盘只备份原始 RED，压缩 RED、字体和预览仍使用上方的 R2。扫码确认后，登录会话由当前 Windows 用户加密保存。</p><p class="settings-note" id="pan123CredentialState">尚未保存 123 云盘会话。</p><p class="settings-note"><a class="download-link" href="https://www.123pan.com/" target="_blank" rel="noreferrer">打开 123 云盘</a></p></div>
+            <div class="settings-panel" id="pan123Panel" hidden>
+              <div class="qr-login"><h3>扫码登录</h3><p class="field-help">用123云盘App或微信扫码并确认。二维码按需生成，2 分钟内有效。</p><div class="form-actions"><button class="secondary-button" id="startPan123Qr" type="button">扫码连接</button></div><div class="qr-login-code" id="pan123QrCode" hidden><img id="pan123QrImage" alt="123扫码登录" width="200" height="200" /><button class="text-button" id="stopPan123Qr" type="button">取消扫码</button></div><p class="operation-status" id="pan123QrStatus" role="status"></p></div>
+              <details class="session-fallback" id="pan123PasswordDetails"><summary>使用账号密码登录</summary><div class="session-fallback-content"><form id="pan123LoginForm" class="credential-form" autocomplete="off">
+                <div class="field-pair"><label>123 云盘账号<input name="username" autocomplete="off" autocapitalize="none" spellcheck="false" required aria-describedby="pan123LoginHelp" /></label><label>登录密码<input name="password" type="password" autocomplete="new-password" spellcheck="false" required aria-describedby="pan123LoginHelp" /></label></div>
+                <p class="field-help" id="pan123LoginHelp">仅提交给本机服务，密码用完即丢弃。账号与密码不会随“保存配置”提交；点击登录后会清空输入。</p>
+                <div class="form-actions"><button class="secondary-button" type="submit">登录并保存会话</button></div>
+              </form></div></details>
+              <details class="session-fallback" id="pan123SessionDetails"><summary>登录需要验证码？使用已有会话</summary><div class="session-fallback-content"><p class="field-help">在你自己的浏览器打开 123 云盘并登录。按 F12 → Network（网络），刷新文件列表，在发往 123 云盘的请求中查找 Authorization 请求头，只复制 Bearer 后的会话 Token。不要粘贴 Cookie 或完整请求。会话等同登录凭据，仅在此处提交给本机服务。</p><form id="pan123SessionForm" class="credential-form" autocomplete="off"><label>会话 Token<input name="token" type="password" autocomplete="new-password" spellcheck="false" required aria-describedby="pan123TokenHelp" /></label><p class="field-help" id="pan123TokenHelp">使用当前 Windows 用户加密保存。提交后清空输入，不会显示已保存的 Token。</p><div class="form-actions"><button class="secondary-button" type="submit">保存会话</button></div></form></div></details>
+              <p class="operation-status" id="pan123Status" role="status">先保存原始包存储和目录，再验证上传与回读。</p>
+              <div class="archive-probe"><p class="field-help" id="pan123ProbeHelp">验证会在备份目录的 probes/ 下上传一个随机小文件，再下载并核验。测试目录和文件可能保留在云盘。</p><div class="form-actions"><button class="secondary-button" id="probePan123" type="button" aria-describedby="pan123ProbeHelp">上传测试文件并回读</button><button class="text-button" type="button" data-open-view="jobs">查看后台任务</button></div></div>
+              <p class="field-help">同步和验证由本机服务在后台执行。关闭网页后仍会继续，电脑与本机服务需要保持运行。</p>
+            </div>
+            <div class="settings-label"><h2>读取与同步</h2><p>读取已有库会合并主题名、作者、哈希和预览。没有库清单的已有文件会单独列出，不自动下载或覆盖。</p></div>
+            <div class="settings-panel"><div class="form-actions"><button class="secondary-button" id="pullStorage" type="button">读取 R2 已有库</button><button class="secondary-button" id="syncStorage" type="button">同步本地资产到 R2</button></div><p class="operation-status" id="storageOperation" role="status">尚未读取 R2 已有库。</p><div id="storageUnindexed" hidden></div></div>
+          </section>
+        </section>
+
+        <footer class="app-footer"><span>Red Garden · 设备本地处理 / R2 同步</span><span>资源用途依据 `.red` 内实际绑定判定</span></footer>
+      </main>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <dialog class="preview-dialog" id="previewDialog" aria-labelledby="previewDialogTitle" aria-describedby="previewDialogDescription"><div class="preview-dialog-head"><h2 id="previewDialogTitle">主题预览</h2><button class="icon-button" id="closePreviewDialog" type="button" aria-label="关闭预览">×</button></div><p class="preview-description" id="previewDialogDescription"></p><img id="previewDialogImage" alt="主题预览" /></dialog>
+    <div class="modal-backdrop" id="modalBackdrop" hidden><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-head"><div><h2 id="modalTitle">确认主题</h2><p id="modalSubtitle">查看候选后再保存。</p></div><button class="icon-button" id="closeModal" aria-label="关闭">×</button></div><div id="modalBody"></div></section></div>
+    <script>window.REEDEN_API_BASE = window.location.origin;</script>
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>

@@ -1,0 +1,11 @@
+name = "red-garden-sync"
+compatibility_date = "2026-11-12"
+pages_build_output_dir = "pages"
+
+[vars]
+ALLOWED_ORIGINS = "https://red-garden-sync.pages.dev,https://aookshizuo-eng.github.io,http://127.0.0.1:8765,http://localhost:8765"
+MAX_UPLOAD_BYTES = "100663296"
+
+[[r2_buckets]]
+binding = "R2_ASSETS"
+bucket_name = "redsave"
