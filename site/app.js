@@ -319,17 +319,32 @@ async function composeThemePreviewBlob(entries, codec) {
     } catch { item.aspect = 1; }
   }
   const inferred = images.filter(item => item.role === "other");
-  // Private RED resources have no names. Their first portrait image is the
-  // closest equivalent to the launch/cover artwork; use a narrower fallback
-  // only when the first resource is a background or a wide banner.
+  const privatePreview = images.some(item => /^private-preview-/i.test(String(item.entry.name || "")));
   const firstPortrait = inferred.find(item => item.index === 0 && item.aspect < 1.1);
-  const splash = images.find(item => item.role === "splash") || firstPortrait || inferred.find(item => item.aspect < .66) || null;
+  const portraits = images.filter(item => item.aspect < 1.2);
+  const splash = images.find(item => item.role === "splash") || firstPortrait || inferred.find(item => item.aspect < .66) || portraits[0] || null;
   const wide = images.filter(item => item.role === "shelf" || (item.role === "other" && item.aspect > 1.55));
   const namedShelf = images.find(item => item.role === "shelf");
-  const inferredShelf = inferred.find(item => item !== splash && item.aspect >= .3 && item.aspect <= 1.45);
-  const shelf = namedShelf || inferredShelf || wide[0] || images.find(item => item !== splash) || images[0];
-  const carousel = wide.find(item => item !== shelf) || null;
-  const covers = images.filter(item => item !== splash && item !== shelf && item !== carousel && (item.role === "cover" || item.aspect <= 1.2)).slice(0, 6);
+  let shelf;
+  let carousel;
+  let covers;
+  if (privatePreview) {
+    // Encrypted resources have no manifest names. In these packages the
+    // largest portrait is normally the theme background and the first wide
+    // image is the carousel layer; repeated tall backgrounds must not become
+    // fake book covers.
+    const backgroundCandidates = portraits.filter(item => item !== splash).sort((a, b) => (b.width * b.height) - (a.width * a.height));
+    shelf = namedShelf || backgroundCandidates[0] || wide[0] || images.find(item => item !== splash) || images[0];
+    carousel = wide.find(item => item !== shelf) || null;
+    covers = images.filter(item => item !== splash && item !== shelf && item !== carousel && item.role === "cover");
+    if (!covers.length) covers = portraits.filter(item => item !== splash && item !== shelf && item.height <= 1600 && item.width <= 1100).slice(0, 4);
+    if (!covers.length && splash) covers = [splash];
+  } else {
+    const inferredShelf = inferred.find(item => item !== splash && item.aspect >= .3 && item.aspect <= 1.45);
+    shelf = namedShelf || inferredShelf || wide[0] || images.find(item => item !== splash) || images[0];
+    carousel = wide.find(item => item !== shelf) || null;
+    covers = images.filter(item => item !== splash && item !== shelf && item !== carousel && (item.role === "cover" || item.aspect <= 1.2)).slice(0, 6);
+  }
   const canvas = document.createElement("canvas");
   canvas.width = 1000; canvas.height = 1000;
   const context = canvas.getContext("2d");
@@ -349,24 +364,26 @@ async function composeThemePreviewBlob(entries, codec) {
       context.drawImage(bitmap, dx, dy, drawWidth, drawHeight); context.restore();
     } finally { bitmap.close?.(); }
   };
-  // Left: the real day splash. Right: a bookshelf panel with the real shelf
-  // background, carousel and cover tiles layered in the same visual block.
-  context.fillStyle = "#f8f8f5"; context.fillRect(16, 16, 414, 968);
-  if (splash) await drawFit(splash, 28, 28, 390, 944, "contain");
-  else { context.fillStyle = "#cfd9d8"; context.fillRect(28, 28, 390, 944); context.fillStyle = "#253338"; context.font = "600 24px system-ui, sans-serif"; context.fillText("无启动图", 150, 500); }
-  const panelX = 446, panelY = 16, panelW = 538, panelH = 968;
+  // Keep the thumbnail square, but let the actual theme artwork dominate it:
+  // the splash/cover is on the left and the real shelf background, carousel,
+  // and a small row of real covers are layered on the right.
+  context.fillStyle = "#e9e7df"; context.fillRect(16, 16, 968, 968);
+  context.fillStyle = "#f8f8f5"; context.fillRect(28, 28, 390, 936);
+  if (splash) await drawFit(splash, 40, 58, 366, 876, "contain");
+  else { context.fillStyle = "#cfd9d8"; context.fillRect(40, 58, 366, 876); context.fillStyle = "#253338"; context.font = "600 24px system-ui, sans-serif"; context.fillText("无启动图", 154, 500); }
+  const panelX = 436, panelY = 28, panelW = 548, panelH = 936;
   context.fillStyle = "#f8f4e9"; context.fillRect(panelX, panelY, panelW, panelH);
-  if (shelf) await drawFit(shelf, panelX + 12, panelY + 12, panelW - 24, panelH - 24, "cover");
-  context.fillStyle = "rgba(248,244,233,.88)"; context.fillRect(panelX + 18, panelY + 18, panelW - 36, 52);
-  context.fillStyle = "#253338"; context.font = "600 22px system-ui, sans-serif"; context.fillText("书架", panelX + 36, panelY + 52);
-  context.fillStyle = "rgba(255,255,255,.78)"; context.fillRect(panelX + 24, panelY + 88, panelW - 48, 194);
-  if (carousel) await drawFit(carousel, panelX + 30, panelY + 96, panelW - 60, 178, "cover");
-  context.fillStyle = "rgba(255,255,255,.9)"; context.fillRect(panelX + 24, panelY + 306, panelW - 48, 490);
-  context.fillStyle = "#253338"; context.font = "600 18px system-ui, sans-serif"; context.fillText("主题书封", panelX + 42, panelY + 338);
-  const cardWidth = 66, cardHeight = 150, gap = 12, startX = panelX + 38, startY = panelY + 360;
+  if (shelf) await drawFit(shelf, panelX, panelY, panelW, panelH, "cover");
+  // A light veil keeps the cover row readable without hiding the real theme
+  // background. The previous version used opaque white blocks and labels,
+  // which made encrypted previews look like empty mockups.
+  context.fillStyle = "rgba(255,255,255,.18)"; context.fillRect(panelX + 18, panelY + 18, panelW - 36, 202);
+  if (carousel) await drawFit(carousel, panelX + 30, panelY + 30, panelW - 60, 178, "contain");
+  context.fillStyle = "rgba(255,255,255,.48)"; context.fillRect(panelX + 22, panelY + 548, panelW - 44, 330);
+  const cardWidth = 86, cardHeight = 168, gap = 16, startX = panelX + 42, startY = panelY + 590;
   for (let index = 0; index < covers.length; index++) {
     const column = index % 5, row = Math.floor(index / 5), x = startX + column * (cardWidth + gap), y = startY + row * (cardHeight + 28);
-    if (x + cardWidth > panelX + panelW - 24 || y + cardHeight > panelY + 780) continue;
+    if (x + cardWidth > panelX + panelW - 24 || y + cardHeight > panelY + panelH - 34) continue;
     context.fillStyle = "rgba(25,40,42,.16)"; context.fillRect(x + 3, y + 4, cardWidth, cardHeight);
     await drawFit(covers[index], x, y, cardWidth, cardHeight, "cover");
   }
