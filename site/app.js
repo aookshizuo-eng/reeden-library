@@ -326,7 +326,7 @@ async function composeThemePreviewBlob(entries, codec) {
   const splash = images.find(item => item.role === "splash") || firstPortrait || inferred.find(item => item.aspect < .66) || null;
   const wide = images.filter(item => item.role === "shelf" || (item.role === "other" && item.aspect > 1.55));
   const namedShelf = images.find(item => item.role === "shelf");
-  const inferredShelf = inferred.find(item => item !== splash && item.aspect >= .55 && item.aspect <= 1.45);
+  const inferredShelf = inferred.find(item => item !== splash && item.aspect >= .3 && item.aspect <= 1.45);
   const shelf = namedShelf || inferredShelf || wide[0] || images.find(item => item !== splash) || images[0];
   const carousel = wide.find(item => item !== shelf) || null;
   const covers = images.filter(item => item !== splash && item !== shelf && item !== carousel && (item.role === "cover" || item.aspect <= 1.2)).slice(0, 6);
