@@ -3,7 +3,9 @@ main = "worker.js"
 compatibility_date = "2026-11-12"
 
 [vars]
-ALLOWED_ORIGINS = "https://YOUR-USER.github.io"
+# Include the published Pages origin and the local prototype origins used by
+# the desktop browser. Keep this list exact; do not use * for writes.
+ALLOWED_ORIGINS = "https://YOUR-USER.github.io,http://127.0.0.1:8765,http://localhost:8765"
 MAX_UPLOAD_BYTES = "100663296"
 
 [[r2_buckets]]
