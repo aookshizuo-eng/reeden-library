@@ -638,7 +638,7 @@ function assetCard(asset, imported = false) {
   const author = String(asset.author || "").trim();
   const style = String(asset.style || "").trim();
   const tags = Array.isArray(asset.tags) ? asset.tags.filter(Boolean) : [];
-  const objectUrl = assetUrl(asset.object_url || asset.url || "");
+  const objectUrl = assetUrl(asset.download_url || asset.object_url || asset.url || "");
   return `<article class="asset-card ${imported ? "asset-card-imported" : ""}" data-asset-id="${escapeHtml(asset.id || asset.sha256 || "")}">
     <div class="asset-card-preview">${assetPreview(asset, imported)}<span class="preview-caption">${assetTypeLabel(asset)} · ${asset.bytes ? formatBytes(asset.bytes) : ""}</span></div>
     <div class="asset-card-body"><div class="asset-card-head"><label class="item-heading">${imported ? "" : selectInput("asset", asset.id, `收藏 ${asset.name || asset.file_name}`, savedToCloud(asset))}<span class="theme-title">${escapeHtml(asset.name || asset.file_name || "未命名收藏")}</span></label><span class="badge">${assetTypeLabel(asset)}</span></div>
