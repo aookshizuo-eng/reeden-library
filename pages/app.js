@@ -438,7 +438,9 @@ function previewKind(details = {}) {
 function previewImage(url, alt, className = "", details = {}) {
   if (!url) return `<span class="${className} preview-empty" role="img" aria-label="暂无可用预览">暂无预览</span>`;
   url = assetUrl(url);
-  const description = details?.simulation ? "书架使用主题真实素材离线合成，布局和示例书名为模拟。" + (details.kind === "shelf_and_splash" ? "右侧为包内启动图。" : "") : "使用主题包内图片生成的轻量预览。";
+  const description = details?.encrypted_source
+    ? "加密 RED 未解密清单，仅从包内可读取的明文图片资源合成预览；确认后原样保存。"
+    : details?.simulation ? "书架使用主题真实素材离线合成，布局和示例书名为模拟。" + (details.kind === "shelf_and_splash" ? "左侧为启动图，右侧为书架、轮播和书封拼合。" : "") : "使用主题包内图片生成的轻量预览。";
   return `<button class="preview-open ${className}" type="button" aria-label="${escapeHtml(alt)}，点击放大" data-preview-url="${escapeHtml(url)}" data-preview-title="${escapeHtml(alt)}" data-preview-description="${escapeHtml(description)}"><img src="${escapeHtml(url)}" alt="${escapeHtml(alt)}" loading="lazy" /></button>`;
 }
 
@@ -624,7 +626,7 @@ function renderReview() {
     const privateTheme = requiresOriginalPreservation(info);
     const preview = preferredPreview(item.preview_urls?.light, item.preview_urls?.dark);
     const duplicateThumbs = duplicate ? item.duplicates.map(candidate => `<div class="thumb-label">${previewImage(candidate.preview_light_url || candidate.preview_dark_url, `已有主题 ${candidate.name} · ${previewKind(candidate.preview_details)}`, "thumb", candidate.preview_details)}<span>${escapeHtml(candidate.name)}</span></div>`).join("") : "";
-    return `<article class="review-card" data-review-id="${escapeHtml(item.staging_id)}"><div class="review-top"><div><label class="item-heading">${selectInput("review", item.staging_id, `待确认主题 ${info.name || info.source_name}`)}<span class="review-title">${escapeHtml(info.name || info.source_name)}</span></label><div class="review-meta">${escapeHtml(info.author || "作者未记录")} · ${formatBytes(info.bytes)} · ${escapeHtml(info.source_name)}</div></div><span class="badge ${duplicate ? "" : "is-good"}">${duplicate ? `疑似重复 ${item.duplicates.length}` : "未发现同名作者"}</span></div>${privateTheme ? `<p class="review-meta">此加密格式暂不支持重封，确认后将原样保存。</p>` : info.container_format === "red_private_v2" ? `<p class="review-meta">加密主题：当前免费浏览器模式只识别并原样保存，不会伪造重封包。</p>` : ""}${duplicate ? `<div class="duplicate-note">已有库中存在同名作者主题。下面只展示缩略图，是否重复由你确认。</div><div class="duplicate-thumbs">${duplicateThumbs}</div>` : ""}<div class="duplicate-thumbs"><div class="thumb-label">${previewImage(preview.url, `待审核主题${preview.label} · ${previewKind(info.preview_details)}`, "thumb", info.preview_details)}<span>新主题 · ${preview.label}</span><span>${escapeHtml(previewKind(info.preview_details))} · 点击放大</span></div></div>${item.commitError ? `<p class="inline-error">${escapeHtml(item.commitError)}</p>` : ""}<div class="review-actions"><button class="primary-button commit-theme" data-id="${escapeHtml(item.staging_id)}">${privateTheme ? "确认并原样保存" : "确认并压缩保存"}${autoSyncEnabled() ? "并后台同步" : "（后台处理）"}</button><button class="secondary-button discard-review" data-id="${escapeHtml(item.staging_id)}">暂不处理</button></div></article>`;
+    return `<article class="review-card" data-review-id="${escapeHtml(item.staging_id)}"><div class="review-top"><div><label class="item-heading">${selectInput("review", item.staging_id, `待确认主题 ${info.name || info.source_name}`)}<span class="review-title">${escapeHtml(info.name || info.source_name)}</span></label><div class="review-meta">${escapeHtml(info.author || "作者未记录")} · ${formatBytes(info.bytes)} · ${escapeHtml(info.source_name)}</div></div><span class="badge ${duplicate ? "" : "is-good"}">${duplicate ? `疑似重复 ${item.duplicates.length}` : "未发现同名作者"}</span></div>${privateTheme ? `<p class="review-meta">加密主题：已从包内可读取的明文图片区生成预览；清单无法解密，确认后原样保存。</p>` : info.container_format === "red_private_v2" ? `<p class="review-meta">加密主题：当前免费浏览器模式只识别并原样保存，不会伪造重封包。</p>` : ""}${duplicate ? `<div class="duplicate-note">已有库中存在同名作者主题。下面只展示缩略图，是否重复由你确认。</div><div class="duplicate-thumbs">${duplicateThumbs}</div>` : ""}<div class="duplicate-thumbs"><div class="thumb-label">${previewImage(preview.url, `待审核主题${preview.label} · ${previewKind(info.preview_details)}`, "thumb", info.preview_details)}<span>新主题 · ${preview.label}</span><span>${escapeHtml(previewKind(info.preview_details))} · 点击放大</span></div></div>${item.commitError ? `<p class="inline-error">${escapeHtml(item.commitError)}</p>` : ""}<div class="review-actions"><button class="primary-button commit-theme" data-id="${escapeHtml(item.staging_id)}">${privateTheme ? "确认并原样保存" : "确认并压缩保存"}${autoSyncEnabled() ? "并后台同步" : "（后台处理）"}</button><button class="secondary-button discard-review" data-id="${escapeHtml(item.staging_id)}">暂不处理</button></div></article>`;
   }).join("");
   $$(".commit-theme").forEach(button => button.addEventListener("click", () => commitTheme(button.dataset.id)));
   $$(".discard-review").forEach(button => button.addEventListener("click", () => discardReview(button.dataset.id)));
@@ -1029,7 +1031,7 @@ async function analyzeFiles(files) {
         }
         const identity = metadataFromEntries(entries, file.name);
         let previewUrl = "";
-        let previewDetails = { kind: "shelf_and_splash", simulation: true };
+        let previewDetails = { kind: "shelf_and_splash", simulation: true, encrypted_source: inspection.format === "red_private_v2" };
         if (entries.length) {
           const preview = await composeThemePreviewBlob(entries, codec);
           if (preview) previewUrl = URL.createObjectURL(preview);
