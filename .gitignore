@@ -2,3 +2,4 @@
 Thumbs.db
 android/manual-build/
 android/compile.err
+worker/.wrangler/
