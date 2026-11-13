@@ -284,6 +284,7 @@ function previewRole(name) {
   if (/reader_schema|reader_background|reading|article|content|book_page|reader|正文|阅读/i.test(value)) return "reader";
   if (/cover_gallery|book_cover|cover|封面|书封|图集/i.test(value)) return "cover";
   if (/carousel|banner|轮播|横幅/i.test(value)) return "carousel";
+  if (/card_bg|cardbackground|card-background|book_card|bookshelf_card|书架卡片|书卡|卡片/i.test(value)) return "card";
   if (/theme_bg|bookshelf|shelf|library|background|书架|书架底|首页|主页/i.test(value)) return "shelf";
   return "other";
 }
@@ -309,6 +310,7 @@ async function composeThemePreviewBlob(entries, codec) {
   const wide = images.filter(item => item.role === "carousel" || item.role === "shelf" || (item.role === "other" && item.aspect > 1.55));
   const namedShelf = images.find(item => item.role === "shelf");
   let shelf;
+  let card;
   let carousel;
   let covers;
   if (privatePreview) {
@@ -337,8 +339,12 @@ async function composeThemePreviewBlob(entries, codec) {
     try { entries.previewKind = splash ? "shelf_and_splash" : "shelf_and_reader"; } catch {}
   } else {
     shelf = namedShelf || images.find(item => item.role === "shelf") || wide.find(item => item.role === "shelf") || null;
-    carousel = images.find(item => item.role === "carousel") || wide.find(item => item !== shelf) || null;
-    covers = images.filter(item => item !== shelf && item !== carousel && item.role === "cover").slice(0, 6);
+    card = images.find(item => item.role === "card") || null;
+    // A normal RED has explicit resource paths. Only use a named carousel;
+    // treating an unrelated wide image (especially card_bg) as a banner makes
+    // the shelf preview look like a blank or stretched panel.
+    carousel = images.find(item => item.role === "carousel") || null;
+    covers = images.filter(item => item !== shelf && item !== card && item !== carousel && item.role === "cover").slice(0, 6);
   }
   const canvas = document.createElement("canvas");
   canvas.width = 1000; canvas.height = 1000;
@@ -368,19 +374,40 @@ async function composeThemePreviewBlob(entries, codec) {
   else { context.fillStyle = "#cfd9d8"; context.fillRect(40, 58, 366, 876); context.fillStyle = "#253338"; context.font = "600 24px system-ui, sans-serif"; context.fillText("无可用阅读页", 130, 500); }
   const panelX = 436, panelY = 28, panelW = 548, panelH = 936;
   context.fillStyle = "#f8f4e9"; context.fillRect(panelX, panelY, panelW, panelH);
-  if (shelf) await drawFit(shelf, panelX, panelY, panelW, panelH, "cover");
+  if (shelf) await drawFit(shelf, panelX, panelY, panelW, panelH, card ? "contain" : "cover");
   // A light veil keeps the cover row readable without hiding the real theme
   // background. The previous version used opaque white blocks and labels,
   // which made encrypted previews look like empty mockups.
   context.fillStyle = "rgba(255,255,255,.18)"; context.fillRect(panelX + 18, panelY + 18, panelW - 36, 202);
   if (carousel) await drawFit(carousel, panelX + 30, panelY + 30, panelW - 60, 178, "contain");
-  context.fillStyle = "rgba(255,255,255,.48)"; context.fillRect(panelX + 22, panelY + 548, panelW - 44, 330);
-  const cardWidth = 86, cardHeight = 168, gap = 16, startX = panelX + 42, startY = panelY + 590;
-  for (let index = 0; index < covers.length; index++) {
-    const column = index % 5, row = Math.floor(index / 5), x = startX + column * (cardWidth + gap), y = startY + row * (cardHeight + 28);
-    if (x + cardWidth > panelX + panelW - 24 || y + cardHeight > panelY + panelH - 34) continue;
-    context.fillStyle = "rgba(25,40,42,.16)"; context.fillRect(x + 3, y + 4, cardWidth, cardHeight);
-    await drawFit(covers[index], x, y, cardWidth, cardHeight, "cover");
+  if (card) {
+    // card_bg is the actual bookshelf container (a transparent horizontal
+    // card). Repeat it behind the cover thumbnails so the preview reflects
+    // the theme's real shelf layout instead of floating covers on empty space.
+    const cardX = panelX + 28, cardW = panelW - 56, cardH = 158;
+    const firstY = panelY + 300, rowGap = 18;
+    for (let index = 0; index < Math.min(covers.length, 4); index++) {
+      const y = firstY + index * (cardH + rowGap);
+      if (y + cardH > panelY + panelH - 24) break;
+      await drawFit(card, cardX, y, cardW, cardH, "cover");
+      const coverW = 92, coverH = 132;
+      context.fillStyle = "rgba(25,40,42,.16)"; context.fillRect(cardX + 20, y + 14, coverW + 4, coverH + 4);
+      await drawFit(covers[index], cardX + 22, y + 12, coverW, coverH, "cover");
+      context.fillStyle = "rgba(75,44,52,.74)";
+      context.font = "600 16px system-ui, sans-serif";
+      context.fillText(`Reeden 主题 ${index + 1}`, cardX + 132, y + 58);
+      context.font = "13px system-ui, sans-serif";
+      context.fillText("书架卡片预览", cardX + 132, y + 84);
+    }
+  } else {
+    context.fillStyle = "rgba(255,255,255,.48)"; context.fillRect(panelX + 22, panelY + 548, panelW - 44, 330);
+    const cardWidth = 86, cardHeight = 168, gap = 16, startX = panelX + 42, startY = panelY + 590;
+    for (let index = 0; index < covers.length; index++) {
+      const column = index % 5, row = Math.floor(index / 5), x = startX + column * (cardWidth + gap), y = startY + row * (cardHeight + 28);
+      if (x + cardWidth > panelX + panelW - 24 || y + cardHeight > panelY + panelH - 34) continue;
+      context.fillStyle = "rgba(25,40,42,.16)"; context.fillRect(x + 3, y + 4, cardWidth, cardHeight);
+      await drawFit(covers[index], x, y, cardWidth, cardHeight, "cover");
+    }
   }
   const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", .86));
   try { entries.previewKind = splash ? "shelf_and_splash" : "shelf_and_reader"; } catch {}
