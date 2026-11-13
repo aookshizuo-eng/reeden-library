@@ -181,6 +181,6 @@
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <dialog class="preview-dialog" id="previewDialog" aria-labelledby="previewDialogTitle" aria-describedby="previewDialogDescription"><div class="preview-dialog-head"><h2 id="previewDialogTitle">主题预览</h2><button class="icon-button" id="closePreviewDialog" type="button" aria-label="关闭预览">×</button></div><p class="preview-description" id="previewDialogDescription"></p><img id="previewDialogImage" alt="主题预览" /></dialog>
     <div class="modal-backdrop" id="modalBackdrop" hidden><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-head"><div><h2 id="modalTitle">确认主题</h2><p id="modalSubtitle">查看候选后再保存。</p></div><button class="icon-button" id="closeModal" aria-label="关闭">×</button></div><div id="modalBody"></div></section></div>
-    <script>if (location.hostname.endsWith(".github.io")) window.REEDEN_API_BASE = "https://red-garden-sync.pages.dev";</script><script src="./app.js" type="module"></script>
+    <script>if (location.hostname.endsWith(".github.io")) window.REEDEN_API_BASE = "https://red-garden-sync.pages.dev"; else if (location.hostname.endsWith(".pages.dev")) window.REEDEN_API_BASE = location.origin;</script><script src="./app.js" type="module"></script>
   </body>
 </html>

@@ -392,8 +392,19 @@
         } catch { /* undecodable image remains unclassified */ }
       }));
     }
-    const readerCandidates = found.filter(item => !item.role && item.width && item.height && item.width >= 900 && item.height >= 1200 && item.width / item.height > 0.65 && item.width / item.height < 0.85);
-    if (readerCandidates.length) readerCandidates[readerCandidates.length - 1].role = "reader";
+    // Hidden-name private exports commonly store the shelf and reader
+    // backgrounds as 926x2048 JPEGs (aspect ~0.45). Keep both bindings when
+    // dimensions and payload order make them unambiguous: the first portrait
+    // image after the splash is the shelf background and the last is the
+    // reader background. The former 0.65–0.85 ratio rejected these real
+    // resources and left browser previews with an empty shelf panel.
+    const tallCandidates = found.filter(item => !item.role && item.width && item.height
+      && item.width >= 850 && item.height >= 1300 && item.width / item.height >= 0.35
+      && item.width / item.height <= 0.65);
+    if (tallCandidates.length) {
+      tallCandidates[0].role = "shelf";
+      if (tallCandidates.length > 1) tallCandidates[tallCandidates.length - 1].role = "reader";
+    }
     return { theme, documents };
   }
   async function extractPrivatePreviewImages(value, options = {}) {

@@ -293,9 +293,15 @@ function isNightAsset(name) {
 }
 async function composeThemePreviewBlob(entries, codec) {
   if (!Array.isArray(entries) || typeof createImageBitmap !== "function") return null;
-  const images = entries
+  const allImages = entries
     .map((entry, index) => ({entry, index, mime: codec.mimeFromBytes(entry.bytes, entry.name), role: entry.role || previewRole(entry.name)}))
-    .filter(item => item.mime?.startsWith("image/") && item.role !== "icon" && !isNightAsset(item.entry.name));
+    .filter(item => item.mime?.startsWith("image/") && item.role !== "icon");
+  // Select one visual mode for a preview.  Mixing day shelf art with a night
+  // splash makes the thumbnail look like a broken theme, while filtering all
+  // night resources leaves night-only packages blank.  Prefer the complete
+  // daytime set whenever it exists, then fall back to the complete night set.
+  const dayImages = allImages.filter(item => !isNightAsset(item.entry.name));
+  const images = dayImages.length ? dayImages : allImages;
   if (!images.length) return null;
   // Decode once to classify nameless images recovered from encrypted REDs.
   for (const item of images) {
@@ -315,19 +321,22 @@ async function composeThemePreviewBlob(entries, codec) {
   let covers;
   if (privatePreview) {
     // RED v2 keeps the manifest encrypted, so these entries have no names.
-    // The fallback uses the observable resource groups instead of a fixed
-    // image index: the first large landscape JPEG is the splash, the first
-    // tall shelf JPEG is the shelf background, and the last tall shelf JPEG
-    // is the reader background. Small resources before the splash are the
-    // cover gallery. This prevents transparent navigation art (for example
-    // the anchor) from becoming the reader and prevents a cover from being
-    // stretched into the shelf panel.
-    const largeLandscapeJpegs = images.filter(item => item.mime === "image/jpeg" && item.width >= 1000 && item.height >= 900 && item.aspect >= .9 && item.aspect <= 1.2);
-    const tallJpegs = images.filter(item => item.mime === "image/jpeg" && item.width >= 1000 && item.height >= 1300 && item.aspect >= .65 && item.aspect <= .85);
+    // The fallback uses observable dimensions and payload order instead of a
+    // fixed image index: the public metadata role identifies a real splash;
+    // the first tall portrait image after it is the shelf background and the
+    // last is the reader background. Current private exports use 926x2048
+    // JPEGs (aspect ~0.45), so a width >=1000 or aspect >=.65 check would
+    // incorrectly discard both and leave the shelf panel blank. Small
+    // resources before the splash are the cover gallery. This also keeps
+    // transparent navigation art (for example the anchor) out of the reader.
+    const tallPortraits = images.filter(item => {
+      const imageMime = item.mime === "image/jpeg" || item.mime === "image/png" || item.mime === "image/webp";
+      return imageMime && item.width >= 850 && item.height >= 1300 && item.aspect >= .35 && item.aspect <= .65 && item !== splash;
+    });
     // For nameless resources dimensions are the primary signal. Public
-    // metadata roles are retained only when the shape-based signal is absent.
-    splash = largeLandscapeJpegs[0] || splash || null;
-    const shelfBackgrounds = tallJpegs.filter(item => !splash || item.index > splash.index);
+    // metadata roles are retained when available, and the shape-based signal
+    // fills only the missing shelf/reader bindings.
+    const shelfBackgrounds = tallPortraits.filter(item => !splash || item.index > splash.index);
     shelf = shelfBackgrounds[0] || namedShelf || null;
     const readerBackgrounds = shelfBackgrounds.filter(item => item !== shelf);
     reader = readerBackgrounds[readerBackgrounds.length - 1] || reader || images.find(item => item.role === "reader") || images.find(item => item.mime === "image/png" && item.width >= 1000 && item.aspect < .7) || null;
@@ -902,7 +911,13 @@ async function discardReview(id) {
   if (state.operation) return;
   setOperation("dismiss-theme");
   try {
-    await api(`/api/themes/pending/${encodeURIComponent(id)}/dismiss`, { method: "POST" });
+    // Browser-sync analysis keeps the source only in this tab and uses a
+    // browser-* staging id. There is no server-side pending item to dismiss;
+    // calling the local pending endpoint would turn its expected 404 into a
+    // false "sync API unavailable" state.
+    if (!String(id).startsWith("browser-")) {
+      await api(`/api/themes/pending/${encodeURIComponent(id)}/dismiss`, { method: "POST" });
+    }
     state.review = state.review.filter(item => item.staging_id !== id);
     selections.review.delete(id);
     renderReview();
