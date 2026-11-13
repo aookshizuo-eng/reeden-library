@@ -293,6 +293,73 @@
     return { format: "red_private_v2", header, encryptedManifestOffset: 8 + headerLength, encryptedManifestLength: header.manifestLength, compressionSupported: false };
   }
 
+  // RED\\x10 keeps its manifest encrypted, but the current private format
+  // stores image payloads sequentially after that manifest.  We cannot name
+  // or decrypt those resources without the theme key, however their standard
+  // image headers remain enough to make a useful visual index.  Extract only
+  // complete PNG/JPEG frames; never treat the encrypted bytes as a ZIP.
+  function extractPrivatePreviewImages(value, options = {}) {
+    const raw = bytesOf(value);
+    if (!startsWith(raw, RED_PRIVATE)) return [];
+    const parsed = parsePrivateHeader(raw);
+    if (parsed.header?.assetMode && parsed.header.assetMode !== "plain-sequential") return [];
+    const manifestLength = Number(parsed.header?.manifestLength);
+    const start = Number.isSafeInteger(manifestLength) && manifestLength >= 0
+      ? Math.min(raw.length, parsed.encryptedManifestOffset + manifestLength)
+      : parsed.encryptedManifestOffset;
+    const limit = Math.max(1, Math.min(24, Number(options.limit) || 12));
+    const maxBytes = Math.max(1024, Number(options.maxBytes) || 24 * 1024 * 1024);
+    const found = [];
+    const seen = new Set();
+    const add = (offset, end, mime, extension) => {
+      if (found.length >= limit || end <= offset || end - offset > maxBytes) return;
+      const key = `${offset}:${end}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      found.push({ name: `private-preview-${found.length + 1}.${extension}`, bytes: raw.slice(offset, end), mime, offset });
+    };
+    for (let offset = start; offset + 12 <= raw.length && found.length < limit; offset++) {
+      // PNG: walk chunks so a byte sequence in compressed data cannot end the
+      // frame prematurely.  Invalid chunks are ignored and scanning resumes.
+      if (raw[offset] === 0x89 && raw[offset + 1] === 0x50 && raw[offset + 2] === 0x4e && raw[offset + 3] === 0x47 && raw[offset + 4] === 0x0d && raw[offset + 5] === 0x0a && raw[offset + 6] === 0x1a && raw[offset + 7] === 0x0a) {
+        let cursor = offset + 8, valid = true, end = 0;
+        while (cursor + 12 <= raw.length && cursor - offset <= maxBytes) {
+          const length = ((raw[cursor] << 24) | (raw[cursor + 1] << 16) | (raw[cursor + 2] << 8) | raw[cursor + 3]) >>> 0;
+          if (length > maxBytes || cursor + 12 + length > raw.length) { valid = false; break; }
+          const type = String.fromCharCode(raw[cursor + 4], raw[cursor + 5], raw[cursor + 6], raw[cursor + 7]);
+          cursor += 12 + length;
+          if (type === "IEND") { end = cursor; break; }
+        }
+        if (valid && end) { add(offset, end, "image/png", "png"); offset = end - 1; }
+        continue;
+      }
+      // JPEG EOI is unambiguous enough here because each payload starts at a
+      // signature boundary; accept the first EOI after SOI and cap scanning.
+      if (raw[offset] === 0xff && raw[offset + 1] === 0xd8 && raw[offset + 2] === 0xff) {
+        const endMarker = raw.indexOf ? raw.indexOf(0xff, offset + 3) : -1;
+        let end = -1;
+        if (endMarker >= 0) {
+          for (let cursor = endMarker; cursor + 1 < raw.length && cursor - offset <= maxBytes; cursor++) {
+            if (raw[cursor] === 0xff && raw[cursor + 1] === 0xd9) { end = cursor + 2; break; }
+          }
+        }
+        if (end > 0) { add(offset, end, "image/jpeg", "jpg"); offset = end - 1; }
+        continue;
+      }
+      if (raw[offset] === 0x47 && raw[offset + 1] === 0x49 && raw[offset + 2] === 0x46 && raw[offset + 3] === 0x38) {
+        const end = raw.indexOf(0x3b, offset + 6);
+        if (end >= 0 && end - offset <= maxBytes) { add(offset, end + 1, "image/gif", "gif"); offset = end; }
+        continue;
+      }
+      if (raw[offset] === 0x52 && raw[offset + 1] === 0x49 && raw[offset + 2] === 0x46 && raw[offset + 3] === 0x46 && raw[offset + 8] === 0x57 && raw[offset + 9] === 0x45 && raw[offset + 10] === 0x42 && raw[offset + 11] === 0x50) {
+        const size = (raw[offset + 4] | (raw[offset + 5] << 8) | (raw[offset + 6] << 16) | (raw[offset + 7] << 24)) >>> 0;
+        const end = Math.min(raw.length, offset + 8 + size + (size & 1));
+        if (end > offset + 12 && end - offset <= maxBytes) { add(offset, end, "image/webp", "webp"); offset = end - 1; }
+      }
+    }
+    return found;
+  }
+
   async function inspectContainer(value) {
     const raw = await readBytes(value);
     if (startsWith(raw, RED_PRIVATE)) return parsePrivateHeader(raw);
@@ -347,7 +414,7 @@
     return { ...info, family, blob, release() { root.document.fonts.delete(face); root.URL.revokeObjectURL(url); } };
   }
 
-  const api = { FreeCodecError, RED_ZIP, RED_PRIVATE, sha256Hex, md5Hex, crc32, mimeFromBytes, readZipEntries, writeZipEntries, inspectContainer, compressImage, compressRed, inspectFont, fontPreview };
+  const api = { FreeCodecError, RED_ZIP, RED_PRIVATE, sha256Hex, md5Hex, crc32, mimeFromBytes, readZipEntries, writeZipEntries, inspectContainer, extractPrivatePreviewImages, compressImage, compressRed, inspectFont, fontPreview };
   if (root && typeof root === "object") root.ReedenFreeCodec = api;
   return api;
 });

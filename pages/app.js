@@ -308,7 +308,7 @@ function isNightAsset(name) {
 async function composeThemePreviewBlob(entries, codec) {
   if (!Array.isArray(entries) || typeof createImageBitmap !== "function") return null;
   const images = entries
-    .map(entry => ({entry, mime: codec.mimeFromBytes(entry.bytes, entry.name), role: previewRole(entry.name)}))
+    .map((entry, index) => ({entry, index, mime: codec.mimeFromBytes(entry.bytes, entry.name), role: previewRole(entry.name)}))
     .filter(item => item.mime?.startsWith("image/") && !isNightAsset(item.entry.name));
   if (!images.length) return null;
   // Decode once to classify nameless images recovered from encrypted REDs.
@@ -319,10 +319,16 @@ async function composeThemePreviewBlob(entries, codec) {
     } catch { item.aspect = 1; }
   }
   const inferred = images.filter(item => item.role === "other");
-  const splash = images.find(item => item.role === "splash") || inferred.find(item => item.aspect < .66) || null;
+  // Private RED resources have no names. Their first portrait image is the
+  // closest equivalent to the launch/cover artwork; use a narrower fallback
+  // only when the first resource is a background or a wide banner.
+  const firstPortrait = inferred.find(item => item.index === 0 && item.aspect < 1.1);
+  const splash = images.find(item => item.role === "splash") || firstPortrait || inferred.find(item => item.aspect < .66) || null;
   const wide = images.filter(item => item.role === "shelf" || (item.role === "other" && item.aspect > 1.55));
-  const shelf = wide[0] || images.find(item => item !== splash) || images[0];
-  const carousel = wide[1] || shelf;
+  const namedShelf = images.find(item => item.role === "shelf");
+  const inferredShelf = inferred.find(item => item !== splash && item.aspect >= .55 && item.aspect <= 1.45);
+  const shelf = namedShelf || inferredShelf || wide[0] || images.find(item => item !== splash) || images[0];
+  const carousel = wide.find(item => item !== shelf) || null;
   const covers = images.filter(item => item !== splash && item !== shelf && item !== carousel && (item.role === "cover" || item.aspect <= 1.2)).slice(0, 6);
   const canvas = document.createElement("canvas");
   canvas.width = 1000; canvas.height = 1000;
