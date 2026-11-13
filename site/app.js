@@ -301,20 +301,34 @@ function previewRole(name) {
   return "other";
 }
 
+function isNightAsset(name) {
+  return /(^|[._/-])(dark|night|nighttime|darkmode|黑夜|夜间)([._/-]|$)/i.test(String(name || ""));
+}
+
 async function composeThemePreviewBlob(entries, codec) {
   if (!Array.isArray(entries) || typeof createImageBitmap !== "function") return null;
   const images = entries
     .map(entry => ({entry, mime: codec.mimeFromBytes(entry.bytes, entry.name), role: previewRole(entry.name)}))
-    .filter(item => item.mime?.startsWith("image/"));
+    .filter(item => item.mime?.startsWith("image/") && !isNightAsset(item.entry.name));
   if (!images.length) return null;
-  const shelf = images.find(item => item.role === "shelf") || images.find(item => item.role === "other") || images[0];
-  const splash = images.find(item => item.role === "splash");
-  const covers = images.filter(item => item.role === "cover").slice(0, 4);
+  // Decode once to classify nameless images recovered from encrypted REDs.
+  for (const item of images) {
+    try {
+      const bitmap = await createImageBitmap(new Blob([item.entry.bytes], {type: item.mime}));
+      item.width = bitmap.width; item.height = bitmap.height; item.aspect = bitmap.width / Math.max(1, bitmap.height); bitmap.close?.();
+    } catch { item.aspect = 1; }
+  }
+  const inferred = images.filter(item => item.role === "other");
+  const splash = images.find(item => item.role === "splash") || inferred.find(item => item.aspect < .66) || null;
+  const wide = images.filter(item => item.role === "shelf" || (item.role === "other" && item.aspect > 1.55));
+  const shelf = wide[0] || images.find(item => item !== splash) || images[0];
+  const carousel = wide[1] || shelf;
+  const covers = images.filter(item => item !== splash && item !== shelf && item !== carousel && (item.role === "cover" || item.aspect <= 1.2)).slice(0, 6);
   const canvas = document.createElement("canvas");
-  canvas.width = 1000; canvas.height = 720;
+  canvas.width = 1000; canvas.height = 1000;
   const context = canvas.getContext("2d");
   if (!context) return null;
-  context.fillStyle = "#edf2f3"; context.fillRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = "#e9e7df"; context.fillRect(0, 0, canvas.width, canvas.height);
   const drawFit = async (item, x, y, width, height, mode = "cover") => {
     if (!item) return;
     let bitmap;
@@ -329,15 +343,26 @@ async function composeThemePreviewBlob(entries, codec) {
       context.drawImage(bitmap, dx, dy, drawWidth, drawHeight); context.restore();
     } finally { bitmap.close?.(); }
   };
-  await drawFit(shelf, 0, 0, 720, 720, "cover");
-  context.fillStyle = "rgba(255,255,255,.84)"; context.fillRect(720, 0, 280, 720);
-  if (splash) await drawFit(splash, 744, 24, 232, 360, "contain");
-  context.fillStyle = "#253338"; context.font = "600 18px system-ui, sans-serif"; context.fillText("书架与书封预览", 744, splash ? 414 : 42);
-  const cardWidth = 52, cardHeight = 154, gap = 10, startX = 744, startY = splash ? 450 : 76;
+  // Left: the real day splash. Right: a bookshelf panel with the real shelf
+  // background, carousel and cover tiles layered in the same visual block.
+  context.fillStyle = "#f8f8f5"; context.fillRect(16, 16, 414, 968);
+  if (splash) await drawFit(splash, 28, 28, 390, 944, "contain");
+  else { context.fillStyle = "#cfd9d8"; context.fillRect(28, 28, 390, 944); context.fillStyle = "#253338"; context.font = "600 24px system-ui, sans-serif"; context.fillText("无启动图", 150, 500); }
+  const panelX = 446, panelY = 16, panelW = 538, panelH = 968;
+  context.fillStyle = "#f8f4e9"; context.fillRect(panelX, panelY, panelW, panelH);
+  if (shelf) await drawFit(shelf, panelX + 12, panelY + 12, panelW - 24, panelH - 24, "cover");
+  context.fillStyle = "rgba(248,244,233,.88)"; context.fillRect(panelX + 18, panelY + 18, panelW - 36, 52);
+  context.fillStyle = "#253338"; context.font = "600 22px system-ui, sans-serif"; context.fillText("书架", panelX + 36, panelY + 52);
+  context.fillStyle = "rgba(255,255,255,.78)"; context.fillRect(panelX + 24, panelY + 88, panelW - 48, 194);
+  if (carousel) await drawFit(carousel, panelX + 30, panelY + 96, panelW - 60, 178, "cover");
+  context.fillStyle = "rgba(255,255,255,.9)"; context.fillRect(panelX + 24, panelY + 306, panelW - 48, 490);
+  context.fillStyle = "#253338"; context.font = "600 18px system-ui, sans-serif"; context.fillText("主题书封", panelX + 42, panelY + 338);
+  const cardWidth = 66, cardHeight = 150, gap = 12, startX = panelX + 38, startY = panelY + 360;
   for (let index = 0; index < covers.length; index++) {
-    const x = startX + index * (cardWidth + gap);
-    context.fillStyle = "rgba(25,40,42,.16)"; context.fillRect(x + 3, startY + 4, cardWidth, cardHeight);
-    await drawFit(covers[index], x, startY, cardWidth, cardHeight, "cover");
+    const column = index % 5, row = Math.floor(index / 5), x = startX + column * (cardWidth + gap), y = startY + row * (cardHeight + 28);
+    if (x + cardWidth > panelX + panelW - 24 || y + cardHeight > panelY + 780) continue;
+    context.fillStyle = "rgba(25,40,42,.16)"; context.fillRect(x + 3, y + 4, cardWidth, cardHeight);
+    await drawFit(covers[index], x, y, cardWidth, cardHeight, "cover");
   }
   const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", .86));
   return blob;
@@ -991,6 +1016,10 @@ async function analyzeFiles(files) {
         } catch (error) {
           if (error?.code !== "private_red_unsupported") throw error;
           inspection = await codec.inspectContainer(raw);
+          // The encrypted manifest cannot be decoded in the free browser
+          // codec, but the private container keeps image payloads in a plain
+          // sequential area. Extract those bytes for a visual-only preview.
+          entries = await codec.extractPrivatePreviewImages(raw);
         }
         const identity = metadataFromEntries(entries, file.name);
         let previewUrl = "";
@@ -1066,15 +1095,14 @@ async function commitThemes(ids = [...selections.review]) {
           const compressedPath = await uploadBrowserObject("compressed", assetSha, "red", compressedBytes, "application/octet-stream");
           let previewPath = "";
           let previewDetails = item.info.preview_details || { kind: "shelf_and_splash", simulation: true };
-          if (!encrypted) {
-            const entries = await codec.readZipEntries(compressedBytes);
-            const preview = await composeThemePreviewBlob(entries, codec);
-            if (preview) {
-              const previewBytes = new Uint8Array(await preview.arrayBuffer());
-              const previewSha = await codec.sha256Hex(previewBytes);
-              previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg");
-              previewDetails = { ...previewDetails, kind: "shelf_and_splash", simulation: true };
-            }
+          let previewEntries = [];
+          try { previewEntries = encrypted ? codec.extractPrivatePreviewImages(raw) : await codec.readZipEntries(compressedBytes); } catch { previewEntries = []; }
+          const preview = await composeThemePreviewBlob(previewEntries, codec);
+          if (preview) {
+            const previewBytes = new Uint8Array(await preview.arrayBuffer());
+            const previewSha = await codec.sha256Hex(previewBytes);
+            previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg");
+            previewDetails = { ...previewDetails, kind: "shelf_and_splash", simulation: true, encrypted_source: encrypted };
           }
           const record = await uploadBrowserRecord({
             kind: "theme", id: `theme-${assetSha.slice(0, 16)}`, name: item.info.name || item.info.source_name, author: item.info.author || "作者未记录",
