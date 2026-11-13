@@ -12,44 +12,36 @@
   else root.ReedenFreeCodec = api;
 })(typeof globalThis !== "undefined" ? globalThis : this, function (root) {
   "use strict";
-
   const RED_ZIP = new Uint8Array([82, 69, 68, 4]);
   const RED_PRIVATE = new Uint8Array([82, 69, 68, 16]);
   const te = typeof TextEncoder === "function" ? new TextEncoder() : null;
   const td = typeof TextDecoder === "function" ? new TextDecoder("utf-8", { fatal: false }) : null;
-
   class FreeCodecError extends Error {
     constructor(message, code = "free_codec_error") { super(message); this.name = "FreeCodecError"; this.code = code; }
   }
-
   function bytesOf(value) {
     if (value instanceof Uint8Array) return value;
     if (value instanceof ArrayBuffer) return new Uint8Array(value);
     if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
     throw new TypeError("需要 ArrayBuffer 或 Uint8Array");
   }
-
   async function readBytes(value) {
     if (value instanceof Uint8Array || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return bytesOf(value);
     if (value && typeof value.arrayBuffer === "function") return new Uint8Array(await value.arrayBuffer());
     throw new TypeError("需要文件、Blob、ArrayBuffer 或 Uint8Array");
   }
-
   function sameBytes(a, b) {
     a = bytesOf(a); b = bytesOf(b);
     if (a.length !== b.length) return false;
     for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
     return true;
   }
-
   function hex(bytes) { return [...bytes].map(value => value.toString(16).padStart(2, "0")).join(""); }
-
   async function sha256Hex(value) {
     const data = await readBytes(value);
     if (!root.crypto?.subtle) throw new FreeCodecError("当前浏览器没有 Web Crypto，无法计算 SHA-256", "crypto_unavailable");
     return hex(new Uint8Array(await root.crypto.subtle.digest("SHA-256", data)));
   }
-
   // Small dependency-free MD5 implementation. RED v4 configurations may
   // contain MD5 references even though package integrity uses SHA-256.
   const MD5_S = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
@@ -85,7 +77,6 @@
     out.setUint32(0, a0, true); out.setUint32(4, b0, true); out.setUint32(8, c0, true); out.setUint32(12, d0, true);
     return hex(output);
   }
-
   const CRC_TABLE = (() => {
     const table = new Uint32Array(256);
     for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : c >>> 1; table[n] = c >>> 0; }
@@ -104,7 +95,6 @@
   function text(bytes) { return td ? td.decode(bytes) : String.fromCharCode(...bytes); }
   function textBytes(value) { if (!te) throw new FreeCodecError("当前浏览器没有 TextEncoder", "text_encoder_unavailable"); return te.encode(value); }
   function startsWith(bytes, signature) { return signature.every((value, index) => bytes[index] === value); }
-
   // Keep browser work bounded.  A small pool is faster than a long serial
   // chain while avoiding hundreds of simultaneous ImageBitmap/ZIP streams on
   // phones with limited memory.
@@ -122,12 +112,10 @@
     await Promise.all(Array.from({length: width}, consume));
     return result;
   }
-
   function defaultConcurrency(fallback = 3) {
     const cores = Number(root.navigator?.hardwareConcurrency);
     return Number.isFinite(cores) && cores > 1 ? Math.min(4, Math.max(2, cores - 1)) : fallback;
   }
-
   function mimeFromBytes(bytes, name = "") {
     const lower = String(name).toLowerCase();
     if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png";
@@ -140,7 +128,6 @@
     if (lower.endsWith(".webp")) return "image/webp";
     return "application/octet-stream";
   }
-
   function hasSignature(bytes, signature) {
     outer: for (let start = 0; start + signature.length <= bytes.length; start++) {
       for (let i = 0; i < signature.length; i++) if (bytes[start + i] !== signature[i]) continue outer;
@@ -156,7 +143,6 @@
     if (hasSignature(bytes.slice(0, 100000), [0x6e, 0x70, 0x54, 0x63])) return "九宫格资源保留原样";
     return "";
   }
-
   async function inflateRaw(bytes) {
     if (typeof root.DecompressionStream !== "function") throw new FreeCodecError("当前浏览器没有 deflate 解压能力，无法读取 RED ZIP", "zip_decompress_unavailable");
     const stream = new Blob([bytes]).stream().pipeThrough(new root.DecompressionStream("deflate-raw"));
@@ -167,13 +153,11 @@
     const stream = new Blob([bytes]).stream().pipeThrough(new root.CompressionStream("deflate-raw"));
     return new Uint8Array(await new Response(stream).arrayBuffer());
   }
-
   function findEndOfCentralDirectory(zip) {
     const lower = Math.max(0, zip.length - 22 - 65535);
     for (let offset = zip.length - 22; offset >= lower; offset--) if (u32(zip, offset) === 0x06054b50) return offset;
     throw new FreeCodecError("RED ZIP 缺少中央目录", "zip_directory_missing");
   }
-
   async function readZipEntries(redBytes) {
     const raw = bytesOf(redBytes);
     if (!startsWith(raw, RED_ZIP)) {
@@ -218,7 +202,6 @@
     entries.push(...decoded);
     return entries;
   }
-
   async function writeZipEntries(entries, options = {}) {
     const local = [], central = []; let offset = 0;
     const prepared = await mapConcurrent(entries, options.concurrency || defaultConcurrency(4), async source => {
@@ -245,7 +228,6 @@
     const end = concat([new Uint8Array([0x50, 0x4b, 0x05, 0x06]), put16(0), put16(0), put16(entries.length), put16(entries.length), put32(centralBytes.length), put32(localBytes.length), put16(0)]);
     return concat([RED_ZIP, localBytes, centralBytes, end]);
   }
-
   function mapHashValue(value, replacements) {
     if (typeof value !== "string") return value;
     const match = value.match(/^([0-9a-fA-F]{32}|[0-9a-fA-F]{64})(\.[A-Za-z0-9]+)?$/);
@@ -259,7 +241,6 @@
     if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapHashes(item, replacements)]));
     return mapHashValue(value, replacements);
   }
-
   async function compressImage(bytes, name, options = {}) {
     const original = bytesOf(bytes), mime = mimeFromBytes(original, name), skipped = isSkippableImage(original, mime, name);
     const decision = { path: name, mime, used: false, originalBytes: original.length };
@@ -284,7 +265,6 @@
       return { bytes: candidate, mime, decision };
     } finally { bitmap.close?.(); }
   }
-
   function parsePrivateHeader(raw) {
     if (!startsWith(raw, RED_PRIVATE) || raw.length < 8) throw new FreeCodecError("不是 RED v2 私有主题", "private_header_invalid");
     const headerLength = new DataView(raw.buffer, raw.byteOffset, raw.byteLength).getUint32(4, false);
@@ -292,13 +272,131 @@
     let header; try { header = JSON.parse(text(raw.slice(8, 8 + headerLength))); } catch { throw new FreeCodecError("RED v2 公开头不是有效 JSON", "private_header_invalid"); }
     return { format: "red_private_v2", header, encryptedManifestOffset: 8 + headerLength, encryptedManifestLength: header.manifestLength, compressionSupported: false };
   }
-
   // RED\\x10 keeps its manifest encrypted, but the current private format
   // stores image payloads sequentially after that manifest.  We cannot name
   // or decrypt those resources without the theme key, however their standard
   // image headers remain enough to make a useful visual index.  Extract only
   // complete PNG/JPEG frames; never treat the encrypted bytes as a ZIP.
-  function extractPrivatePreviewImages(value, options = {}) {
+  function jsonObjectEnd(raw, start, limit = 4 * 1024 * 1024) {
+    if (raw[start] !== 0x7b) return -1;
+    let depth = 0, inString = false, escaped = false;
+    const end = Math.min(raw.length, start + limit);
+    for (let index = start; index < end; index++) {
+      const byte = raw[index];
+      if (inString) {
+        if (escaped) { escaped = false; continue; }
+        if (byte === 0x5c) { escaped = true; continue; }
+        if (byte === 0x22) inString = false;
+        continue;
+      }
+      if (byte === 0x22) { inString = true; continue; }
+      if (byte === 0x7b) depth++;
+      else if (byte === 0x7d && --depth === 0) return index + 1;
+      if (depth < 0) return -1;
+    }
+    return -1;
+  }
+  function privateJsonDocuments(raw, start, limit = 2000) {
+    const documents = [];
+    for (let offset = start; offset < raw.length && documents.length < limit; offset++) {
+      if (raw[offset] !== 0x7b) continue;
+      // Binary payloads contain braces frequently. JSON objects almost always
+      // begin with a quoted key; this guard avoids expensive scans through
+      // compressed/encrypted bytes while retaining UTF-8 object values.
+      let next = offset + 1;
+      while (next < raw.length && (raw[next] === 0x20 || raw[next] === 0x09 || raw[next] === 0x0a || raw[next] === 0x0d)) next++;
+      if (raw[next] !== 0x22) continue;
+      const end = jsonObjectEnd(raw, offset);
+      if (end <= offset) continue;
+      try {
+        const value = JSON.parse(text(raw.subarray(offset, end)));
+        if (value && typeof value === "object" && !Array.isArray(value)) documents.push({ offset, end, value });
+        offset = end - 1;
+      } catch { /* A binary brace or partial object; resume at the next byte. */ }
+    }
+    return documents;
+  }
+  function hashValue(value) {
+    if (typeof value !== "string") return "";
+    const match = value.match(/^([0-9a-f]{32}|[0-9a-f]{64})(?:\.[A-Za-z0-9]+)?$/i);
+    return match ? match[1].toLowerCase() : "";
+  }
+  function isThemeObject(value) {
+    return Boolean(value && typeof value.name === "string" && (value.light && typeof value.light === "object" || value.dark && typeof value.dark === "object"));
+  }
+  async function annotatePrivatePreviewRoles(raw, parsed, found, options = {}) {
+    const documents = privateJsonDocuments(raw, parsed.encryptedManifestOffset + (Number(parsed.header?.manifestLength) || 0));
+    const themeCandidates = documents.filter(item => isThemeObject(item.value));
+    const theme = themeCandidates.length ? themeCandidates[themeCandidates.length - 1].value : null;
+    const rolesByHash = new Map(), splashIds = new Set();
+    for (const mode of ["light", "dark"]) {
+      const config = theme?.[mode];
+      if (!config || typeof config !== "object") continue;
+      const bind = (value, role) => { const digest = hashValue(value); if (digest) rolesByHash.set(digest, role); };
+      bind(config.backgroundImage, "shelf");
+      bind(config.cardBackgroundImage, "card");
+      const carousels = Array.isArray(config.bookshelfCarouselImageUrls) ? config.bookshelfCarouselImageUrls : [config.bookshelfCarouselImageUrls];
+      for (const value of carousels) bind(value, "carousel");
+      if (typeof config.customSplashId === "string" && config.customSplashId) splashIds.add(config.customSplashId);
+    }
+    // MD5 is what current private theme configs use for background/card IDs.
+    // The async SHA pass below covers splash metadata, which stores SHA-256.
+    const hashes = found.map(item => md5Hex(item.bytes).toLowerCase());
+    for (let index = 0; index < found.length; index++) {
+      const role = rolesByHash.get(hashes[index]);
+      if (role) found[index].role = role;
+    }
+    const sha = await Promise.all(found.map(item => sha256Hex(item.bytes).catch(() => "")));
+    const splashDocs = documents.filter(item => {
+      const value = item.value;
+      return value && typeof value === "object" && value.assetType === "image" && hashValue(value.assetId);
+    });
+    const unlabeledSplashDocs = splashDocs.filter(item => !["id", "resourceId", "customSplashId"].some(key => typeof item.value[key] === "string"));
+    const adjacent = (doc, index) => found[index].end === doc.offset;
+    for (const doc of splashDocs) {
+      const explicit = new Set(["id", "resourceId", "customSplashId"].map(key => doc.value[key]).filter(value => typeof value === "string"));
+      let matched = false;
+      for (let index = 0; index < found.length; index++) {
+        if (!adjacent(doc, index)) continue;
+        const digest = hashValue(doc.value.assetId);
+        const matches = digest === hashes[index] || digest === sha[index];
+        if (!matches) continue;
+        const idMatch = [...explicit].some(id => splashIds.has(id));
+        if (idMatch || (!explicit.size && splashIds.size === 1 && unlabeledSplashDocs.length === 1)) {
+          found[index].role = "splash"; found[index].roleEvidence = "public_splash_metadata"; matched = true;
+        }
+      }
+      if (matched) continue;
+    }
+    // Public cover metadata is commonly adjacent to one gallery image while
+    // the remaining gallery members have no names. Treat the leading unbound
+    // images before the verified splash as the same cover gallery; this keeps
+    // stamps/illustrations together and excludes later navbar decorations.
+    const splashIndex = found.findIndex(item => item.role === "splash");
+    const coverDocs = documents.filter(item => {
+      const keys = Object.keys(item.value || {}).sort();
+      return keys.length === 2 && keys[0] === "name" && keys[1] === "transparentOptimization" && typeof item.value.name === "string" && typeof item.value.transparentOptimization === "boolean";
+    });
+    if (splashIndex >= 0 && coverDocs.length) {
+      const leading = found.slice(0, splashIndex).filter(item => !item.role);
+      for (const item of leading) item.role = "cover";
+    }
+    // Reader backgrounds are not hash-bound in the public schema. In the
+    // private sequential layout they are the final large portrait image(s),
+    // after the navigation/decoration block, while shelf is already bound.
+    if (typeof root.createImageBitmap === "function") {
+      await Promise.all(found.map(async item => {
+        try {
+          const bitmap = await root.createImageBitmap(new Blob([item.bytes], { type: item.mime }));
+          item.width = bitmap.width; item.height = bitmap.height; bitmap.close?.();
+        } catch { /* undecodable image remains unclassified */ }
+      }));
+    }
+    const readerCandidates = found.filter(item => !item.role && item.width && item.height && item.width >= 900 && item.height >= 1200 && item.width / item.height > 0.65 && item.width / item.height < 0.85);
+    if (readerCandidates.length) readerCandidates[readerCandidates.length - 1].role = "reader";
+    return { theme, documents };
+  }
+  async function extractPrivatePreviewImages(value, options = {}) {
     const raw = bytesOf(value);
     if (!startsWith(raw, RED_PRIVATE)) return [];
     const parsed = parsePrivateHeader(raw);
@@ -307,7 +405,7 @@
     const start = Number.isSafeInteger(manifestLength) && manifestLength >= 0
       ? Math.min(raw.length, parsed.encryptedManifestOffset + manifestLength)
       : parsed.encryptedManifestOffset;
-    const limit = Math.max(1, Math.min(24, Number(options.limit) || 12));
+    const limit = Math.max(1, Math.min(24, Number(options.limit) || 24));
     const maxBytes = Math.max(1024, Number(options.maxBytes) || 24 * 1024 * 1024);
     const found = [];
     const seen = new Set();
@@ -316,7 +414,7 @@
       const key = `${offset}:${end}`;
       if (seen.has(key)) return;
       seen.add(key);
-      found.push({ name: `private-preview-${found.length + 1}.${extension}`, bytes: raw.slice(offset, end), mime, offset });
+      found.push({ name: `private-preview-${found.length + 1}.${extension}`, bytes: raw.slice(offset, end), mime, offset, end });
     };
     for (let offset = start; offset + 12 <= raw.length && found.length < limit; offset++) {
       // PNG: walk chunks so a byte sequence in compressed data cannot end the
@@ -357,9 +455,9 @@
         if (end > offset + 12 && end - offset <= maxBytes) { add(offset, end, "image/webp", "webp"); offset = end - 1; }
       }
     }
+    await annotatePrivatePreviewRoles(raw, parsed, found, options);
     return found;
   }
-
   async function inspectContainer(value) {
     const raw = await readBytes(value);
     if (startsWith(raw, RED_PRIVATE)) return parsePrivateHeader(raw);
@@ -367,7 +465,6 @@
     const entries = await readZipEntries(raw);
     return { format: "red_v4", entries: entries.map(entry => ({ name: entry.name, bytes: entry.bytes.length, mime: mimeFromBytes(entry.bytes, entry.name) })), compressionSupported: true };
   }
-
   async function compressRed(value, options = {}) {
     const raw = await readBytes(value);
     if (startsWith(raw, RED_PRIVATE)) throw new FreeCodecError("加密 RED v2 当前浏览器版本只做结构识别，暂不重新封包；请使用电脑后台版本", "private_red_unsupported");
@@ -394,14 +491,12 @@
     const selected = candidate.length < raw.length ? candidate : raw;
     return { bytes: selected, originalBytes: raw.length, compressedBytes: selected.length, savedBytes: raw.length - selected.length, packageSelected: selected !== raw, decisions, format: "red_v4" };
   }
-
   async function inspectFont(value) {
     const bytes = await readBytes(value), name = typeof value?.name === "string" ? value.name : "font";
     const extension = (name.match(/\.([A-Za-z0-9]+)$/)?.[1] || "").toLowerCase();
     if (!["ttf", "otf", "woff", "woff2"].includes(extension)) throw new FreeCodecError("字体格式仅支持 TTF、OTF、WOFF、WOFF2", "font_format_unsupported");
     return { fileName: name, extension, bytes: bytes.length, sha256: await sha256Hex(bytes), previewText: "Aa 中文 0123 · Reeden Theme" };
   }
-
   async function fontPreview(value, options = {}) {
     if (!root.FontFace || !root.document) throw new FreeCodecError("当前环境没有 FontFace/DOM，无法生成字体预览", "font_preview_unavailable");
     const bytes = await readBytes(value), info = await inspectFont(value), family = options.family || `ReedenFont_${info.sha256.slice(0, 12)}`;
@@ -413,7 +508,6 @@
     const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new FreeCodecError("字体预览编码失败", "font_preview_encode_failed")), "image/png"));
     return { ...info, family, blob, release() { root.document.fonts.delete(face); root.URL.revokeObjectURL(url); } };
   }
-
   const api = { FreeCodecError, RED_ZIP, RED_PRIVATE, sha256Hex, md5Hex, crc32, mimeFromBytes, readZipEntries, writeZipEntries, inspectContainer, extractPrivatePreviewImages, compressImage, compressRed, inspectFont, fontPreview };
   if (root && typeof root === "object") root.ReedenFreeCodec = api;
   return api;

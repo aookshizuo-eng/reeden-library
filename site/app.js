@@ -1,6 +1,5 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-
 // GitHub Pages mode can point this static UI at a separate sync API without
 // putting any R2 credential in the browser. The local Python service remains
 // the default when no API base is configured.
@@ -25,7 +24,6 @@ let apiBase = normalizeApiBase(window.REEDEN_API_BASE || (() => {
 let syncToken = (() => { try { return localStorage.getItem(SYNC_TOKEN_STORAGE_KEY) || ""; } catch { return ""; } })();
 let remoteUnavailable = false;
 let freeCodecModule;
-
 // Reserved browser-processing hook. A future free_codec.js can expose the
 // actual ZIP/AES-GCM/Web Worker implementation without changing this UI. Until
 // it reports ready=true, this app never claims that a local browser job ran.
@@ -42,7 +40,6 @@ async function loadFreeCodec() {
   return window.ReedenFreeCodec || freeCodecModule;
 }
 function freeCodecReady() { return Boolean(window.ReedenFreeCodec?.inspectContainer || window.REEDEN_FREE_CODEC?.inspectContainer || freeCodecModule?.inspectContainer); }
-
 function apiUrl(path) {
   if (/^(?:https?:|data:|blob:)/i.test(String(path))) return String(path);
   return `${apiBase}${String(path).startsWith("/") ? path : `/${path}`}`;
@@ -69,7 +66,6 @@ function updateRuntimeMode() {
   const tokenInput = $("#syncTokenInput");
   if (tokenInput && document.activeElement !== tokenInput) tokenInput.value = syncToken;
 }
-
 function markRemoteUnavailable(reason = "") {
   if (!apiBase) return;
   remoteUnavailable = true;
@@ -77,7 +73,6 @@ function markRemoteUnavailable(reason = "") {
   const status = $("#apiBaseStatus");
   if (status && reason) operationMessage(status, `同步 API 不可用：${reason}。未执行压缩或上传。`, true);
 }
-
 function saveApiBaseSetting() {
   const input = $("#apiBaseInput");
   const value = String(input?.value || "").trim();
@@ -103,13 +98,11 @@ function saveApiBaseSetting() {
     } catch (error) { operationMessage($("#apiBaseStatus"), `连接失败：${error.message}`, true); }
   })();
 }
-
 function requestHeaders(headers = {}) {
   const result = new Headers(headers);
   if (apiBase && syncToken) result.set("Authorization", `Bearer ${syncToken}`);
   return result;
 }
-
 const state = { themes: [], fonts: [], assets: [], review: [], jobs: [], activeView: "import", importKind: "theme", assetFilter: "all", assetSearch: "", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs"), importAssetIds: readSessionIds("reeden-import-assets") };
 const selections = { review: new Set(), theme: new Set(), font: new Set(), asset: new Set() };
 const loadedFontFaces = new Set();
@@ -127,7 +120,6 @@ let pan123QrTimer;
 let pan123QrExpiryTimer;
 let pan123QrGeneration = 0;
 let pan123QrController;
-
 async function mapConcurrent(items, limit, worker) {
   const values = Array.from(items || []), result = new Array(values.length);
   const width = Math.max(1, Math.min(Number(limit) || 1, values.length || 1));
@@ -142,12 +134,10 @@ async function mapConcurrent(items, limit, worker) {
   await Promise.all(Array.from({ length: width }, consume));
   return result;
 }
-
 function invalidateBrowserLibraryRecords() {
   browserLibraryRecordsCache = undefined;
   browserLibraryRecordsLoadedAt = 0;
 }
-
 function readSessionIds(key) {
   try { const value = JSON.parse(sessionStorage.getItem(key) || "[]"); return Array.isArray(value) ? value.filter(id => typeof id === "string") : []; }
   catch { return []; }
@@ -165,11 +155,9 @@ function isAssetBusy(kind, id) {
   return Boolean(record?.source_staging_id && activeJobs().some(job => job.action === "commit-themes" && jobHasId(job, record.source_staging_id)));
 }
 function assetJob(record) { return activeJobs().find(job => jobHasId(job, record.id) || (record.source_staging_id && job.action === "commit-themes" && jobHasId(job, record.source_staging_id))); }
-
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[char]));
 }
-
 function toast(message) {
   const el = $("#toast");
   el.textContent = message;
@@ -177,7 +165,6 @@ function toast(message) {
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => el.classList.remove("is-visible"), 2600);
 }
-
 async function api(path, options = {}) {
   if (staticHostedWithoutApi()) {
     throw new Error("当前 APK/静态网页尚未连接同步 Worker；请到“存储设置 → 多设备访问”填写 Worker 地址和同步 Token");
@@ -206,17 +193,14 @@ async function api(path, options = {}) {
   if (apiBase && remoteUnavailable) { remoteUnavailable = false; updateRuntimeMode(); }
   return data;
 }
-
 function browserSyncEnabled() {
   return Boolean(apiBase && state.storage?.mode === "browser-local");
 }
-
 async function browserCodec() {
   const codec = await loadFreeCodec();
   if (!codec?.inspectContainer || !codec?.sha256Hex) throw new Error("浏览器处理器未加载，请刷新页面后重试");
   return codec;
 }
-
 async function uploadBrowserObject(kind, sha, extension, body, contentType) {
   const path = `/api/objects/${encodeURIComponent(kind)}/${encodeURIComponent(sha)}.${extension}`;
   const request = (method) => fetch(apiUrl(path), {
@@ -238,7 +222,6 @@ async function uploadBrowserObject(kind, sha, extension, body, contentType) {
   }
   return path;
 }
-
 async function uploadBrowserRecord(record, codec) {
   // Records are immutable content-addressed objects. Keep a stable asset id
   // and timestamp so a classification edit supersedes its older record.
@@ -250,16 +233,13 @@ async function uploadBrowserRecord(record, codec) {
   invalidateBrowserLibraryRecords();
   return record;
 }
-
 function normalizeIdentity(value) {
   return String(value || "").toLocaleLowerCase("zh-CN").replace(/[\s\p{P}\p{S}]+/gu, "");
 }
-
 function browserDuplicateCandidates(name, author) {
   const target = `${normalizeIdentity(name)}\u0000${normalizeIdentity(author || "作者未记录")}`;
   return state.themes.filter(theme => `${normalizeIdentity(theme.name)}\u0000${normalizeIdentity(theme.author || "作者未记录")}` === target);
 }
-
 function metadataFromEntries(entries, fileName) {
   let name = String(fileName || "主题").replace(/\.red$/i, "").trim();
   let author = "作者未记录";
@@ -277,7 +257,6 @@ function metadataFromEntries(entries, fileName) {
   }
   return { name, author };
 }
-
 async function imagePreviewBlob(bytes, mime, maxWidth = 900) {
   if (!bytes?.length || !mime?.startsWith("image/") || typeof createImageBitmap !== "function") return null;
   try {
@@ -292,7 +271,6 @@ async function imagePreviewBlob(bytes, mime, maxWidth = 900) {
     } finally { bitmap.close?.(); }
   } catch { return null; }
 }
-
 function previewRole(name) {
   const value = String(name || "").replace(/\\/g, "/").toLowerCase();
   if (/navbar_pack|navbar|bottom_bar|tabbar|(^|[/_.-])(icon|normal|selected)([/_.-]|$)/i.test(value)) return "icon";
@@ -303,15 +281,13 @@ function previewRole(name) {
   if (/theme_bg|bookshelf|shelf|library|background|书架|书架底|首页|主页/i.test(value)) return "shelf";
   return "other";
 }
-
 function isNightAsset(name) {
   return /(^|[._/-])(dark|night|nighttime|darkmode|黑夜|夜间)([._/-]|$)/i.test(String(name || ""));
 }
-
 async function composeThemePreviewBlob(entries, codec) {
   if (!Array.isArray(entries) || typeof createImageBitmap !== "function") return null;
   const images = entries
-    .map((entry, index) => ({entry, index, mime: codec.mimeFromBytes(entry.bytes, entry.name), role: previewRole(entry.name)}))
+    .map((entry, index) => ({entry, index, mime: codec.mimeFromBytes(entry.bytes, entry.name), role: entry.role || previewRole(entry.name)}))
     .filter(item => item.mime?.startsWith("image/") && item.role !== "icon" && !isNightAsset(item.entry.name));
   if (!images.length) return null;
   // Decode once to classify nameless images recovered from encrypted REDs.
@@ -322,7 +298,7 @@ async function composeThemePreviewBlob(entries, codec) {
     } catch { item.aspect = 1; }
   }
   const privatePreview = images.some(item => /^private-preview-/i.test(String(item.entry.name || "")));
-  const splash = images.find(item => item.role === "splash") || null;
+  let splash = images.find(item => item.role === "splash") || null;
   let reader = images.find(item => item.role === "reader") || null;
   const wide = images.filter(item => item.role === "carousel" || item.role === "shelf" || (item.role === "other" && item.aspect > 1.55));
   const namedShelf = images.find(item => item.role === "shelf");
@@ -330,14 +306,29 @@ async function composeThemePreviewBlob(entries, codec) {
   let carousel;
   let covers;
   if (privatePreview) {
-    // Private REDs expose no manifest names. The extractor keeps the source
-    // order, so use the first image only as a cover-card candidate and the
-    // next image as the shelf/background candidate; never call either splash.
-    shelf = namedShelf || images.find(item => item.index === 1) || wide[0] || null;
-    carousel = images.find(item => item.role === "carousel") || wide.find(item => item !== shelf) || null;
-    covers = images.filter(item => item.role === "cover" && item !== shelf).slice(0, 6);
-    if (!covers.length && images[0] && images[0] !== shelf) covers = [images[0]];
-    if (!reader) reader = [...images].reverse().find(item => item !== shelf && item !== carousel && item.role !== "cover") || null;
+    // RED v2 keeps the manifest encrypted, so these entries have no names.
+    // The fallback uses the observable resource groups instead of a fixed
+    // image index: the first large landscape JPEG is the splash, the first
+    // tall shelf JPEG is the shelf background, and the last tall shelf JPEG
+    // is the reader background. Small resources before the splash are the
+    // cover gallery. This prevents transparent navigation art (for example
+    // the anchor) from becoming the reader and prevents a cover from being
+    // stretched into the shelf panel.
+    const largeLandscapeJpegs = images.filter(item => item.mime === "image/jpeg" && item.width >= 1000 && item.height >= 900 && item.aspect >= .9 && item.aspect <= 1.2);
+    const tallJpegs = images.filter(item => item.mime === "image/jpeg" && item.width >= 1000 && item.height >= 1300 && item.aspect >= .65 && item.aspect <= .85);
+    // For nameless resources dimensions are the primary signal. Public
+    // metadata roles are retained only when the shape-based signal is absent.
+    splash = largeLandscapeJpegs[0] || splash || null;
+    const shelfBackgrounds = tallJpegs.filter(item => !splash || item.index > splash.index);
+    shelf = shelfBackgrounds[0] || namedShelf || null;
+    const readerBackgrounds = shelfBackgrounds.filter(item => item !== shelf);
+    reader = readerBackgrounds[readerBackgrounds.length - 1] || reader || images.find(item => item.role === "reader") || images.find(item => item.mime === "image/png" && item.width >= 1000 && item.aspect < .7) || null;
+    carousel = images.find(item => item.role === "carousel") || null;
+    const coverLimit = splash ? splash.index : (shelfBackgrounds[0]?.index ?? images.length);
+    covers = images.filter(item => item.index < coverLimit && item !== splash && item !== shelf && item !== reader && item.role !== "card" && item.width <= 1100 && item.height <= 1600).slice(0, 6);
+    if (!covers.length) covers = images.filter(item => item.role === "cover" && item !== splash && item !== shelf && item !== reader).slice(0, 6);
+    if (!covers.length) covers = images.filter(item => item !== splash && item !== shelf && item !== reader && item.width <= 1100 && item.height <= 1600).slice(0, 6);
+    try { entries.previewKind = splash ? "shelf_and_splash" : "shelf_and_reader"; } catch {}
   } else {
     shelf = namedShelf || images.find(item => item.role === "shelf") || wide.find(item => item.role === "shelf") || null;
     carousel = images.find(item => item.role === "carousel") || wide.find(item => item !== shelf) || null;
@@ -386,9 +377,9 @@ async function composeThemePreviewBlob(entries, codec) {
     await drawFit(covers[index], x, y, cardWidth, cardHeight, "cover");
   }
   const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", .86));
+  try { entries.previewKind = splash ? "shelf_and_splash" : "shelf_and_reader"; } catch {}
   return blob;
 }
-
 async function jpegBytesFromBlob(blob) {
   if (!blob || typeof createImageBitmap !== "function") return null;
   try {
@@ -404,14 +395,12 @@ async function jpegBytesFromBlob(blob) {
     } finally { bitmap.close?.(); }
   } catch { return null; }
 }
-
 function formatBytes(value) {
   if (!Number.isFinite(value)) return "—";
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / 1024 / 1024).toFixed(2)} MB`;
 }
-
 function compressionSummary(theme) {
   if (requiresOriginalPreservation(theme)) return "加密主题 · 原样保存，未压缩";
   if (theme.status === "cloud_existing") return "R2 已有文件 · 历史压缩状态未知";
@@ -421,7 +410,6 @@ function compressionSummary(theme) {
   const saved = Math.max(0, before - after);
   return `${formatBytes(before)} → ${formatBytes(after)} · ${saved ? `节省 ${(saved / before * 100).toFixed(1)}%` : "原包已较小，保留原字节"}`;
 }
-
 function compressionOptions() {
   const quality = Number($("#compressionQuality").value);
   const max_edge = Number($("#compressionMaxEdge").value);
@@ -429,7 +417,6 @@ function compressionOptions() {
   if (!Number.isInteger(max_edge) || max_edge < 64 || max_edge > 8192) throw new Error("图片长边上限请填写 64–8192 的整数");
   return { quality, max_edge };
 }
-
 function renderCompressionResults() {
   const batch = new Set(state.jobs.filter(job => state.importThemeJobIds.includes(job.id)).flatMap(job => job.ids || []));
   const themes = state.themes.filter(theme => batch.has(theme.source_staging_id));
@@ -438,15 +425,13 @@ function renderCompressionResults() {
     return `<article class="compression-result"><div><strong>${escapeHtml(theme.name || theme.source_name || "主题")}</strong><p>${escapeHtml(compressionSummary(theme))}</p><p>${escapeHtml(syncLabel(theme))}</p></div>${url ? `<a class="download-link" href="${escapeHtml(url)}">${requiresOriginalPreservation(theme) ? "下载原样主题" : "下载压缩 RED"}</a>` : ""}</article>`;
   }).join("");
 }
-
 function preferredPreview(light, dark) {
   return {url: light || dark || "", label: light ? "日间" : dark ? "夜间补位" : "暂无预览"};
 }
-
 function previewCompositionKind(entries) {
-  return (entries || []).some(entry => previewRole(entry?.name) === "splash") ? "shelf_and_splash" : "shelf_and_reader";
+  if (entries?.previewKind) return entries.previewKind;
+  return (entries || []).some(entry => (entry?.role || previewRole(entry?.name)) === "splash") ? "shelf_and_splash" : "shelf_and_reader";
 }
-
 function previewKind(details = {}) {
   if (details?.kind === "shelf_and_splash") return "书架 + 启动";
   if (details?.kind === "shelf_and_reader") return "书架 + 阅读页";
@@ -454,7 +439,6 @@ function previewKind(details = {}) {
   if (details?.kind === "splash") return "启动图";
   return "主题预览";
 }
-
 function previewImage(url, alt, className = "", details = {}) {
   if (!url) return `<span class="${className} preview-empty" role="img" aria-label="暂无可用预览">暂无预览</span>`;
   url = assetUrl(url);
@@ -463,7 +447,6 @@ function previewImage(url, alt, className = "", details = {}) {
     : details?.simulation ? "书架使用主题真实素材离线合成，右侧为书架、轮播和封面图集。" + (details.kind === "shelf_and_splash" ? "左侧为启动图。" : "左侧为阅读页或阅读背景。") : "使用主题包内图片生成的轻量预览。";
   return `<button class="preview-open ${className}" type="button" aria-label="${escapeHtml(alt)}，点击放大" data-preview-url="${escapeHtml(url)}" data-preview-title="${escapeHtml(alt)}" data-preview-description="${escapeHtml(description)}"><img src="${escapeHtml(url)}" alt="${escapeHtml(alt)}" loading="lazy" /></button>`;
 }
-
 function showPreview(button) {
   const dialog = $("#previewDialog");
   $("#previewDialogTitle").textContent = button.dataset.previewTitle;
@@ -473,11 +456,9 @@ function showPreview(button) {
   image.alt = button.dataset.previewTitle;
   dialog.showModal();
 }
-
 function requiresOriginalPreservation(record) {
   return record.compression_supported === false || record.status === "private_preserved";
 }
-
 function syncLabel(record) {
   const job = assetJob(record);
   if (job) return job.status === "running" ? "后台正在处理" : "已加入后台队列";
@@ -487,19 +468,16 @@ function syncLabel(record) {
   if (status === "failed") return "R2 同步失败";
   return record.cloud || record.remote ? "云端已收录" : "本地已保存";
 }
-
 function resultWarning(result) {
   const warnings = result.warnings || result.warning || result.sync_error;
   if (!warnings) return "";
   if (Array.isArray(warnings)) return warnings.map(item => typeof item === "string" ? item : item.error || item.message || "部分同步失败").join("；");
   return typeof warnings === "string" ? warnings : Object.values(warnings).join("；");
 }
-
 function operationMessage(element, message, failed = false) {
   element.textContent = message;
   element.classList.toggle("is-error", failed);
 }
-
 function r2Enabled() { return browserSyncEnabled() || state.storage?.library?.provider === "cloudflare_r2"; }
 function autoSyncEnabled() { return browserSyncEnabled() || (r2Enabled() && state.storage?.library?.autoSync); }
 function savedToCloud(record) { return record.saved_to_cloud === true || (record.sync_status?.library === "synced" && record.local_status === "cloud_only" && !record.sync_error); }
@@ -508,11 +486,9 @@ function eligibleIds(kind) {
   const collection = kind === "theme" ? state.themes : kind === "font" ? state.fonts : state.assets;
   return collection.filter(item => !savedToCloud(item) && !isAssetBusy(kind, item.id)).map(item => item.id);
 }
-
 function selectInput(kind, id, name, disabled = false) {
   return `<input class="item-select" type="checkbox" data-selection="${kind}" data-id="${escapeHtml(id)}" aria-label="选择${escapeHtml(name)}" ${selections[kind].has(id) ? "checked" : ""} ${disabled || state.operation ? "disabled" : ""} />`;
 }
-
 function updateBulkControls() {
   const toolbars = [
     ["review", "selectAllReview", "reviewSelectedCount", "commitSelectedThemes"],
@@ -559,13 +535,11 @@ function updateBulkControls() {
   $$(".drop-zone").forEach(zone => zone.setAttribute("aria-disabled", String(Boolean(state.operation))));
   updateStorageControls();
 }
-
 function setOperation(operation) { state.operation = operation; updateBulkControls(); }
 function toggleAll(kind, checked) {
   selections[kind] = new Set(checked ? eligibleIds(kind) : []);
   updateBulkControls();
 }
-
 const viewNames = { import: "导入", themes: "主题库", fonts: "字体库", assets: "收藏库", jobs: "后台任务", storage: "存储设置" };
 function setView(view) {
   if (!viewNames[view]) view = "import";
@@ -592,22 +566,18 @@ function setImportKind(kind) {
     button.tabIndex = selected ? 0 : -1;
   });
 }
-
 function recordKindPath(kind) {
   return kind === "asset" ? "assets" : kind === "theme" ? "themes" : "fonts";
 }
-
 function recordTags(record) {
   return Array.isArray(record?.tags) ? record.tags.filter(Boolean).map(String) : [];
 }
-
 function classificationEditor(record, kind) {
   const author = String(record?.author || "").trim();
   const style = String(record?.style || "").trim();
   const tags = recordTags(record);
   return `<div class="record-classifications">${author ? `<span class="category-chip">作者：${escapeHtml(author)}</span>` : `<span class="category-chip is-empty">未分作者</span>`}${style ? `<span class="category-chip">风格：${escapeHtml(style)}</span>` : `<span class="category-chip is-empty">未分风格</span>`}${tags.map(tag => `<span class="category-chip">#${escapeHtml(tag)}</span>`).join("")}</div><form class="asset-meta-form record-classification-form" data-record-form="${escapeHtml(record?.id || "")}" data-record-kind="${escapeHtml(kind)}"><div class="asset-meta-fields"><label>作者<input name="author" value="${escapeHtml(author)}" placeholder="作者" /></label><label>风格<input name="style" value="${escapeHtml(style)}" placeholder="风格" /></label><label>标签<input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="标签，用逗号分隔" /></label></div><button class="text-button" type="submit">保存分类</button></form>`;
 }
-
 function renderThemes() {
   const list = $("#themeList");
   $("#themeCount").textContent = `${state.themes.length} 个主题`;
@@ -632,7 +602,6 @@ function renderThemes() {
   renderCompressionResults();
   updateBulkControls();
 }
-
 function renderReview() {
   const area = $("#reviewArea");
   area.hidden = state.review.length === 0;
@@ -649,7 +618,6 @@ function renderReview() {
   $$(".discard-review").forEach(button => button.addEventListener("click", () => discardReview(button.dataset.id)));
   updateBulkControls();
 }
-
 function renderFonts() {
   $("#fontCount").textContent = `${state.fonts.length} 个字体`;
   $("#fontEmpty").hidden = state.fonts.length > 0;
@@ -665,11 +633,9 @@ function renderFonts() {
   renderImportedFonts();
   updateBulkControls();
 }
-
 function assetTypeLabel(asset) {
   return String(asset.asset_type || asset.extension || "").toLowerCase() === "svg" ? "SVG" : "HTML";
 }
-
 function assetMatchesFilter(asset) {
   const mode = state.assetFilter || "all";
   if (mode === "ungrouped" && (String(asset.author || "").trim() || String(asset.style || "").trim())) return false;
@@ -679,7 +645,6 @@ function assetMatchesFilter(asset) {
   if (!needle) return true;
   return [asset.name, asset.file_name, asset.author, asset.style, ...(asset.tags || [])].some(value => String(value || "").toLocaleLowerCase("zh-CN").includes(needle));
 }
-
 function assetPreview(asset, compact = false) {
   const url = assetUrl(asset.preview_url || asset.object_url || asset.url || "");
   if (!url) return `<div class="asset-preview-empty">暂无预览</div>`;
@@ -689,7 +654,6 @@ function assetPreview(asset, compact = false) {
   // allowing CSS and markup to render for a useful thumbnail.
   return `<iframe class="asset-html-preview ${compact ? "is-compact" : ""}" title="${escapeHtml(asset.name || asset.file_name || "HTML")} 预览" src="${escapeHtml(url)}" sandbox="" loading="lazy"></iframe>`;
 }
-
 function assetCard(asset, imported = false) {
   const author = String(asset.author || "").trim();
   const style = String(asset.style || "").trim();
@@ -704,7 +668,6 @@ function assetCard(asset, imported = false) {
     </div><div class="asset-actions"><button class="text-button sync-asset" data-id="${escapeHtml(asset.id || "")}" data-completed="${savedToCloud(asset)}">${savedToCloud(asset) ? "R2 已保存" : "同步到 R2"}</button>${objectUrl ? `<a class="download-link" href="${escapeHtml(objectUrl)}" download="${escapeHtml(asset.file_name || asset.name || "asset")}">下载原文件</a>` : ""}</div>
   </article>`;
 }
-
 function renderAssets() {
   const list = $("#assetList");
   const visible = state.assets.filter(assetMatchesFilter);
@@ -715,14 +678,12 @@ function renderAssets() {
   $$(".sync-asset").forEach(button => button.addEventListener("click", () => syncAsset(button.dataset.id)));
   updateBulkControls();
 }
-
 function renderImportedAssets() {
   const assets = state.importAssetIds.map(id => state.assets.find(asset => asset.id === id)).filter(Boolean);
   $("#assetImportResults").hidden = !assets.length;
   $("#assetBatchDescription").textContent = `本批 ${assets.length} 个收藏；此前收录的文件在收藏库中单独查看。`;
   $("#importedAssetList").innerHTML = assets.map(asset => assetCard(asset, true)).join("");
 }
-
 async function loadAssets(force = false) {
   let records = [];
   if (browserSyncEnabled()) records = await loadBrowserLibraryRecords(force);
@@ -744,9 +705,7 @@ async function loadAssets(force = false) {
   renderAssets();
   renderImportedAssets();
 }
-
 async function saveAssetClassification(form) { return saveRecordClassification(form); }
-
 async function saveRecordClassification(form) {
   const kind = form.dataset.recordKind;
   const id = form.dataset.recordForm;
@@ -776,14 +735,12 @@ async function saveRecordClassification(form) {
   } catch (error) { toast(`分类保存失败：${error.message}`); }
   finally { setOperation(""); }
 }
-
 function renderImportedFonts() {
   const fonts = state.importFontIds.map(id => state.fonts.find(font => font.id === id)).filter(Boolean);
   $("#fontImportResults").hidden = !fonts.length;
   $("#fontBatchDescription").textContent = `本批 ${fonts.length} 个新字体；此前收录的字体在字体库中单独查看。`;
   $("#importedFontList").innerHTML = fonts.map(font => `<article class="font-card import-font-card"><div><div class="theme-title">${escapeHtml(font.family || font.file_name)}</div><div class="font-meta"><span>${escapeHtml(font.subfamily || "Regular")}</span><span>${escapeHtml((font.extension || "font").toUpperCase())}</span><span>${formatBytes(font.bytes)}</span><span>${escapeHtml(syncLabel(font))}</span></div><div class="font-specimen" style="font-family: 'font-${escapeHtml(font.id)}', sans-serif">Aa 中文 0123 · Reeden Theme</div>${font.sync_error ? `<p class="inline-error">${escapeHtml(font.sync_error)}</p>` : ""}</div><button class="text-button" data-open-view="jobs">查看同步任务</button></article>`).join("");
 }
-
 function rememberJob(job) {
   if (!job?.id) throw new Error("后台没有返回任务编号，请刷新后检查任务列表");
   state.jobs = [job, ...state.jobs.filter(item => item.id !== job.id)];
@@ -867,7 +824,6 @@ async function retryJob(id) {
   } catch (error) { toast(error.message); }
   finally { setOperation(""); }
 }
-
 async function loadThemes(force = false) {
   const records = browserSyncEnabled() ? await loadBrowserLibraryRecords(force) : (await api("/api/themes")).items || [];
   state.themes = records.filter(item => item.kind === "theme" || !item.kind);
@@ -949,7 +905,6 @@ async function loadStorage() {
   updateStorageControls();
   renderReview();
 }
-
 function renderStorageSummary(data) {
   if (data.mode === "browser-local") {
     $("#storageInventory").innerHTML = `<div class="inventory-row"><div><strong>共享 R2 库</strong><span>记录、压缩主题、字体、SVG / HTML 收藏和预览</span></div><div><strong>同一 Worker</strong><span>手机与电脑共用</span></div></div><p class="inventory-summary">免费模式：压缩、重新封包、预览和 SHA-256 查重都在当前浏览器执行；Worker 只负责 R2 对象读写和记录索引。</p>`;
@@ -982,7 +937,6 @@ function renderStorageSummary(data) {
   const pan123 = data.pan123 || {};
   $("#pan123CredentialState").textContent = pan123.configured ? `123 云盘会话：${sources[pan123.source] || "已保存"}。是否有效请运行上传验证。` : "尚未保存 123 云盘会话。可直接登录，或使用已有会话 Token。";
 }
-
 function updateStorageControls() {
   const form = $("#storageForm");
   const locked = Boolean(state.operation) || activeJobs().length > 0;
@@ -1016,7 +970,6 @@ function updateStorageControls() {
   const probeRoot = (state.storage?.archive?.rootPath || "Red-Garden-Backup").replace(/^\/+|\/+$/g, "");
   $("#pan123ProbeHelp").textContent = `验证会在已保存的备份目录 ${probeRoot}/probes/ 下上传一个随机小文件，再下载并核验。测试目录和文件可能保留在云盘。`;
 }
-
 async function analyzeFiles(files) {
   if (state.operation) { toast("请等待当前批次处理完成"); return; }
   const valid = [...files].filter(file => file.name.toLowerCase().endsWith(".red"));
@@ -1052,6 +1005,7 @@ async function analyzeFiles(files) {
         if (entries.length) {
           const preview = await composeThemePreviewBlob(entries, codec);
           if (preview) previewUrl = URL.createObjectURL(preview);
+          previewDetails = { ...previewDetails, kind: previewCompositionKind(entries) };
         }
         const info = { ...identity, source_name: file.name, bytes: raw.length, container_format: inspection.format, compression_supported: inspection.compressionSupported !== false, preview_details: previewDetails };
         const duplicateRecords = browserDuplicateCandidates(identity.name, identity.author);
@@ -1071,7 +1025,6 @@ async function analyzeFiles(files) {
   } catch (error) { toast(error.message); }
   finally { setOperation(""); }
 }
-
 async function indexExistingFiles(files) {
   if (state.operation) return;
   const valid = [...files].filter(file => file.name.toLowerCase().endsWith(".red"));
@@ -1092,9 +1045,7 @@ async function indexExistingFiles(files) {
     toast(`已索引 ${result.added?.length || 0} 个主题，跳过 ${result.skipped?.length || 0} 个${result.job ? "，同步已交给后台" : ""}`);
   } catch (error) { toast(error.message); } finally { setOperation(""); }
 }
-
 async function commitTheme(stagingId) { return commitThemes([stagingId]); }
-
 async function commitThemes(ids = [...selections.review]) {
   if (state.operation || storageDirty || !ids.length) return;
   const eligible = new Set(eligibleIds("review"));
@@ -1120,7 +1071,7 @@ async function commitThemes(ids = [...selections.review]) {
           const compressedPath = await uploadBrowserObject("compressed", assetSha, "red", compressedBytes, "application/octet-stream");
           let previewPath = "";
           let previewEntries = [];
-          try { previewEntries = encrypted ? codec.extractPrivatePreviewImages(raw) : await codec.readZipEntries(compressedBytes); } catch { previewEntries = []; }
+          try { previewEntries = encrypted ? await codec.extractPrivatePreviewImages(raw) : await codec.readZipEntries(compressedBytes); } catch { previewEntries = []; }
           let previewDetails = item.info.preview_details || { kind: previewCompositionKind(previewEntries), simulation: true };
           const preview = await composeThemePreviewBlob(previewEntries, codec);
           if (preview) {
@@ -1168,7 +1119,6 @@ async function commitThemes(ids = [...selections.review]) {
   } catch (error) { operationMessage($("#reviewBatchStatus"), `加入后台失败：${error.message}`, true); toast(error.message); }
   finally { setOperation(""); }
 }
-
 async function syncTheme(themeId) { return syncSelectedAssets("theme", [themeId]); }
 async function syncFont(fontId) { return syncSelectedAssets("font", [fontId]); }
 async function syncAsset(assetId) { return syncSelectedAssets("asset", [assetId]); }
@@ -1197,7 +1147,6 @@ async function syncSelectedAssets(kind, ids = [...selections[kind]]) {
   } catch (error) { operationMessage(output, error.message, true); toast(error.message); }
   finally { setOperation(""); }
 }
-
 async function rebuildPreview(themeId) {
   if (state.operation) return;
   if (browserSyncEnabled()) {
@@ -1215,7 +1164,6 @@ async function rebuildPreview(themeId) {
   } catch (error) { toast(error.message); }
   finally { setOperation(""); }
 }
-
 async function importFonts(files) {
   if (state.operation) { toast("请等待当前批次处理完成"); return; }
   const valid = [...files].filter(file => /\.(ttf|otf|woff2?)$/i.test(file.name));
@@ -1297,12 +1245,10 @@ async function importFonts(files) {
   } catch (error) { operationMessage(output, `字体导入失败：${error.message}`, true); toast(error.message); }
   finally { setOperation(""); }
 }
-
 function assetExtension(file) {
   const match = String(file?.name || "").toLowerCase().match(/\.([a-z0-9]+)$/);
   return match?.[1] === "htm" ? "html" : match?.[1] || "";
 }
-
 async function importAssets(files) {
   if (state.operation) { toast("请等待当前批次处理完成"); return; }
   const valid = [...files].filter(file => ["svg", "html", "htm"].includes(assetExtension(file)));
@@ -1384,7 +1330,6 @@ async function importAssets(files) {
   } catch (error) { operationMessage(output, `收藏导入失败：${error.message}`, true); toast(error.message); }
   finally { setOperation(""); }
 }
-
 async function saveStorage(event) {
   event.preventDefault();
   if (state.operation || activeJobs().length) return;
@@ -1407,13 +1352,11 @@ async function saveStorage(event) {
     toast("存储配置已保存");
   } catch (error) { operationMessage($("#configStatus"), error.message, true); } finally { setOperation(""); }
 }
-
 async function refreshPan123Session(source) {
   state.storage = { ...state.storage, pan123: { configured: true, source: source || "encrypted" } };
   try { state.storage = await api("/api/storage"); } catch {}
   renderStorageSummary(state.storage);
 }
-
 function stopPan123Qr(message = "") {
   pan123QrGeneration += 1;
   clearTimeout(pan123QrTimer);
@@ -1425,7 +1368,6 @@ function stopPan123Qr(message = "") {
   $("#pan123QrCode").hidden = true;
   operationMessage($("#pan123QrStatus"), message);
 }
-
 async function startPan123Qr() {
   if (state.operation || activeJobs().length || document.hidden) return;
   stopPan123Qr();
@@ -1450,7 +1392,6 @@ async function startPan123Qr() {
     if (generation === pan123QrGeneration) { stopPan123Qr(); operationMessage($("#pan123QrStatus"), "二维码暂时无法生成，请确认本机服务运行后再试。", true); }
   } finally { clearTimeout(requestTimeout); setOperation(""); }
 }
-
 async function pollPan123Qr(generation) {
   if (generation !== pan123QrGeneration || !pan123QrSession) return;
   if (state.activeView !== "storage" || document.hidden || activeJobs().length || Date.now() >= pan123QrSession.expiresAt) {
@@ -1480,7 +1421,6 @@ async function pollPan123Qr(generation) {
     }
   }
 }
-
 async function savePan123Credentials(event, kind) {
   event.preventDefault();
   if (state.operation || activeJobs().length || pan123QrSession) return;
@@ -1507,7 +1447,6 @@ async function savePan123Credentials(event, kind) {
     setOperation("");
   }
 }
-
 async function probePan123() {
   if (state.operation || activeJobs().length || storageDirty || state.storage?.archive?.provider !== "123pan" || !state.storage?.pan123?.configured) return;
   const output = $("#pan123Status");
@@ -1523,7 +1462,6 @@ async function probePan123() {
   } catch (error) { operationMessage(output, error.message, true); }
   finally { setOperation(""); }
 }
-
 async function testStorage(target, button) {
   if (state.operation || activeJobs().length || storageDirty) return;
   setOperation("test-storage");
@@ -1540,7 +1478,6 @@ async function testStorage(target, button) {
     if (target === "library") $("#storageState").textContent = "R2 连接失败";
   } finally { setOperation(""); }
 }
-
 async function cloudOperation(action, button) {
   if (state.operation) return;
   setOperation("cloud-operation");
@@ -1562,11 +1499,9 @@ async function cloudOperation(action, button) {
       container.hidden = unindexed.length === 0;
       container.innerHTML = unindexed.length ? `<h3>没有库清单的已有文件</h3><p class="field-help">这些文件保留在 R2，目前尚未加入名称、作者与预览索引。解析会读取下列文件，在本地提取元数据和预览。</p><ul class="unindexed-list">${unindexed.map(item => `<li><span>${escapeHtml(item.key || item.object_key)}</span><span>${formatBytes(item.bytes ?? item.size)}</span></li>`).join("")}</ul><button class="secondary-button" id="indexExistingCloud" type="button">解析这些已有文件</button>` : "";
       if (unindexed.length) $("#indexExistingCloud").addEventListener("click", event => indexExistingCloud(unindexed.map(item => item.key || item.object_key), event.currentTarget));
-
     }
   } catch (error) { operationMessage(output, error.message, true); } finally { setOperation(""); }
 }
-
 async function indexExistingCloud(keys, button) {
   button.disabled = true;
   operationMessage($("#storageOperation"), `正在读取并解析 ${keys.length} 个 R2 已有文件，文件较大时请稍候…`);
@@ -1579,14 +1514,12 @@ async function indexExistingCloud(keys, button) {
     if (!errors.length) $("#storageUnindexed").hidden = true;
   } catch (error) { operationMessage($("#storageOperation"), error.message, true); } finally { button.disabled = false; }
 }
-
 function setupDropZone(element, onFiles) {
   ["dragenter", "dragover"].forEach(event => element.addEventListener(event, e => { e.preventDefault(); element.classList.add("is-dragging"); }));
   ["dragleave", "drop"].forEach(event => element.addEventListener(event, e => { e.preventDefault(); element.classList.remove("is-dragging"); }));
   element.addEventListener("drop", e => onFiles(e.dataTransfer.files));
   element.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); element.click(); } });
 }
-
 async function importUnifiedFiles(fileList) {
   if (state.operation) { toast("请等待当前批次处理完成"); return; }
   const groups = { theme: [], font: [], asset: [] }, unsupported = [];
@@ -1610,7 +1543,6 @@ async function importUnifiedFiles(fileList) {
   if (groups.asset.length) await importAssets(groups.asset);
   operationMessage(status, `本批已分流：${groups.theme.length} 个主题、${groups.font.length} 个字体、${groups.asset.length} 个收藏。${unsupported.length ? `已跳过不支持的文件：${unsupported.join("、")}` : ""}`, Boolean(unsupported.length));
 }
-
 $("#chooseThemes").addEventListener("click", () => $("#themeInput").click());
 $("#chooseThemeFolder").addEventListener("click", () => $("#themeFolderInput").click());
 $("#indexThemeFolder").addEventListener("click", () => $("#existingThemeFolderInput").click());
@@ -1721,7 +1653,6 @@ $("#testArchive").addEventListener("click", event => testStorage("archive", even
 $("#pullStorage").addEventListener("click", event => cloudOperation("pull", event.currentTarget));
 $("#syncStorage").addEventListener("click", event => cloudOperation("sync", event.currentTarget));
 $$('.nav-item').forEach(item => item.addEventListener('click', () => { setView(item.dataset.view); $(".sidebar").classList.remove("is-open"); }));
-
 const initialView = location.hash.slice(1);
 updateRuntimeMode();
 try {
