@@ -294,10 +294,13 @@ async function imagePreviewBlob(bytes, mime, maxWidth = 900) {
 }
 
 function previewRole(name) {
-  const value = String(name || "");
-  if (/splash|launch|startup|启动/i.test(value)) return "splash";
-  if (/cover|book|封面|书封|cover_gallery/i.test(value)) return "cover";
-  if (/shelf|bookshelf|library|theme_bg|background|carousel|书架/i.test(value)) return "shelf";
+  const value = String(name || "").replace(/\\/g, "/").toLowerCase();
+  if (/navbar_pack|navbar|bottom_bar|tabbar|(^|[/_.-])(icon|normal|selected)([/_.-]|$)/i.test(value)) return "icon";
+  if (/custom_splash|splash|launch|startup|welcome|opening|启动|开屏/i.test(value)) return "splash";
+  if (/reader_schema|reader_background|reading|article|content|book_page|reader|正文|阅读/i.test(value)) return "reader";
+  if (/cover_gallery|book_cover|cover|封面|书封|图集/i.test(value)) return "cover";
+  if (/carousel|banner|轮播|横幅/i.test(value)) return "carousel";
+  if (/theme_bg|bookshelf|shelf|library|background|书架|书架底|首页|主页/i.test(value)) return "shelf";
   return "other";
 }
 
@@ -309,7 +312,7 @@ async function composeThemePreviewBlob(entries, codec) {
   if (!Array.isArray(entries) || typeof createImageBitmap !== "function") return null;
   const images = entries
     .map((entry, index) => ({entry, index, mime: codec.mimeFromBytes(entry.bytes, entry.name), role: previewRole(entry.name)}))
-    .filter(item => item.mime?.startsWith("image/") && !isNightAsset(item.entry.name));
+    .filter(item => item.mime?.startsWith("image/") && item.role !== "icon" && !isNightAsset(item.entry.name));
   if (!images.length) return null;
   // Decode once to classify nameless images recovered from encrypted REDs.
   for (const item of images) {
@@ -318,32 +321,27 @@ async function composeThemePreviewBlob(entries, codec) {
       item.width = bitmap.width; item.height = bitmap.height; item.aspect = bitmap.width / Math.max(1, bitmap.height); bitmap.close?.();
     } catch { item.aspect = 1; }
   }
-  const inferred = images.filter(item => item.role === "other");
   const privatePreview = images.some(item => /^private-preview-/i.test(String(item.entry.name || "")));
-  const firstPortrait = inferred.find(item => item.index === 0 && item.aspect < 1.1);
-  const portraits = images.filter(item => item.aspect < 1.2);
-  const splash = images.find(item => item.role === "splash") || firstPortrait || inferred.find(item => item.aspect < .66) || portraits[0] || null;
-  const wide = images.filter(item => item.role === "shelf" || (item.role === "other" && item.aspect > 1.55));
+  const splash = images.find(item => item.role === "splash") || null;
+  let reader = images.find(item => item.role === "reader") || null;
+  const wide = images.filter(item => item.role === "carousel" || item.role === "shelf" || (item.role === "other" && item.aspect > 1.55));
   const namedShelf = images.find(item => item.role === "shelf");
   let shelf;
   let carousel;
   let covers;
   if (privatePreview) {
-    // Encrypted resources have no manifest names. In these packages the
-    // largest portrait is normally the theme background and the first wide
-    // image is the carousel layer; repeated tall backgrounds must not become
-    // fake book covers.
-    const backgroundCandidates = portraits.filter(item => item !== splash).sort((a, b) => (b.width * b.height) - (a.width * a.height));
-    shelf = namedShelf || backgroundCandidates[0] || wide[0] || images.find(item => item !== splash) || images[0];
-    carousel = wide.find(item => item !== shelf) || null;
-    covers = images.filter(item => item !== splash && item !== shelf && item !== carousel && item.role === "cover");
-    if (!covers.length) covers = portraits.filter(item => item !== splash && item !== shelf && item.height <= 1600 && item.width <= 1100).slice(0, 4);
-    if (!covers.length && splash) covers = [splash];
+    // Private REDs expose no manifest names. The extractor keeps the source
+    // order, so use the first image only as a cover-card candidate and the
+    // next image as the shelf/background candidate; never call either splash.
+    shelf = namedShelf || images.find(item => item.index === 1) || wide[0] || null;
+    carousel = images.find(item => item.role === "carousel") || wide.find(item => item !== shelf) || null;
+    covers = images.filter(item => item.role === "cover" && item !== shelf).slice(0, 6);
+    if (!covers.length && images[0] && images[0] !== shelf) covers = [images[0]];
+    if (!reader) reader = [...images].reverse().find(item => item !== shelf && item !== carousel && item.role !== "cover") || null;
   } else {
-    const inferredShelf = inferred.find(item => item !== splash && item.aspect >= .3 && item.aspect <= 1.45);
-    shelf = namedShelf || inferredShelf || wide[0] || images.find(item => item !== splash) || images[0];
-    carousel = wide.find(item => item !== shelf) || null;
-    covers = images.filter(item => item !== splash && item !== shelf && item !== carousel && (item.role === "cover" || item.aspect <= 1.2)).slice(0, 6);
+    shelf = namedShelf || images.find(item => item.role === "shelf") || wide.find(item => item.role === "shelf") || null;
+    carousel = images.find(item => item.role === "carousel") || wide.find(item => item !== shelf) || null;
+    covers = images.filter(item => item !== shelf && item !== carousel && item.role === "cover").slice(0, 6);
   }
   const canvas = document.createElement("canvas");
   canvas.width = 1000; canvas.height = 1000;
@@ -365,12 +363,12 @@ async function composeThemePreviewBlob(entries, codec) {
     } finally { bitmap.close?.(); }
   };
   // Keep the thumbnail square, but let the actual theme artwork dominate it:
-  // the splash/cover is on the left and the real shelf background, carousel,
-  // and a small row of real covers are layered on the right.
+  // a real splash goes left when present; otherwise use a real reader page.
   context.fillStyle = "#e9e7df"; context.fillRect(16, 16, 968, 968);
   context.fillStyle = "#f8f8f5"; context.fillRect(28, 28, 390, 936);
-  if (splash) await drawFit(splash, 40, 58, 366, 876, "contain");
-  else { context.fillStyle = "#cfd9d8"; context.fillRect(40, 58, 366, 876); context.fillStyle = "#253338"; context.font = "600 24px system-ui, sans-serif"; context.fillText("无启动图", 154, 500); }
+  const leftAsset = splash || reader || shelf;
+  if (leftAsset) await drawFit(leftAsset, 40, 58, 366, 876, splash || reader ? "contain" : "cover");
+  else { context.fillStyle = "#cfd9d8"; context.fillRect(40, 58, 366, 876); context.fillStyle = "#253338"; context.font = "600 24px system-ui, sans-serif"; context.fillText("无可用阅读页", 130, 500); }
   const panelX = 436, panelY = 28, panelW = 548, panelH = 936;
   context.fillStyle = "#f8f4e9"; context.fillRect(panelX, panelY, panelW, panelH);
   if (shelf) await drawFit(shelf, panelX, panelY, panelW, panelH, "cover");
@@ -445,8 +443,13 @@ function preferredPreview(light, dark) {
   return {url: light || dark || "", label: light ? "日间" : dark ? "夜间补位" : "暂无预览"};
 }
 
+function previewCompositionKind(entries) {
+  return (entries || []).some(entry => previewRole(entry?.name) === "splash") ? "shelf_and_splash" : "shelf_and_reader";
+}
+
 function previewKind(details = {}) {
   if (details?.kind === "shelf_and_splash") return "书架 + 启动";
+  if (details?.kind === "shelf_and_reader") return "书架 + 阅读页";
   if (details?.kind === "shelf") return "书架模拟";
   if (details?.kind === "splash") return "启动图";
   return "主题预览";
@@ -457,7 +460,7 @@ function previewImage(url, alt, className = "", details = {}) {
   url = assetUrl(url);
   const description = details?.encrypted_source
     ? "加密 RED 未解密清单，仅从包内可读取的明文图片资源合成预览；确认后原样保存。"
-    : details?.simulation ? "书架使用主题真实素材离线合成，布局和示例书名为模拟。" + (details.kind === "shelf_and_splash" ? "左侧为启动图，右侧为书架、轮播和书封拼合。" : "") : "使用主题包内图片生成的轻量预览。";
+    : details?.simulation ? "书架使用主题真实素材离线合成，右侧为书架、轮播和封面图集。" + (details.kind === "shelf_and_splash" ? "左侧为启动图。" : "左侧为阅读页或阅读背景。") : "使用主题包内图片生成的轻量预览。";
   return `<button class="preview-open ${className}" type="button" aria-label="${escapeHtml(alt)}，点击放大" data-preview-url="${escapeHtml(url)}" data-preview-title="${escapeHtml(alt)}" data-preview-description="${escapeHtml(description)}"><img src="${escapeHtml(url)}" alt="${escapeHtml(alt)}" loading="lazy" /></button>`;
 }
 
@@ -1045,7 +1048,7 @@ async function analyzeFiles(files) {
         }
         const identity = metadataFromEntries(entries, file.name);
         let previewUrl = "";
-        let previewDetails = { kind: "shelf_and_splash", simulation: true, encrypted_source: inspection.format === "red_private_v2" };
+        let previewDetails = { kind: previewCompositionKind(entries), simulation: true, encrypted_source: inspection.format === "red_private_v2" };
         if (entries.length) {
           const preview = await composeThemePreviewBlob(entries, codec);
           if (preview) previewUrl = URL.createObjectURL(preview);
@@ -1116,15 +1119,15 @@ async function commitThemes(ids = [...selections.review]) {
           const assetSha = await codec.sha256Hex(compressedBytes);
           const compressedPath = await uploadBrowserObject("compressed", assetSha, "red", compressedBytes, "application/octet-stream");
           let previewPath = "";
-          let previewDetails = item.info.preview_details || { kind: "shelf_and_splash", simulation: true };
           let previewEntries = [];
           try { previewEntries = encrypted ? codec.extractPrivatePreviewImages(raw) : await codec.readZipEntries(compressedBytes); } catch { previewEntries = []; }
+          let previewDetails = item.info.preview_details || { kind: previewCompositionKind(previewEntries), simulation: true };
           const preview = await composeThemePreviewBlob(previewEntries, codec);
           if (preview) {
             const previewBytes = new Uint8Array(await preview.arrayBuffer());
             const previewSha = await codec.sha256Hex(previewBytes);
             previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg");
-            previewDetails = { ...previewDetails, kind: "shelf_and_splash", simulation: true, encrypted_source: encrypted };
+            previewDetails = { ...previewDetails, kind: previewCompositionKind(previewEntries), simulation: true, encrypted_source: encrypted };
           }
           const record = await uploadBrowserRecord({
             kind: "theme", id: `theme-${assetSha.slice(0, 16)}`, name: item.info.name || item.info.source_name, author: item.info.author || "作者未记录",
