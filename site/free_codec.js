@@ -557,12 +557,30 @@
     if (!root.FontFace || !root.document) throw new FreeCodecError("当前环境没有 FontFace/DOM，无法生成字体预览", "font_preview_unavailable");
     const bytes = await readBytes(value), info = await inspectFont(value), family = options.family || `ReedenFont_${info.sha256.slice(0, 12)}`;
     const url = root.URL.createObjectURL(new Blob([bytes], { type: `font/${info.extension}` }));
-    const face = new root.FontFace(family, `url(${url})`); await face.load(); root.document.fonts.add(face);
     const canvas = root.document.createElement("canvas"); canvas.width = options.width || 900; canvas.height = options.height || 220;
-    const context = canvas.getContext("2d"); context.fillStyle = options.background || "#ffffff"; context.fillRect(0, 0, canvas.width, canvas.height);
-    context.fillStyle = options.color || "#202530"; context.font = `${options.fontSize || 36}px "${family}"`; context.textBaseline = "top"; context.fillText(options.text || info.previewText, 24, 24);
+    const context = canvas.getContext("2d");
+    if (!context) throw new FreeCodecError("当前环境无法创建字体预览画布", "font_preview_canvas_unavailable");
+    context.fillStyle = options.background || "#ffffff"; context.fillRect(0, 0, canvas.width, canvas.height);
+    let face = null;
+    try {
+      face = new root.FontFace(family, `url(${url})`); await face.load(); root.document.fonts.add(face);
+      context.fillStyle = options.color || "#202530"; context.font = `${options.fontSize || 36}px "${family}"`; context.textBaseline = "top"; context.fillText(options.text || info.previewText, 24, 24);
+    } catch (error) {
+      // Some large CJK TTFs are valid but rejected by the browser's OTS
+      // loader. OpenType.js can still read their glyph outlines locally.
+      const parser = root.opentype || root.OpenType;
+      if (!parser?.parse) throw error;
+      try {
+        const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+        const parsed = parser.parse(buffer);
+        const size = options.fontSize || 36;
+        const path = parsed.getPath(options.text || info.previewText, 24, 24 + size, size);
+        path.fill = options.color || "#202530";
+        path.draw(context);
+      } catch (fallbackError) { throw error; }
+    }
     const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new FreeCodecError("字体预览编码失败", "font_preview_encode_failed")), "image/png"));
-    return { ...info, family, blob, release() { root.document.fonts.delete(face); root.URL.revokeObjectURL(url); } };
+    return { ...info, family, blob, release() { if (face) root.document.fonts.delete(face); root.URL.revokeObjectURL(url); } };
   }
   const api = { FreeCodecError, RED_ZIP, RED_PRIVATE, sha256Hex, md5Hex, crc32, mimeFromBytes, readZipEntries, writeZipEntries, inspectContainer, extractPrivatePreviewImages, compressImage, compressRed, inspectFont, fontPreview };
   if (root && typeof root === "object") root.ReedenFreeCodec = api;
