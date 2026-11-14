@@ -170,8 +170,18 @@ async function api(path, options = {}) {
   }
   if (apiBase && remoteUnavailable) throw new Error("同步 API 不可用，未执行远程操作；请检查地址或清除同步地址使用本机服务");
   const request = { ...options, headers: requestHeaders(options.headers || {}) };
+  const method = String(request.method || "GET").toUpperCase();
   let response;
-  try { response = await fetch(apiUrl(path), request); }
+  try {
+    // Pages Functions can briefly return a platform 500/502/503 while a new
+    // deployment or R2 binding is warming up. Retry safe reads only; writes
+    // must never be repeated automatically.
+    for (let attempt = 0; ; attempt++) {
+      response = await fetch(apiUrl(path), request);
+      if (![500, 502, 503].includes(response.status) || !["GET", "HEAD"].includes(method) || attempt >= 2) break;
+      await new Promise(resolve => setTimeout(resolve, 450 * (attempt + 1)));
+    }
+  }
   catch (error) {
     if (apiBase) markRemoteUnavailable(error.message || "网络连接失败");
     throw error;
@@ -190,7 +200,8 @@ async function api(path, options = {}) {
     }
     if (apiBase && [404, 405, 500, 502, 503].includes(response.status)) {
       markRemoteUnavailable(`HTTP ${response.status}`);
-      const detail = data.error || data.message || responseText.trim().slice(0, 240);
+      const contentType = response.headers.get("content-type") || "";
+      const detail = data.error || data.message || (contentType.includes("text/html") ? "同步服务正在部署或暂时不可用，请稍后刷新" : responseText.trim().slice(0, 240));
       throw new Error(`同步 API 暂不可用（HTTP ${response.status}）${detail ? `：${detail}` : ""}，未执行压缩或上传`);
     }
     const detail = data.error || data.message || responseText.trim().slice(0, 240);
