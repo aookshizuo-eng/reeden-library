@@ -5,7 +5,7 @@
 已支持：
 
 - 字体 TTF/OTF/WOFF/WOFF2 的 SHA-256 查重；
-- 使用浏览器 `FontFace` 在字体库卡片中显示轻量字形预览，不生成字体样张文件；
+- 字体只做 SHA-256 查重和原文件保存，不生成字形样张，也不压缩字体文件；
 - 普通 `RED\\x04 + ZIP` 的安全目录读取；
 - DEFLATE/Stored ZIP 读取与重新写入；
 - PNG/JPEG/WebP 静态图片的 Canvas 缩放与同格式编码，只采用更小结果；
@@ -23,7 +23,7 @@
 
 ```js
 const info = await ReedenFreeCodec.inspectFont(file);
-// 页面只用 FontFace 显示字形预览；原字体按 info.sha256 保存和下载。
+// 原字体按 info.sha256 保存和下载，不生成样张文件。
 const result = await ReedenFreeCodec.compressRed(redFile, { quality: 88, maxEdge: 2048 });
 const download = URL.createObjectURL(new Blob([result.bytes], { type: "application/octet-stream" }));
 ```
@@ -38,6 +38,6 @@ worker.postMessage({ id: "one", command: "compressRed", bytes: await file.arrayB
 worker.onmessage = ({ data }) => { if (!data.ok) console.error(data.error.code, data.error.message); };
 ```
 
-Worker 适配器只返回可结构化克隆的数据；字体不会生成或上传 PNG 样张文件。
+Worker 适配器只返回可结构化克隆的数据；字体不会生成或上传样张文件。
 
 验证：在 `work/reeden-library` 目录运行 `node --test static/free_codec_test.mjs`。测试覆盖哈希向量、普通 RED ZIP round-trip、私有 RED 明确拒绝和损坏头拒绝；同步 Worker 的加密重封回归在 `worker/test-private-repack.mjs`。
