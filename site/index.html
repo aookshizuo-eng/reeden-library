@@ -51,6 +51,11 @@
             <input id="unifiedInput" type="file" accept=".red,.ttf,.otf,.woff,.woff2,.svg,.html,.htm" multiple hidden /><input id="unifiedFolderInput" type="file" accept=".red,.ttf,.otf,.woff,.woff2,.svg,.html,.htm" webkitdirectory multiple hidden />
             <p class="operation-status unified-import-status" id="unifiedImportStatus" role="status" hidden></p>
           </div>
+          <section class="transfer-progress" id="transferProgress" aria-live="polite" hidden>
+            <div class="transfer-progress-head"><strong id="transferProgressTitle">正在处理</strong><span id="transferProgressCount">0 / 0</span></div>
+            <progress id="transferProgressBar" max="100" value="0" aria-label="上传与处理进度"></progress>
+            <div class="transfer-progress-meta"><span id="transferProgressStage">等待开始</span><span id="transferProgressCurrent"></span></div>
+          </section>
           <div id="themeImportPane" role="tabpanel" aria-labelledby="themeImportTab">
             <section class="ingest-panel theme-ingest legacy-import-panel" aria-labelledby="ingestTitle">
               <div class="drop-zone" id="themeDropZone" tabindex="0" role="button" aria-label="拖入 RED 主题文件">

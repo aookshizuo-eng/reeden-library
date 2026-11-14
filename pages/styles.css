@@ -303,6 +303,20 @@ button:disabled { cursor: not-allowed; opacity: .65; }
 .job-errors li { display: grid; gap: 2px; overflow-wrap: anywhere; }
 .job-errors strong { color: var(--text); font-weight: 500; }
 .job-errors li span { color: var(--danger); }
+.transfer-progress { margin: 16px 0 26px; padding: 16px 18px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--raised); }
+.transfer-progress-head, .transfer-progress-meta { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.transfer-progress-head strong { font-size: 14px; font-weight: 600; }
+.transfer-progress-head span { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.transfer-progress progress { display: block; width: 100%; height: 9px; margin: 13px 0 10px; border: 0; border-radius: 5px; overflow: hidden; appearance: none; accent-color: var(--accent); background: var(--surface); }
+.transfer-progress progress::-webkit-progress-bar { background: var(--surface); }
+.transfer-progress progress::-webkit-progress-value { background: var(--accent); transition: width .2s ease; }
+.transfer-progress progress::-moz-progress-bar { background: var(--accent); }
+.transfer-progress-meta { color: var(--muted); font-size: 12px; line-height: 1.45; }
+.transfer-progress-meta span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+.transfer-progress.is-complete { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.transfer-progress.is-error { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); }
+.transfer-progress.is-error progress::-webkit-progress-value { background: var(--danger); }
+.transfer-progress.is-error progress::-moz-progress-bar { background: var(--danger); }
 
 @media (max-width: 900px) {
   .compression-panel { grid-template-columns: 1fr; gap: 16px; }
@@ -315,6 +329,9 @@ button:disabled { cursor: not-allowed; opacity: .65; }
   .compression-panel { padding: 16px; }
   .compression-controls { grid-template-columns: 1fr; }
   .compression-result { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .transfer-progress { margin: 14px 0 22px; padding: 14px; }
+  .transfer-progress-meta { align-items: flex-start; flex-direction: column; gap: 3px; }
+  .transfer-progress-meta span:last-child { max-width: 100%; text-align: left; }
   .app-frame { display: block; background: var(--surface); }
   .sidebar { display: none; position: fixed; inset: 0 20% 0 0; z-index: 3; background: var(--frame); padding: 20px 16px; }
   .sidebar.is-open { display: flex; }

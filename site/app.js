@@ -177,7 +177,9 @@ async function api(path, options = {}) {
     if (apiBase) markRemoteUnavailable(error.message || "网络连接失败");
     throw error;
   }
-  const data = await response.json().catch(() => ({}));
+  const responseText = await response.text();
+  let data = {};
+  try { data = responseText ? JSON.parse(responseText) : {}; } catch {}
   if (!response.ok) {
     if (response.status === 401) {
       throw new Error("同步写入令牌无效或已过期，请到“存储设置”重新保存同步写入 Token；文件本身没有问题。");
@@ -187,11 +189,13 @@ async function api(path, options = {}) {
       if (apiBase) markRemoteUnavailable(message);
       throw new Error(message);
     }
-    if (apiBase && [404, 405, 502, 503].includes(response.status)) {
+    if (apiBase && [404, 405, 500, 502, 503].includes(response.status)) {
       markRemoteUnavailable(`HTTP ${response.status}`);
-      throw new Error(`同步 API 暂不可用（HTTP ${response.status}），未执行压缩或上传`);
+      const detail = data.error || data.message || responseText.trim().slice(0, 240);
+      throw new Error(`同步 API 暂不可用（HTTP ${response.status}）${detail ? `：${detail}` : ""}，未执行压缩或上传`);
     }
-    throw new Error(data.error || `请求失败（${response.status}）`);
+    const detail = data.error || data.message || responseText.trim().slice(0, 240);
+    throw new Error(`请求失败（${response.status}）${detail ? `：${detail}` : ""}`);
   }
   if (apiBase && remoteUnavailable) { remoteUnavailable = false; updateRuntimeMode(); }
   return data;
@@ -233,8 +237,13 @@ async function compressPrivateRedViaWorker(raw, codec, options = {}) {
     headers: requestHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ red_base64: base64Bytes(raw), replacements: replacements.map(item => ({ offset: item.offset, end: item.end, old_sha256: item.oldSha256, old_md5: item.oldMd5, new_md5: item.newMd5, bytes_base64: item.bytes })) }),
   });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `加密主题重封失败（${response.status}）`);
+  const responseText = await response.text();
+  let data = {};
+  try { data = responseText ? JSON.parse(responseText) : {}; } catch {}
+  if (!response.ok) {
+    const detail = data.error || data.message || responseText.trim().slice(0, 240);
+    throw new Error(`加密主题重封失败（${response.status}）${detail ? `：${detail}` : ""}`);
+  }
   if (!data.bytes) throw new Error("加密主题重封接口没有返回压缩包");
   const encoded = atob(data.bytes), output = new Uint8Array(encoded.length);
   for (let index = 0; index < encoded.length; index++) output[index] = encoded.charCodeAt(index);
@@ -261,14 +270,17 @@ async function uploadBrowserObject(kind, sha, extension, body, contentType) {
   let response = await request("PUT");
   if (response.status === 405) response = await request("POST");
   if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
+    const responseText = await response.text();
+    let data = {};
+    try { data = responseText ? JSON.parse(responseText) : {}; } catch {}
     if (response.status === 401) {
       throw new Error("同步写入令牌无效或已过期，请到“存储设置”重新保存同步写入 Token；文件本身没有问题。");
     }
     if (response.status === 405) {
       throw new Error("同步 API 返回 405：请确认填写的是 Worker 地址而不是 Pages 或 Cloudflare 控制台地址，并重新部署最新 Worker");
     }
-    throw new Error(data.error || `上传失败（${response.status}）`);
+    const detail = data.error || data.message || responseText.trim().slice(0, 240);
+    throw new Error(`上传失败（${response.status}）${detail ? `：${detail}` : ""}`);
   }
   return path;
 }
@@ -565,6 +577,44 @@ function resultWarning(result) {
 function operationMessage(element, message, failed = false) {
   element.textContent = message;
   element.classList.toggle("is-error", failed);
+}
+// Visible progress for work performed in the browser. Background jobs already
+// render their own progress cards; this state covers the device-side stages
+// before an object reaches R2 (hashing, compression, preview and upload).
+const transferState = { active: false, title: "", total: 0, completed: 0, failed: 0, stage: "", current: "" };
+function updateTransferProgress(patch = {}) {
+  Object.assign(transferState, patch);
+  const panel = $("#transferProgress");
+  if (!panel) return;
+  const total = Math.max(0, Number(transferState.total) || 0);
+  const completed = Math.max(0, Math.min(total || Number.MAX_SAFE_INTEGER, Number(transferState.completed) || 0));
+  const percent = total ? Math.round((completed / total) * 100) : 0;
+  const title = $("#transferProgressTitle");
+  const count = $("#transferProgressCount");
+  const bar = $("#transferProgressBar");
+  const stage = $("#transferProgressStage");
+  const current = $("#transferProgressCurrent");
+  if (title) title.textContent = transferState.title || "正在处理";
+  if (count) count.textContent = `${completed} / ${total}${transferState.failed ? ` · 失败 ${transferState.failed}` : ""}`;
+  if (bar) bar.value = percent;
+  if (stage) stage.textContent = transferState.stage || "等待开始";
+  if (current) current.textContent = transferState.current || "";
+  panel.hidden = false;
+  panel.classList.toggle("is-error", transferState.failed > 0);
+  panel.classList.toggle("is-complete", !transferState.active && total > 0);
+}
+function beginTransferProgress(title, total) {
+  Object.assign(transferState, { active: true, title, total: Math.max(0, Number(total) || 0), completed: 0, failed: 0, stage: "准备处理", current: "" });
+  updateTransferProgress();
+}
+function transferStage(stage, current = "") {
+  updateTransferProgress({ active: true, stage, current });
+}
+function transferDone(current = "", failed = false) {
+  updateTransferProgress({ completed: transferState.completed + 1, failed: transferState.failed + (failed ? 1 : 0), current });
+}
+function finishTransferProgress(message, failed = transferState.failed) {
+  updateTransferProgress({ active: false, title: message, stage: failed ? "处理完成，但有项目失败" : "全部完成", current: failed ? `失败 ${failed} 项，可查看错误后重试` : "已写入共享 R2" });
 }
 function r2Enabled() { return browserSyncEnabled() || state.storage?.library?.provider === "cloudflare_r2"; }
 function autoSyncEnabled() { return browserSyncEnabled() || (r2Enabled() && state.storage?.library?.autoSync); }
@@ -1161,30 +1211,39 @@ async function commitThemes(ids = [...selections.review]) {
     if (browserSyncEnabled()) {
       const codec = await browserCodec();
       const selected = state.review.filter(item => chosen.includes(item.staging_id));
+      beginTransferProgress("主题压缩与上传", selected.length);
       let finished = 0;
       const results = await mapConcurrent(selected, 2, async item => {
+        const name = item.info?.source_name || item.info?.name || "主题";
         try {
+          transferStage("读取主题", name);
           const raw = item.bytes || new Uint8Array(await item.file.arrayBuffer());
           const encrypted = item.info?.compression_supported === false || item.inspection?.format === "red_private_v2";
+          transferStage(encrypted ? "压缩图片并重新封包" : "压缩图片", name);
           const result = encrypted
             ? await compressPrivateRedViaWorker(raw, codec, { quality: options.quality, maxEdge: options.max_edge })
             : await codec.compressRed(raw, { quality: options.quality, maxEdge: options.max_edge });
           const compressedBytes = result.bytes;
           const originalSha = await codec.sha256Hex(raw);
+          transferStage("上传原始主题", name);
           const originalPath = await uploadBrowserObject("originals", originalSha, "red", raw, "application/octet-stream");
           const assetSha = await codec.sha256Hex(compressedBytes);
+          transferStage("上传压缩主题", name);
           const compressedPath = await uploadBrowserObject("compressed", assetSha, "red", compressedBytes, "application/octet-stream");
           let previewPath = "";
           let previewEntries = [];
           try { previewEntries = encrypted ? await codec.extractPrivatePreviewImages(compressedBytes) : await codec.readZipEntries(compressedBytes); } catch { previewEntries = []; }
           let previewDetails = item.info.preview_details || { kind: previewCompositionKind(previewEntries), simulation: true };
+          transferStage("生成主题预览", name);
           const preview = await composeThemePreviewBlob(previewEntries, codec);
           if (preview) {
             const previewBytes = new Uint8Array(await preview.arrayBuffer());
             const previewSha = await codec.sha256Hex(previewBytes);
+            transferStage("上传预览和清单", name);
             previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg");
             previewDetails = { ...previewDetails, kind: previewCompositionKind(previewEntries), simulation: true, encrypted_source: encrypted };
           }
+          if (!preview) transferStage("上传主题清单", name);
           const record = await uploadBrowserRecord({
             kind: "theme", id: `theme-${assetSha.slice(0, 16)}`, name: item.info.name || item.info.source_name, author: item.info.author || "作者未记录",
             sha256: assetSha, original_sha256: originalSha, original_size: raw.length, compressed_size: compressedBytes.length,
@@ -1192,16 +1251,19 @@ async function commitThemes(ids = [...selections.review]) {
             compressed_url: compressedPath, library_url: compressedPath, preview_light_url: previewPath, preview_dark_url: "", preview_details: previewDetails,
             saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: "", original_url: originalPath
           }, codec);
+          transferDone(name);
           operationMessage($("#reviewBatchStatus"), `已完成主题 ${++finished} / ${selected.length}…`);
           return { item, record };
         } catch (error) {
           item.commitError = error.message || "浏览器处理失败";
+          transferDone(name, true);
           operationMessage($("#reviewBatchStatus"), `已完成主题 ${++finished} / ${selected.length}…`);
           return { item, error };
         }
       });
       const completed = results.filter(result => result.record).map(result => result.record);
       const failures = results.filter(result => result.error);
+      finishTransferProgress("主题处理完成", failures.length);
       state.themes = [...completed, ...state.themes];
       // Match completed records back to staging items by insertion order/name;
       // failed items remain visible for retry.
@@ -1295,37 +1357,46 @@ async function importFonts(files) {
     if (!unique.length) { operationMessage(output, `全部 ${duplicates} 个字体已存在，未重复上传。`); toast("所选字体均已存在"); return; }
     if (browserSyncEnabled()) {
       const codec = await browserCodec();
+      beginTransferProgress("字体上传", unique.length);
       let finished = 0;
       const uploaded = await mapConcurrent(unique, 2, async file => {
         try {
+          transferStage("识别字体并查重", file.name);
           const info = await codec.inspectFont(file);
           const bytes = new Uint8Array(await file.arrayBuffer());
+          transferStage("上传字体文件", file.name);
           const fontPath = await uploadBrowserObject("fonts", info.sha256, info.extension, bytes, `font/${info.extension}`);
           let previewPath = "";
           try {
+            transferStage("生成字体预览", file.name);
             const preview = await codec.fontPreview(file);
             try {
               const previewBytes = await jpegBytesFromBlob(preview.blob);
               if (previewBytes) {
                 const previewSha = await codec.sha256Hex(previewBytes);
+                transferStage("上传字体预览", file.name);
                 previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg");
               }
             } finally { preview.release?.(); }
           } catch { /* Font preview is optional; the original font remains usable. */ }
+          transferStage("写入字体清单", file.name);
           const record = await uploadBrowserRecord({
             kind: "font", id: `font-${info.sha256.slice(0, 16)}`, sha256: info.sha256, file_name: file.name,
             family: file.name.replace(/\.[^.]+$/, ""), subfamily: "Regular", extension: info.extension, bytes: info.bytes,
             url: fontPath, view_url: fontPath, preview_url: previewPath, saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
           }, codec);
+          transferDone(file.name);
           operationMessage(output, `已上传字体 ${++finished} / ${unique.length}…`);
           return record;
         } catch (error) {
+          transferDone(file.name, true);
           operationMessage(output, `已完成字体 ${++finished} / ${unique.length}（有一项失败）…`);
           return { error, file };
         }
       });
       const added = uploaded.filter(item => !item?.error);
       const failures = uploaded.filter(item => item?.error);
+      finishTransferProgress("字体上传完成", failures.length);
       if (!added.length && failures.length) throw failures[0].error;
       state.fonts = [...added, ...state.fonts];
       state.importFontIds = added.map(font => font.id);
@@ -1382,34 +1453,41 @@ async function importAssets(files) {
     if (!unique.length) { operationMessage(output, `全部 ${duplicates} 个收藏已存在，未重复上传。`); toast("所选收藏均已存在"); return; }
     if (browserSyncEnabled()) {
       const codec = await browserCodec();
+      beginTransferProgress("收藏上传", unique.length);
       let finished = 0;
       const uploaded = await mapConcurrent(unique, 2, async ({file, bytes, hash}) => {
         try {
           const extension = assetExtension(file);
           const mime = extension === "svg" ? "image/svg+xml" : "text/html; charset=utf-8";
+          transferStage("上传收藏文件", file.name);
           const objectPath = await uploadBrowserObject("assets", hash, extension, bytes, mime);
           let previewPath = "";
           if (extension === "svg") {
             try {
+              transferStage("生成 SVG 预览", file.name);
               const previewBlob = await imagePreviewBlob(bytes, "image/svg+xml");
               const previewBytes = await jpegBytesFromBlob(previewBlob);
               if (previewBytes) {
                 const previewSha = await codec.sha256Hex(previewBytes);
+                transferStage("上传收藏预览", file.name);
                 previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg");
               }
             } catch { /* The SVG remains downloadable if thumbnail creation fails. */ }
           }
+          transferStage("写入收藏清单", file.name);
           const record = await uploadBrowserRecord({
             kind: "asset", id: `asset-${hash.slice(0, 16)}`, asset_type: extension === "svg" ? "svg" : "html", extension,
             file_name: file.name, name: file.name.replace(/\.[^.]+$/, ""), author: "", style: "", tags: [], sha256: hash, bytes: bytes.length,
             mime, object_url: objectPath, url: objectPath, preview_url: previewPath, saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
           }, codec);
+          transferDone(file.name);
           operationMessage(output, `已上传收藏 ${++finished} / ${unique.length}…`);
           return record;
-        } catch (error) { operationMessage(output, `已完成收藏 ${++finished} / ${unique.length}（有一项失败）…`); return { error, file }; }
+        } catch (error) { transferDone(file.name, true); operationMessage(output, `已完成收藏 ${++finished} / ${unique.length}（有一项失败）…`); return { error, file }; }
       });
       const added = uploaded.filter(item => !item?.error);
       const failures = uploaded.filter(item => item?.error);
+      finishTransferProgress("收藏上传完成", failures.length);
       if (!added.length && failures.length) throw failures[0].error;
       state.assets = [...added, ...state.assets];
       state.importAssetIds = added.map(asset => asset.id);
