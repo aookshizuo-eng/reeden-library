@@ -777,7 +777,23 @@ function renderFontFilters() {
 function fontClassificationEditor(font) {
   const style = fontCategory(font);
   const tags = recordTags(font);
-  return `<div class="record-classifications"><span class="category-chip">分类：${escapeHtml(style)}</span>${tags.map(tag => `<span class="category-chip">#${escapeHtml(tag)}</span>`).join("")}</div><form class="asset-meta-form record-classification-form" data-record-form="${escapeHtml(font?.id || "")}" data-record-kind="font"><div class="asset-meta-fields"><label>分类<input name="style" value="${escapeHtml(style === "其他" && !font?.style ? "" : style)}" placeholder="宋体、黑体、圆体、手写体" /></label><label>标签<input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="标签，用逗号分隔" /></label></div><button class="text-button" type="submit">保存分类</button></form>`;
+  return `<div class="record-classifications"><span class="category-chip">分类：${escapeHtml(style)}</span>${tags.map(tag => `<span class="category-chip">#${escapeHtml(tag)}</span>`).join("")}</div><details class="font-edit-details"><summary>编辑分类与标签</summary><form class="asset-meta-form record-classification-form" data-record-form="${escapeHtml(font?.id || "")}" data-record-kind="font"><div class="asset-meta-fields"><label>分类<input name="style" value="${escapeHtml(style === "其他" && !font?.style ? "" : style)}" placeholder="宋体、黑体、圆体、手写体" /></label><label>标签<input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="标签，用逗号分隔" /></label></div><button class="text-button" type="submit">保存分类</button></form></details>`;
+}
+function fontPreviewMarkup(font) {
+  const name = font.family || font.file_name || "字体";
+  if (font.preview_url) return `<div class="font-preview-frame"><img class="font-preview-image" src="${escapeHtml(assetUrl(font.preview_url))}" alt="${escapeHtml(name)} 字形预览" loading="lazy" /></div>`;
+  if (font.preview_state === "loading") return `<div class="font-preview-frame font-preview-loading"><span>正在生成字形预览…</span></div>`;
+  if (font.preview_error) return `<div class="font-preview-frame font-preview-error"><span>预览生成失败</span><small>${escapeHtml(font.preview_error)}</small><button class="text-button retry-font-preview" type="button" data-id="${escapeHtml(font.id)}">重试</button></div>`;
+  return `<div class="font-preview-frame"><span class="font-preview-fallback" style="font-family: 'font-${escapeHtml(font.id)}', sans-serif">Aa 中文 123</span></div>`;
+}
+function fontCard(font, imported = false) {
+  const name = font.family || font.file_name || "未命名字体";
+  const category = fontCategory(font);
+  const selection = imported ? "" : selectInput("font", font.id, `字体 ${name}`, savedToCloud(font));
+  const actions = imported
+    ? `<button class="text-button" data-open-view="jobs">查看同步任务</button>`
+    : `<button class="text-button sync-font" data-id="${escapeHtml(font.id)}" data-completed="${savedToCloud(font)}">${savedToCloud(font) ? "R2 已保存" : "同步字体到 R2"}</button>${font.url ? `<a class="download-link" href="${escapeHtml(assetUrl(font.url))}">下载原字体</a>` : ""}`;
+  return `<article class="font-card ${imported ? "import-font-card" : ""}"><div class="font-card-top">${selection}<span class="category-chip">${escapeHtml(category)}</span></div>${fontPreviewMarkup(font)}<div class="font-card-body"><h3 class="font-name">${escapeHtml(name)}</h3><div class="font-meta"><span>${escapeHtml((font.extension || "font").toUpperCase())}</span><span>${formatBytes(font.bytes)}</span><span>${escapeHtml(syncLabel(font))}</span></div>${font.sync_error ? `<p class="inline-error">${escapeHtml(typeof font.sync_error === "string" ? font.sync_error : Object.values(font.sync_error).join("；"))}</p>` : ""}${font.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof font.cleanup_warning === "string" ? font.cleanup_warning : Object.values(font.cleanup_warning).join("；"))}</p>` : ""}${imported ? "" : fontClassificationEditor(font)}</div><div class="font-actions">${actions}</div></article>`;
 }
 function renderThemes() {
   const list = $("#themeList");
@@ -835,7 +851,7 @@ function renderFonts() {
   $("#fontEmpty").hidden = visible.length > 0;
   $("#fontEmpty h3").textContent = state.fonts.length && !visible.length ? "没有匹配的字体" : "还没有字体";
   $("#fontEmpty p").textContent = state.fonts.length && !visible.length ? "换一个字体名称或分类试试。" : "从单个文件或文件夹开始建立字体索引。";
-  $("#fontList").innerHTML = visible.map(font => `<article class="font-card"><div><label class="item-heading">${selectInput("font", font.id, `字体 ${font.family || font.file_name}`, savedToCloud(font))}<span class="theme-title">${escapeHtml(font.family || font.file_name)}</span></label><div class="font-specimen" style="font-family: 'font-${escapeHtml(font.id)}', sans-serif">Aa 中文 123</div><div class="font-meta"><span>${escapeHtml(font.subfamily || "Regular")}</span><span>${escapeHtml((font.extension || "font").toUpperCase())}</span><span>${formatBytes(font.bytes)}</span><span>${escapeHtml(syncLabel(font))}</span></div><div class="font-hash">SHA-256 ${escapeHtml(font.sha256)}</div>${font.sync_error ? `<p class="inline-error">${escapeHtml(typeof font.sync_error === "string" ? font.sync_error : Object.values(font.sync_error).join("；"))}</p>` : ""}${font.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof font.cleanup_warning === "string" ? font.cleanup_warning : Object.values(font.cleanup_warning).join("；"))}</p>` : ""}${fontClassificationEditor(font)}</div><div class="font-actions"><button class="text-button sync-font" data-id="${escapeHtml(font.id)}" data-completed="${savedToCloud(font)}">${savedToCloud(font) ? "R2 已保存" : "同步字体到 R2"}</button>${font.url ? `<a class="download-link" href="${escapeHtml(assetUrl(font.url))}">下载原字体</a>` : ""}</div></article>`).join("");
+  $("#fontList").innerHTML = visible.map(font => fontCard(font)).join("");
   // A FontFace preview works without a build step and keeps the original file untouched.
   state.fonts.forEach(font => {
     const url = assetUrl(font.view_url || font.url);
@@ -844,6 +860,7 @@ function renderFonts() {
     face.load().then(loaded => { document.fonts.add(loaded); loadedFontFaces.add(font.id); }).catch(() => {});
   });
   $$(".sync-font").forEach(button => button.addEventListener("click", () => syncFont(button.dataset.id)));
+  $$(".retry-font-preview").forEach(button => button.addEventListener("click", () => generateFontPreview(button.dataset.id)));
   renderImportedFonts();
   updateBulkControls();
 }
@@ -962,7 +979,7 @@ function renderImportedFonts() {
   const fonts = state.importFontIds.map(id => state.fonts.find(font => font.id === id)).filter(Boolean);
   $("#fontImportResults").hidden = !fonts.length;
   $("#fontBatchDescription").textContent = `本批 ${fonts.length} 个新字体；此前收录的字体在字体库中单独查看。`;
-  $("#importedFontList").innerHTML = fonts.map(font => `<article class="font-card import-font-card"><div><div class="theme-title">${escapeHtml(font.family || font.file_name)}</div><div class="font-specimen" style="font-family: 'font-${escapeHtml(font.id)}', sans-serif">Aa 中文 123</div><div class="font-meta"><span>${escapeHtml(font.subfamily || "Regular")}</span><span>${escapeHtml((font.extension || "font").toUpperCase())}</span><span>${formatBytes(font.bytes)}</span><span>${escapeHtml(syncLabel(font))}</span></div><div class="record-classifications"><span class="category-chip">分类：${escapeHtml(font.style || inferFontCategory(font))}</span></div>${font.sync_error ? `<p class="inline-error">${escapeHtml(font.sync_error)}</p>` : ""}</div><button class="text-button" data-open-view="jobs">查看同步任务</button></article>`).join("");
+  $("#importedFontList").innerHTML = fonts.map(font => fontCard(font, true)).join("");
 }
 function rememberJob(job) {
   if (!job?.id) throw new Error("后台没有返回任务编号，请刷新后检查任务列表");
@@ -1108,6 +1125,40 @@ async function discardReview(id) {
 async function loadFonts(force = false) {
   const records = browserSyncEnabled() ? await loadBrowserLibraryRecords(force) : (await api("/api/fonts")).items || [];
   state.fonts = records.filter(item => item.kind === "font").map(font => ({ ...font, style: String(font.style || "").trim() || inferFontCategory(font) }));
+  renderFonts();
+  if (browserSyncEnabled()) {
+    const codec = await browserCodec().catch(() => null);
+    if (codec) mapConcurrent(state.fonts.filter(font => !font.preview_url && !font.preview_state && (font.view_url || font.url)), 2, font => generateFontPreview(font.id, codec)).catch(() => {});
+  }
+}
+async function generateFontPreview(fontId, codec = null) {
+  const font = state.fonts.find(item => item.id === fontId);
+  if (!font || font.preview_state === "loading" || font.preview_url || !browserSyncEnabled()) return;
+  const sourceUrl = font.view_url || font.url;
+  if (!sourceUrl) return;
+  font.preview_state = "loading";
+  font.preview_error = "";
+  renderFonts();
+  try {
+    codec = codec || await browserCodec();
+    const response = await fetch(assetUrl(sourceUrl), { headers: requestHeaders() });
+    if (!response.ok) throw new Error(`字体文件读取失败（${response.status}）`);
+    const source = await response.blob();
+    const file = new File([source], font.file_name || `font.${font.extension || "ttf"}`, { type: source.type || `font/${font.extension || "ttf"}` });
+    const rendered = await codec.fontPreview(file, { text: "Aa 中文 123", width: 1200, height: 260, fontSize: 64 });
+    try {
+      const previewBytes = await jpegBytesFromBlob(rendered.blob);
+      if (!previewBytes) throw new Error("当前浏览器无法编码字体预览");
+      const previewSha = await codec.sha256Hex(previewBytes);
+      const previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg");
+      const next = { ...font, preview_url: previewPath, preview_sha256: previewSha, preview_state: "ready", preview_error: "", updated_at: new Date().toISOString() };
+      await uploadBrowserRecord(next, codec);
+      Object.assign(font, next);
+    } finally { rendered.release?.(); }
+  } catch (error) {
+    font.preview_state = "error";
+    font.preview_error = error.message || "字体预览生成失败";
+  }
   renderFonts();
 }
 async function loadStorage() {
@@ -1442,11 +1493,24 @@ async function importFonts(files) {
           const bytes = new Uint8Array(await file.arrayBuffer());
           transferStage("上传字体文件", file.name);
           const fontPath = await uploadBrowserObject("fonts", info.sha256, info.extension, bytes, `font/${info.extension}`);
+          let previewPath = "";
+          let previewError = "";
+          try {
+            transferStage("生成字体预览", file.name);
+            const rendered = await codec.fontPreview(file, { text: "Aa 中文 123", width: 1200, height: 260, fontSize: 64 });
+            try {
+              const previewBytes = await jpegBytesFromBlob(rendered.blob);
+              if (!previewBytes) throw new Error("当前浏览器无法编码字体预览");
+              const previewSha = await codec.sha256Hex(previewBytes);
+              transferStage("上传字体预览", file.name);
+              previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg");
+            } finally { rendered.release?.(); }
+          } catch (error) { previewError = error.message || "字体预览生成失败"; }
           transferStage("写入字体清单", file.name);
           const record = await uploadBrowserRecord({
             kind: "font", id: `font-${info.sha256.slice(0, 16)}`, sha256: info.sha256, file_name: file.name,
             family: file.name.replace(/\.[^.]+$/, ""), subfamily: "Regular", extension: info.extension, bytes: info.bytes, style: inferFontCategory({ family: file.name }), tags: [],
-            url: fontPath, view_url: fontPath, preview_url: "", saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
+            url: fontPath, view_url: fontPath, preview_url: previewPath, preview_state: previewPath ? "ready" : "error", preview_error: previewError, saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
           }, codec);
           transferDone(file.name);
           operationMessage(output, `已上传字体 ${++finished} / ${unique.length}…`);
