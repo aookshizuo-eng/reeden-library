@@ -12,6 +12,9 @@ const MAX_LIST_RECORDS = 200;
 const SHA256 = /^[a-f0-9]{64}$/;
 const SAFE_EXT = new Set(["ttf", "otf", "woff", "woff2"]);
 const KINDS = new Set(["originals", "compressed", "fonts", "previews", "records", "assets"]);
+const PRIVATE_RED_MAGIC = new Uint8Array([0x52, 0x45, 0x44, 0x10]);
+const PRIVATE_MAX_MANIFEST = 1024 * 1024;
+const PRIVATE_MAX_RESOURCE = 80 * 1024 * 1024;
 
 // R2 list() returns object keys, so records still need individual reads. Keep
 // those reads bounded but concurrent; serial reads made a library refresh take
@@ -118,6 +121,192 @@ function maxUpload(env) {
 async function digestHex(data) {
   const digest = await crypto.subtle.digest("SHA-256", data);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function base64Bytes(value, label) {
+  if (typeof value !== "string" || value.length > 140 * 1024 * 1024) throw new Error(`${label} 不是有效 Base64`);
+  let decoded;
+  try { decoded = atob(value); } catch { throw new Error(`${label} 不是有效 Base64`); }
+  const bytes = new Uint8Array(decoded.length);
+  for (let index = 0; index < decoded.length; index++) bytes[index] = decoded.charCodeAt(index);
+  return bytes;
+}
+
+function base64String(bytes) {
+  let result = "";
+  const values = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  for (let index = 0; index < values.length; index += 0x8000) {
+    result += String.fromCharCode(...values.subarray(index, Math.min(index + 0x8000, values.length)));
+  }
+  return btoa(result);
+}
+
+function readU32(bytes, offset) {
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(offset, false);
+}
+
+function utf8Json(bytes, label) {
+  try {
+    const value = JSON.parse(new TextDecoder().decode(bytes));
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("对象无效");
+    return value;
+  } catch { throw new Error(`${label} 不是有效 JSON 对象`); }
+}
+
+function assertPrivateHeader(header) {
+  const expected = {
+    version: 2, resourceType: "themeBundle", payloadType: "directory",
+    containerMode: "reedenPrivate", algorithm: "aes-256-gcm-manifest", assetMode: "plain-sequential",
+  };
+  if (!header || typeof header !== "object" || Object.keys(expected).some(key => header[key] !== expected[key])) {
+    throw new Error("此私有 RED 协议尚未支持重封");
+  }
+  if (!Number.isSafeInteger(header.manifestLength) || header.manifestLength < 16 || header.manifestLength > PRIVATE_MAX_MANIFEST) {
+    throw new Error("RED v2 加密目录长度无效");
+  }
+}
+
+function assertPrivateManifest(manifest) {
+  if (!manifest || manifest.version !== 2 || manifest.payloadKind !== "directory" || !Array.isArray(manifest.entries) || !manifest.entries.length || manifest.entries.length > 3000) {
+    throw new Error("RED v2 已认证目录结构无效");
+  }
+  const seen = new Set();
+  for (const entry of manifest.entries) {
+    const path = entry?.path;
+    if (typeof path !== "string" || !path || path.startsWith("/") || path.includes("\\") || path.includes(":" ) || path.includes("\0") || path.split("/").some(part => !part || part === "." || part === "..") || seen.has(path)) throw new Error("RED v2 目录路径无效或重复");
+    if (!Number.isSafeInteger(entry.offset) || entry.offset < 0 || !Number.isSafeInteger(entry.length) || entry.length < 0 || entry.length > PRIVATE_MAX_RESOURCE || !/^[a-f0-9]{64}$/i.test(String(entry.sha256 || ""))) throw new Error("RED v2 目录项无效");
+    seen.add(path);
+  }
+}
+
+async function importPrivateKey(env) {
+  const keyBytes = base64Bytes(String(env.REEDEN_PRIVATE_FORMAT_KEY_B64 || ""), "REEDEN_PRIVATE_FORMAT_KEY_B64");
+  if (keyBytes.length !== 32) throw new Error("RED v2 格式密钥长度无效");
+  return crypto.subtle.importKey("raw", keyBytes, {name: "AES-GCM"}, false, ["decrypt", "encrypt"]);
+}
+
+async function decryptPrivateManifest(raw, env) {
+  if (raw.length < 8 || !PRIVATE_RED_MAGIC.every((value, index) => raw[index] === value)) throw new Error("不是 RED v2 私有主题");
+  const headerLength = readU32(raw, 4);
+  if (headerLength < 2 || headerLength > 65536 || 8 + headerLength > raw.length) throw new Error("RED v2 公开头长度无效");
+  const header = utf8Json(raw.subarray(8, 8 + headerLength), "RED v2 公开头");
+  assertPrivateHeader(header);
+  const nonce = base64Bytes(header.manifestNonce, "RED v2 目录随机数");
+  if (nonce.length !== 12) throw new Error("RED v2 目录随机数长度无效");
+  const manifestStart = 8 + headerLength;
+  const manifestEnd = manifestStart + header.manifestLength;
+  if (manifestEnd > raw.length) throw new Error("RED v2 加密目录不完整");
+  let plain;
+  try { plain = new Uint8Array(await crypto.subtle.decrypt({name: "AES-GCM", iv: nonce}, await importPrivateKey(env), raw.subarray(manifestStart, manifestEnd))); }
+  catch { throw new Error("RED v2 加密目录认证失败，文件可能损坏或密钥不匹配"); }
+  const manifest = utf8Json(plain, "RED v2 已认证目录");
+  assertPrivateManifest(manifest);
+  return {header, manifest, manifestEnd};
+}
+
+function cloneJson(value) { return JSON.parse(JSON.stringify(value)); }
+
+function mapPrivateRefs(value, replacements, pathReplacements) {
+  if (Array.isArray(value)) return value.map(item => mapPrivateRefs(item, replacements, pathReplacements));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapPrivateRefs(item, replacements, pathReplacements)]));
+  if (typeof value !== "string") return value;
+  if (pathReplacements.has(value)) return pathReplacements.get(value);
+  const exact = replacements.get(value) || replacements.get(value.toLowerCase());
+  if (exact) return exact;
+  const match = value.match(/^([a-f0-9]{32}|[a-f0-9]{64})(\.[A-Za-z0-9]+)?$/i);
+  if (!match) return value;
+  const mapped = replacements.get(match[1].toLowerCase());
+  return mapped ? mapped + (match[2] || "") : value;
+}
+
+async function repackPrivateRed(request, env) {
+  if (!originAllowed(request, env, {write: true})) return json({error: "Origin 不在允许列表中"}, 403, request, env);
+  if (!checkWriteToken(request, env)) return json({error: "加密 RED 重封接口需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
+  let payload;
+  try { payload = await request.json(); } catch { return json({error: "重封请求不是有效 JSON"}, 400, request, env); }
+  if (!payload || typeof payload !== "object" || !Array.isArray(payload.replacements)) return json({error: "重封请求缺少 replacements"}, 400, request, env);
+  let raw;
+  try { raw = base64Bytes(payload.red_base64, "red_base64"); } catch (error) { return json({error: error.message}, 400, request, env); }
+  if (raw.length > maxUpload(env)) return json({error: "原始 RED 超过上传大小限制"}, 413, request, env);
+  try {
+    const {header, manifest, manifestEnd} = await decryptPrivateManifest(raw, env);
+    const payloadBytes = raw.subarray(manifestEnd);
+    const ranges = manifest.entries.map(entry => [entry.offset, entry.offset + entry.length]);
+    let cursor = 0;
+    for (const [start, end] of [...ranges].sort((a, b) => a[0] - b[0])) {
+      if (start !== cursor || end < start || end > payloadBytes.length) throw new Error("RED v2 资源载荷有空隙、重叠或越界");
+      cursor = end;
+    }
+    if (cursor !== payloadBytes.length) throw new Error("RED v2 资源载荷末尾有未登记数据");
+    const byPath = new Map(manifest.entries.map(entry => [entry.path, entry]));
+    const replacements = new Map();
+    const pathReplacements = new Map();
+    const changed = new Map();
+    for (const item of payload.replacements) {
+      if (!item || typeof item !== "object") throw new Error("replacement 格式无效");
+      let entry = typeof item.path === "string" ? byPath.get(item.path) : null;
+      if (!entry && Number.isSafeInteger(item.offset) && Number.isSafeInteger(item.end) && item.end > item.offset) {
+        entry = manifest.entries.find(candidate => {
+          const relativeEnd = candidate.offset + candidate.length;
+          return (candidate.offset === item.offset && relativeEnd === item.end)
+            || (manifestEnd + candidate.offset === item.offset && manifestEnd + relativeEnd === item.end);
+        });
+      }
+      if (!entry) throw new Error(`找不到待替换资源：${item.path || `${item.offset}-${item.end}`}`);
+      const itemPath = entry.path;
+      const oldBytes = payloadBytes.subarray(entry.offset, entry.offset + entry.length);
+      const oldSha = await digestHex(oldBytes);
+      if (oldSha.toLowerCase() !== String(entry.sha256).toLowerCase() || (item.old_sha256 && oldSha.toLowerCase() !== String(item.old_sha256).toLowerCase())) throw new Error(`资源 SHA-256 校验失败：${itemPath}`);
+      const bytes = base64Bytes(item.bytes_base64, `${itemPath} bytes_base64`);
+      if (bytes.length > PRIVATE_MAX_RESOURCE) throw new Error(`资源超过处理上限：${itemPath}`);
+      const newSha = await digestHex(bytes);
+      const oldPath = itemPath;
+      const newPath = typeof item.new_path === "string" && item.new_path ? item.new_path : oldPath;
+      if (newPath !== oldPath) pathReplacements.set(oldPath, newPath);
+      replacements.set(oldSha, newSha);
+      replacements.set(oldSha.toUpperCase(), newSha.toUpperCase());
+      if (item.old_md5 && item.new_md5) { replacements.set(String(item.old_md5).toLowerCase(), String(item.new_md5).toLowerCase()); replacements.set(String(item.old_md5).toUpperCase(), String(item.new_md5).toUpperCase()); }
+      changed.set(oldPath, {bytes, newPath, newSha});
+    }
+    const outputEntries = [];
+    const newManifest = cloneJson(manifest);
+    let outputCursor = 0;
+    const resources = [];
+    for (const entry of newManifest.entries) {
+      const original = manifest.entries.find(item => item.path === entry.path);
+      const replacement = changed.get(entry.path);
+      let bytes = replacement ? replacement.bytes : payloadBytes.subarray(original.offset, original.offset + original.length);
+      let path = replacement?.newPath || entry.path;
+      if (path !== entry.path) entry.path = path;
+      if (entry.path.endsWith(".json")) {
+        try {
+          const document = JSON.parse(new TextDecoder().decode(bytes));
+          const mapped = mapPrivateRefs(document, replacements, pathReplacements);
+          bytes = new TextEncoder().encode(JSON.stringify(mapped));
+        } catch { /* opaque JSON-like resources remain byte-for-byte unchanged */ }
+      }
+      entry.offset = outputCursor;
+      entry.length = bytes.length;
+      entry.sha256 = await digestHex(bytes);
+      outputCursor += bytes.length;
+      resources.push(bytes);
+      outputEntries.push(entry.path);
+    }
+    if (new Set(outputEntries).size !== outputEntries.length) throw new Error("重封后的资源路径冲突");
+    const nextNonce = crypto.getRandomValues(new Uint8Array(12));
+    const nextManifest = new TextEncoder().encode(JSON.stringify(newManifest));
+    const key = await importPrivateKey(env);
+    const encrypted = new Uint8Array(await crypto.subtle.encrypt({name: "AES-GCM", iv: nextNonce}, key, nextManifest));
+    const nextHeader = {...header, manifestNonce: base64String(nextNonce), manifestLength: encrypted.length};
+    const headerBytes = new TextEncoder().encode(JSON.stringify(nextHeader));
+    if (headerBytes.length > 65536 || encrypted.length > PRIVATE_MAX_MANIFEST) throw new Error("重封后的目录超过处理上限");
+    const prefix = new Uint8Array(8 + headerBytes.length + encrypted.length);
+    prefix.set(PRIVATE_RED_MAGIC, 0); new DataView(prefix.buffer).setUint32(4, headerBytes.length, false); prefix.set(headerBytes, 8); prefix.set(encrypted, 8 + headerBytes.length);
+    const result = new Uint8Array(prefix.length + resources.reduce((sum, item) => sum + item.length, 0));
+    result.set(prefix, 0); let offset = prefix.length;
+    for (const bytes of resources) { result.set(bytes, offset); offset += bytes.length; }
+    return json({ok: true, bytes: base64String(result), bytes_length: result.length, sha256: await digestHex(result)}, 200, request, env);
+  } catch (error) { return json({error: error?.message || "加密 RED 重封失败"}, 422, request, env); }
 }
 
 function contentType(spec) {
@@ -240,6 +429,7 @@ export async function handle(request, env) {
   if (url.pathname === "/api/themes" && request.method === "GET") return listRecords(request, env, "theme");
   if (url.pathname === "/api/fonts" && request.method === "GET") return listRecords(request, env, "font");
   if (url.pathname === "/api/assets" && request.method === "GET") return listRecords(request, env, "asset");
+  if (url.pathname === "/api/private/repack" && request.method === "POST") return repackPrivateRed(request, env);
   const classificationUpdate = url.pathname.match(/^\/api\/(assets|themes|fonts)\/([^/]+)$/);
   if (classificationUpdate && request.method === "PATCH") {
     const kind = classificationUpdate[1] === "assets" ? "asset" : classificationUpdate[1] === "themes" ? "theme" : "font";
@@ -266,4 +456,4 @@ export async function handle(request, env) {
 
 export default {fetch: handle};
 
-export const __test = {configuredOrigins, corsHeaders, originAllowed, objectSpec, maxUpload, digestHex};
+export const __test = {configuredOrigins, corsHeaders, originAllowed, objectSpec, maxUpload, digestHex, base64Bytes, base64String, decryptPrivateManifest, repackPrivateRed};

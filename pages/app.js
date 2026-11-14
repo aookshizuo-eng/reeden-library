@@ -199,9 +199,50 @@ async function api(path, options = {}) {
 function browserSyncEnabled() {
   return Boolean(apiBase && state.storage?.mode === "browser-local");
 }
+function browserPrivateCompressionEnabled() {
+  // The sync Worker keeps the private RED format key server-side. The browser
+  // only supplies compressed image replacements, so mobile can process a
+  // private package without receiving the key.
+  return browserSyncEnabled();
+}
+function base64Bytes(value) {
+  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value || []);
+  let output = "";
+  const chunk = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunk) {
+    output += String.fromCharCode(...bytes.subarray(offset, Math.min(bytes.length, offset + chunk)));
+  }
+  return btoa(output);
+}
+async function compressPrivateRedViaWorker(raw, codec, options = {}) {
+  const previewEntries = await codec.extractPrivatePreviewImages(raw, { limit: 2000, maxBytes: 80 * 1024 * 1024 });
+  const replacements = [];
+  for (const entry of previewEntries) {
+    const result = await codec.compressImage(entry.bytes, entry.name, options);
+    if (!result?.decision?.used || result.bytes.length >= entry.bytes.length) continue;
+    const [oldSha256, newSha256, oldMd5, newMd5] = await Promise.all([
+      codec.sha256Hex(entry.bytes), codec.sha256Hex(result.bytes), codec.md5Hex(entry.bytes), codec.md5Hex(result.bytes),
+    ]);
+    replacements.push({ offset: entry.offset, end: entry.end, oldSha256, newSha256, oldMd5, newMd5, bytes: base64Bytes(result.bytes) });
+  }
+  if (!replacements.length) {
+    return { bytes: raw, originalBytes: raw.length, compressedBytes: raw.length, savedBytes: 0, packageSelected: false, decisions: [], format: "red_private_v2", privateWorker: true };
+  }
+  const response = await fetch(apiUrl("/api/private/repack"), {
+    method: "POST",
+    headers: requestHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ red_base64: base64Bytes(raw), replacements: replacements.map(item => ({ offset: item.offset, end: item.end, old_sha256: item.oldSha256, old_md5: item.oldMd5, new_md5: item.newMd5, bytes_base64: item.bytes })) }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `加密主题重封失败（${response.status}）`);
+  if (!data.bytes) throw new Error("加密主题重封接口没有返回压缩包");
+  const encoded = atob(data.bytes), output = new Uint8Array(encoded.length);
+  for (let index = 0; index < encoded.length; index++) output[index] = encoded.charCodeAt(index);
+  return { bytes: output, originalBytes: raw.length, compressedBytes: output.length, savedBytes: Math.max(0, raw.length - output.length), packageSelected: output.length < raw.length, decisions: replacements.map(item => ({ path: `private@${item.offset}`, used: true, reason: "压缩后由同步 Worker 认证重封", original_bytes: item.end - item.offset, compressed_bytes: atob(item.bytes).length })), format: "red_private_v2", privateWorker: true };
+}
 async function browserCodec() {
   const codec = await loadFreeCodec();
-  if (!codec?.inspectContainer || !codec?.sha256Hex) throw new Error("浏览器处理器未加载，请刷新页面后重试");
+  if (!codec?.inspectContainer || !codec?.sha256Hex || !codec?.md5Hex || !codec?.compressImage || !codec?.extractPrivatePreviewImages) throw new Error("浏览器处理器未加载，请刷新页面后重试");
   return codec;
 }
 async function uploadBrowserObject(kind, sha, extension, body, contentType) {
@@ -485,9 +526,9 @@ function previewImage(url, alt, className = "", details = {}) {
   if (!url) return `<span class="${className} preview-empty" role="img" aria-label="暂无可用预览">暂无预览</span>`;
   url = assetUrl(url);
   const description = details?.encrypted_source
-    ? (browserSyncEnabled()
-      ? "加密 RED 未解密清单，仅从包内可读取的明文图片资源合成预览；当前设备暂保留原包，电脑本地服务可压缩图片并重新封包。"
-      : "加密 RED 清单保持加密；本机服务已从包内图片生成预览，并会压缩图片后重新封包。")
+    ? (browserPrivateCompressionEnabled()
+      ? "加密 RED 的图片先在当前设备压缩，再交给同步 Worker 认证清单并重新封包。"
+      : "加密 RED 清单保持加密；本机服务会压缩包内图片并重新封包。")
     : details?.simulation ? "书架使用主题真实素材离线合成，右侧为书架、轮播和封面图集。" + (details.kind === "shelf_and_splash" ? "左侧为启动图。" : "左侧为阅读页或阅读背景。") : "使用主题包内图片生成的轻量预览。";
   return `<button class="preview-open ${className}" type="button" aria-label="${escapeHtml(alt)}，点击放大" data-preview-url="${escapeHtml(url)}" data-preview-title="${escapeHtml(alt)}" data-preview-description="${escapeHtml(description)}"><img src="${escapeHtml(url)}" alt="${escapeHtml(alt)}" loading="lazy" /></button>`;
 }
@@ -554,12 +595,12 @@ function updateBulkControls() {
     $("#" + buttonId).title = storageDirty ? "请先保存存储设置" : "";
   });
   const chosenReview = state.review.filter(item => selections.review.has(item.staging_id));
-  const privateCount = chosenReview.filter(item => browserSyncEnabled() && requiresOriginalPreservation(item.info)).length;
+  const privateCount = chosenReview.filter(item => !browserPrivateCompressionEnabled() && requiresOriginalPreservation(item.info)).length;
   const normalCount = chosenReview.length - privateCount;
   const onlyPrivate = privateCount > 0 && normalCount === 0;
   const syncSuffix = browserSyncEnabled() ? "、上传 R2" : autoSyncEnabled() ? "、同步" : "";
   $("#commitSelectedThemes").textContent = onlyPrivate ? `确认所选并原样保存${syncSuffix}` : `确认所选并压缩${syncSuffix || "保存"}`;
-  $("#compressionPlan").textContent = chosenReview.length ? `${browserSyncEnabled() ? normalCount : chosenReview.length} 个主题将压缩并重新封包${privateCount ? `；${privateCount} 个手机/静态模式下加密包先保留原包，电脑本机后台可压缩重封` : ""}。处理完成后显示压缩前后大小。` : "全选或勾选主题后确认，开始处理。加密主题的图片也会由电脑本地服务压缩并重新封包；手机/静态网页因不持有私有格式密钥会暂保留原包。";
+  $("#compressionPlan").textContent = chosenReview.length ? `${chosenReview.length} 个主题将压缩并重新封包${privateCount ? `；${privateCount} 个当前设备无法认证的加密包先保留原包` : ""}。处理完成后显示压缩前后大小。` : "全选或勾选主题后确认，开始处理。加密主题会先压缩包内图片，再由同步 Worker 或电脑本地服务认证清单并重新封包。";
   $$(".compression-controls input").forEach(input => { input.disabled = Boolean(state.operation); });
   $("#themeToolbar").hidden = !state.themes.length;
   $("#fontToolbar").hidden = !state.fonts.length;
@@ -657,12 +698,12 @@ function renderReview() {
     // authenticate/repack image replacements. Static Pages/Android cannot
     // safely re-seal the encrypted manifest, so only that mode preserves the
     // original browser-side package.
-    const privateTheme = browserSyncEnabled() && requiresOriginalPreservation(info);
+    const privateTheme = !browserPrivateCompressionEnabled() && requiresOriginalPreservation(info);
     const preview = preferredPreview(item.preview_urls?.light, item.preview_urls?.dark);
     const duplicateThumbs = duplicate ? item.duplicates.map(candidate => `<div class="thumb-label">${previewImage(candidate.preview_light_url || candidate.preview_dark_url, `已有主题 ${candidate.name} · ${previewKind(candidate.preview_details)}`, "thumb", candidate.preview_details)}<span>${escapeHtml(candidate.name)}</span></div>`).join("") : "";
     const privateNote = info.container_format === "red_private_v2"
-      ? (browserSyncEnabled()
-        ? `<p class="review-meta">加密主题：已从包内可读取的明文图片生成预览；当前设备没有私有格式密钥，确认后暂保留原包。需要压缩图片请使用电脑本地服务。</p>`
+      ? (browserPrivateCompressionEnabled()
+        ? `<p class="review-meta">加密主题：图片会在当前设备压缩，再由同步 Worker 认证清单、更新资源哈希并重新封包。</p>`
         : `<p class="review-meta">加密主题：清单保持加密；本机服务会压缩包内图片并重新封包，同时保留权限、资源哈希和原始包。</p>`)
       : "";
     return `<article class="review-card" data-review-id="${escapeHtml(item.staging_id)}"><div class="review-top"><div><label class="item-heading">${selectInput("review", item.staging_id, `待确认主题 ${info.name || info.source_name}`)}<span class="review-title">${escapeHtml(info.name || info.source_name)}</span></label><div class="review-meta">${escapeHtml(info.author || "作者未记录")} · ${formatBytes(info.bytes)} · ${escapeHtml(info.source_name)}</div></div><span class="badge ${duplicate ? "" : "is-good"}">${duplicate ? `疑似重复 ${item.duplicates.length}` : "未发现同名作者"}</span></div>${privateNote}${duplicate ? `<div class="duplicate-note">已有库中存在同名作者主题。下面只展示缩略图，是否重复由你确认。</div><div class="duplicate-thumbs">${duplicateThumbs}</div>` : ""}<div class="duplicate-thumbs"><div class="thumb-label">${previewImage(preview.url, `待审核主题${preview.label} · ${previewKind(info.preview_details)}`, "thumb", info.preview_details)}<span>新主题 · ${preview.label}</span><span>${escapeHtml(previewKind(info.preview_details))} · 点击放大</span></div></div>${item.commitError ? `<p class="inline-error">${escapeHtml(item.commitError)}</p>` : ""}<div class="review-actions"><button class="primary-button commit-theme" data-id="${escapeHtml(item.staging_id)}">${privateTheme ? "确认并保存原包（电脑后台压缩）" : "确认并压缩保存"}${autoSyncEnabled() ? "并后台同步" : "（后台处理）"}</button><button class="secondary-button discard-review" data-id="${escapeHtml(item.staging_id)}">暂不处理</button></div></article>`;
@@ -1122,7 +1163,9 @@ async function commitThemes(ids = [...selections.review]) {
         try {
           const raw = item.bytes || new Uint8Array(await item.file.arrayBuffer());
           const encrypted = item.info?.compression_supported === false || item.inspection?.format === "red_private_v2";
-          const result = encrypted ? { bytes: raw, originalBytes: raw.length, compressedBytes: raw.length, savedBytes: 0, packageSelected: false, decisions: [], format: "red_private_v2" } : await codec.compressRed(raw, { quality: options.quality, maxEdge: options.max_edge });
+          const result = encrypted
+            ? await compressPrivateRedViaWorker(raw, codec, { quality: options.quality, maxEdge: options.max_edge })
+            : await codec.compressRed(raw, { quality: options.quality, maxEdge: options.max_edge });
           const compressedBytes = result.bytes;
           const originalSha = await codec.sha256Hex(raw);
           const originalPath = await uploadBrowserObject("originals", originalSha, "red", raw, "application/octet-stream");
@@ -1130,7 +1173,7 @@ async function commitThemes(ids = [...selections.review]) {
           const compressedPath = await uploadBrowserObject("compressed", assetSha, "red", compressedBytes, "application/octet-stream");
           let previewPath = "";
           let previewEntries = [];
-          try { previewEntries = encrypted ? await codec.extractPrivatePreviewImages(raw) : await codec.readZipEntries(compressedBytes); } catch { previewEntries = []; }
+          try { previewEntries = encrypted ? await codec.extractPrivatePreviewImages(compressedBytes) : await codec.readZipEntries(compressedBytes); } catch { previewEntries = []; }
           let previewDetails = item.info.preview_details || { kind: previewCompositionKind(previewEntries), simulation: true };
           const preview = await composeThemePreviewBlob(previewEntries, codec);
           if (preview) {
@@ -1142,7 +1185,7 @@ async function commitThemes(ids = [...selections.review]) {
           const record = await uploadBrowserRecord({
             kind: "theme", id: `theme-${assetSha.slice(0, 16)}`, name: item.info.name || item.info.source_name, author: item.info.author || "作者未记录",
             sha256: assetSha, original_sha256: originalSha, original_size: raw.length, compressed_size: compressedBytes.length,
-            compression_supported: !encrypted, status: encrypted ? "private_preserved" : "browser_compressed", source_name: item.info.source_name,
+            compression_supported: true, status: "browser_compressed", source_name: item.info.source_name,
             compressed_url: compressedPath, library_url: compressedPath, preview_light_url: previewPath, preview_dark_url: "", preview_details: previewDetails,
             saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: "", original_url: originalPath
           }, codec);

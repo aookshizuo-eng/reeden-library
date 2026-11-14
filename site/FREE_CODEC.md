@@ -15,7 +15,7 @@
 
 明确不支持：
 
-- 加密 `RED\\x10` 的清单无法在免费浏览器中解密，但包内明文图片仍可提取用于预览；浏览器不重新封包，避免破坏 AES-GCM 目录。电脑本机 Python 后台可以认证、压缩图片并重新封包；
+- 加密 `RED\\x10` 的清单不在浏览器端解密；浏览器压缩包内明文图片后，交给配置了 `REEDEN_PRIVATE_FORMAT_KEY_B64` 的同步 Worker 认证清单并重新封包。没有同步 Worker 时，电脑本机 Python 后台仍可认证、压缩图片并重新封包；
 - ZIP64、加密 ZIP 项、未知 ZIP 压缩方法；
 - 浏览器不支持 `CompressionStream`、`DecompressionStream`、`createImageBitmap` 或 Canvas 时的图片压缩。
 
@@ -43,4 +43,4 @@ worker.onmessage = ({ data }) => { if (!data.ok) console.error(data.error.code, 
 
 Worker 适配器只返回可结构化克隆的数据；字体 PNG 样张仍应在带 DOM 的页面线程调用 `fontPreview()`。
 
-验证：在 `work/reeden-library` 目录运行 `node --test static/free_codec_test.mjs`。测试覆盖哈希向量、普通 RED ZIP round-trip、私有 RED 明确拒绝和损坏头拒绝；真实图片编码和 Reeden 导入仍需浏览器/实机验证。
+验证：在 `work/reeden-library` 目录运行 `node --test static/free_codec_test.mjs`。测试覆盖哈希向量、普通 RED ZIP round-trip、私有 RED 明确拒绝和损坏头拒绝；同步 Worker 的加密重封回归在 `worker/test-private-repack.mjs`。

@@ -1,6 +1,6 @@
 # Reeden 免费 R2 同步 Worker
 
-这是给 GitHub Pages 前端使用的轻量同步接口。主题和字体在手机/电脑浏览器本地处理，Worker 只负责把结果写入同一个 R2 Bucket、读取记录和返回对象。Worker 不保存 R2 Access Key；R2 通过绑定访问。
+这是给 GitHub Pages 前端使用的轻量同步接口。普通主题和字体在手机/电脑浏览器本地处理，Worker 负责把结果写入同一个 R2 Bucket、读取记录和返回对象。加密 RED 的图片仍由浏览器先压缩，Worker 通过私有格式密钥认证清单、更新哈希并重新封包；Worker 不接收图像解码任务，也不把私钥返回浏览器。Worker 不保存 R2 Access Key；R2 通过绑定访问。
 
 R2 对象布局：
 
@@ -20,8 +20,9 @@ records/<SHA-256>.json
 1. 安装 Node.js 后，在此目录运行 `npm install -D wrangler`，或直接使用 `npx wrangler`。
 2. 复制 `wrangler.toml.example` 为 `wrangler.toml`，填入 R2 Bucket 名称和 GitHub Pages 完整 Origin。
 3. 执行 `npx wrangler login`，再执行 `npx wrangler secret put SYNC_WRITE_TOKEN`，输入一个随机的长 token。不要把 token 写进 GitHub 仓库或前端代码。
-4. 执行 `npx wrangler deploy`。
-5. 将生成的 `https://...workers.dev` 地址填入前端的同步设置。
+4. 对支持加密 RED 重封的部署，再执行 `npx wrangler secret put REEDEN_PRIVATE_FORMAT_KEY_B64`，写入私有格式密钥文件 `private_format_key.bin` 的 Base64 内容；不要把原始密钥或 Base64 写进仓库。
+5. 执行 `npx wrangler deploy`。
+6. 将生成的 `https://...workers.dev` 地址填入前端的同步设置。
 
 GET 读取可以公开；PUT 上传需要 `Authorization: Bearer <SYNC_WRITE_TOKEN>`，并且浏览器 Origin 必须在 `ALLOWED_ORIGINS` 中。Worker 本身没有账户登录界面，因此写入 token 适合个人原型；后续可以接 Cloudflare Access。
 
@@ -36,6 +37,7 @@ GET 读取可以公开；PUT 上传需要 `Authorization: Bearer <SYNC_WRITE_TOK
 - `POST /api/jobs`：返回 501，明确拒绝创建云端后台任务，不伪造成功状态。
 - `GET /api/objects/<kind>/<sha>.<ext>`：读取对象。
 - `PUT` 或 `POST /api/objects/<kind>/<sha>.<ext>`：上传对象，Worker 会读取内容并校验 SHA-256。PUT 是标准方法，POST 用于兼容部分手机 WebView 或代理对 PUT 返回 405 的情况。
+- `POST /api/private/repack`：需要写入 Token 和 `REEDEN_PRIVATE_FORMAT_KEY_B64`。请求包含 `red_base64` 与图片替换项 `{offset,end,bytes_base64}`；Worker 认证加密目录、更新资源哈希和 JSON 引用，再返回 `{bytes:<base64>}`。它不负责 PNG/JPEG 编码，浏览器先完成图片压缩。
 - `PATCH /api/assets/<id>`、`PATCH /api/themes/<id>`、`PATCH /api/fonts/<id>`：更新作者、风格和标签；记录以新的内容寻址 JSON 保存，原文件不会重复上传。
 - `OPTIONS ...`：返回配置的 CORS 头。
 
