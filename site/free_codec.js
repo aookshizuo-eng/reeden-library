@@ -247,7 +247,19 @@
     if (skipped) { decision.reason = skipped; return { bytes: original, mime, decision }; }
     if (!(mime === "image/png" || mime === "image/jpeg" || mime === "image/webp")) { decision.reason = "格式不在浏览器兼容压缩范围"; return { bytes: original, mime, decision }; }
     if (typeof root.createImageBitmap !== "function") throw new FreeCodecError("当前浏览器不支持 createImageBitmap，无法本地压缩图片", "image_decode_unavailable");
-    const bitmap = await root.createImageBitmap(new Blob([original], { type: mime }));
+    let bitmap;
+    try {
+      bitmap = await root.createImageBitmap(new Blob([original], { type: mime }));
+    } catch (error) {
+      // A theme may contain an image with a valid file signature that the
+      // current browser cannot decode (CMYK JPEG, damaged frame, vendor
+      // variant, or a truncated optional resource). Do not fail the whole
+      // RED import for that one resource: preserve its original bytes and
+      // let the remaining images continue through compression/preview.
+      decision.reason = "当前浏览器无法解码，保留原图";
+      decision.error = error?.message || "image_decode_failed";
+      return { bytes: original, mime, decision };
+    }
     try {
       const maxEdge = Number.isFinite(options.maxEdge) ? Math.max(0, options.maxEdge) : 2048;
       const scale = maxEdge ? Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height)) : 1;
