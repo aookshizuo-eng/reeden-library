@@ -563,12 +563,14 @@
     context.fillStyle = options.background || "#ffffff"; context.fillRect(0, 0, canvas.width, canvas.height);
     let face = null;
     try {
-      face = new root.FontFace(family, `url(${url})`); await face.load(); root.document.fonts.add(face);
+      // Passing the bytes directly avoids a WebView/CSP "A network error
+      // occurred" from loading a large CJK font through a blob URL.
+      face = new root.FontFace(family, bytes); await face.load(); root.document.fonts.add(face);
       context.fillStyle = options.color || "#202530"; context.font = `${options.fontSize || 36}px "${family}"`; context.textBaseline = "top"; context.fillText(options.text || info.previewText, 24, 24);
     } catch (error) {
       // Some large CJK TTFs are valid but rejected by the browser's OTS
       // loader. OpenType.js can still read their glyph outlines locally.
-      const parser = root.opentype || root.OpenType;
+      const parser = root.opentype || root.OpenType || root.window?.opentype || (typeof globalThis !== "undefined" ? globalThis.opentype : null);
       if (!parser?.parse) throw error;
       try {
         const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
@@ -577,7 +579,9 @@
         const path = parsed.getPath(options.text || info.previewText, 24, 24 + size, size);
         path.fill = options.color || "#202530";
         path.draw(context);
-      } catch (fallbackError) { throw error; }
+      } catch (fallbackError) {
+        throw new FreeCodecError(`字体预览失败：浏览器加载失败（${error?.message || "未知错误"}），轮廓解析失败（${fallbackError?.message || "未知错误"}）`, "font_preview_render_failed");
+      }
     }
     const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new FreeCodecError("字体预览编码失败", "font_preview_encode_failed")), "image/png"));
     return { ...info, family, blob, release() { if (face) root.document.fonts.delete(face); root.URL.revokeObjectURL(url); } };
