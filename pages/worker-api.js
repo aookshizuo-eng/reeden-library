@@ -77,7 +77,11 @@ function originAllowed(request, env, {write = false} = {}) {
   const origin = request.headers.get("Origin");
   const allowed = configuredOrigins(env);
   if (!origin) return !write;
-  return allowed.includes(origin);
+  // A Pages deployment may receive its own generated `*.pages.dev` hostname
+  // before the dashboard variable list has been refreshed. Same-origin calls
+  // are still protected by the write token below, so accepting the Worker
+  // origin itself does not make cross-site writes possible.
+  return allowed.includes(origin) || origin === new URL(request.url).origin;
 }
 
 function checkWriteToken(request, env) {
