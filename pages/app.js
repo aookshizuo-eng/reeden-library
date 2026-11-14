@@ -781,7 +781,7 @@ function fontClassificationEditor(font) {
 }
 function fontPreviewMarkup(font) {
   const name = font.family || font.file_name || "字体";
-  if (font.preview_url) return `<div class="font-preview-frame"><img class="font-preview-image" src="${escapeHtml(assetUrl(font.preview_url))}" alt="${escapeHtml(name)} 字形预览" loading="lazy" /></div>`;
+  if (font.preview_url) return `<div class="font-preview-frame"><img class="font-preview-image" src="${escapeHtml(font.preview_url.startsWith("blob:") ? font.preview_url : assetUrl(font.preview_url))}" alt="${escapeHtml(name)} 字形预览" loading="lazy" />${font.preview_error ? `<small class="font-preview-sync-warning">${escapeHtml(font.preview_error)}</small>` : ""}</div>`;
   if (font.preview_state === "loading") return `<div class="font-preview-frame font-preview-loading"><span>正在生成字形预览…</span></div>`;
   if (font.preview_error) return `<div class="font-preview-frame font-preview-error"><span>预览生成失败</span><small>${escapeHtml(font.preview_error)}</small><button class="text-button retry-font-preview" type="button" data-id="${escapeHtml(font.id)}">重试</button></div>`;
   return `<div class="font-preview-frame"><span class="font-preview-fallback" style="font-family: 'font-${escapeHtml(font.id)}', sans-serif">Aa 中文 123</span></div>`;
@@ -1149,11 +1149,19 @@ async function generateFontPreview(fontId, codec = null) {
     try {
       const previewBytes = await jpegBytesFromBlob(rendered.blob);
       if (!previewBytes) throw new Error("当前浏览器无法编码字体预览");
-      const previewSha = await codec.sha256Hex(previewBytes);
-      const previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg");
-      const next = { ...font, preview_url: previewPath, preview_sha256: previewSha, preview_state: "ready", preview_error: "", updated_at: new Date().toISOString() };
-      await uploadBrowserRecord(next, codec);
-      Object.assign(font, next);
+      const localPreviewUrl = URL.createObjectURL(new Blob([previewBytes], { type: "image/jpeg" }));
+      Object.assign(font, { preview_url: localPreviewUrl, preview_state: "local", preview_error: "" });
+      renderFonts();
+      try {
+        const previewSha = await codec.sha256Hex(previewBytes);
+        const previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg");
+        const next = { ...font, preview_url: previewPath, preview_sha256: previewSha, preview_state: "ready", preview_error: "", updated_at: new Date().toISOString() };
+        await uploadBrowserRecord(next, codec);
+        Object.assign(font, next);
+      } catch (uploadError) {
+        font.preview_state = "local";
+        font.preview_error = "本机预览已生成；云端同步未完成，请检查同步 Token";
+      }
     } finally { rendered.release?.(); }
   } catch (error) {
     font.preview_state = "error";
