@@ -236,10 +236,31 @@
     if (!replacement) return value;
     return (match[1] === match[1].toUpperCase() ? replacement.toUpperCase() : replacement) + (match[2] || "");
   }
-  function mapHashes(value, replacements) {
-    if (Array.isArray(value)) return value.map(item => mapHashes(item, replacements));
-    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapHashes(item, replacements)]));
-    return mapHashValue(value, replacements);
+  function mapReferences(value, replacements, extensions = {}, paths = {}) {
+    if (typeof value === "string") {
+      if (paths[value]) return paths[value];
+      const hash = value.match(/^([0-9a-fA-F]{32}|[0-9a-fA-F]{64})(\.[A-Za-z0-9]+)?$/);
+      if (hash && replacements[hash[1].toLowerCase()]) {
+        const replacement = replacements[hash[1].toLowerCase()];
+        const extension = extensions[hash[1].toLowerCase()] || hash[2] || "";
+        return (hash[1] === hash[1].toUpperCase() ? replacement.toUpperCase() : replacement) + extension;
+      }
+      if (/^\s*[\[{]/.test(value)) {
+        try { const parsed = JSON.parse(value), mapped = mapReferences(parsed, replacements, extensions, paths); return JSON.stringify(mapped); } catch { /* plain string */ }
+      }
+      return value;
+    }
+    if (Array.isArray(value)) return value.map(item => mapReferences(item, replacements, extensions, paths));
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapReferences(item, replacements, extensions, paths)]));
+    return value;
+  }
+  function extensionForMime(mime) { return mime === "image/webp" ? "webp" : mime === "image/png" ? "png" : mime === "image/jpeg" ? "jpg" : mime === "image/gif" ? "gif" : ""; }
+  function replaceImageExtension(name, mime) {
+    const extension = extensionForMime(mime);
+    // Some RED variants hide the resource type behind an `.img` suffix. The
+    // bytes are still identified by their image signature, so keep the
+    // package references consistent when the compressed payload changes type.
+    return extension && /\.(?:png|jpe?g|webp|gif|img)$/i.test(String(name || "")) ? String(name).replace(/\.(?:png|jpe?g|webp|gif|img)$/i, `.${extension}`) : String(name || "");
   }
   async function compressImage(bytes, name, options = {}) {
     const original = bytesOf(bytes), mime = mimeFromBytes(original, name), skipped = isSkippableImage(original, mime, name);
@@ -270,11 +291,19 @@
       const context = canvas.getContext("2d"); if (!context) throw new FreeCodecError("无法创建 Canvas 2D 上下文", "canvas_unavailable");
       context.imageSmoothingEnabled = true; context.imageSmoothingQuality = "high"; context.drawImage(bitmap, 0, 0, width, height);
       const quality = Math.min(1, Math.max(0.01, Number(options.quality ?? 88) / 100));
-      const blob = canvas.convertToBlob ? await canvas.convertToBlob({ type: mime, quality }) : await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new FreeCodecError("图片编码失败", "image_encode_failed")), mime, quality));
+      const encode = type => canvas.convertToBlob && type === mime
+        ? canvas.convertToBlob({ type, quality })
+        : new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new FreeCodecError("图片编码失败", "image_encode_failed")), type, quality));
+      let outputMime = mime;
+      let blob = null;
+      if (mime !== "image/webp") {
+        try { blob = await encode("image/webp"); if (blob?.size && blob.size < original.length) outputMime = "image/webp"; else blob = null; } catch { blob = null; }
+      }
+      if (!blob) blob = await encode(mime);
       const candidate = new Uint8Array(await blob.arrayBuffer());
       if (candidate.length >= original.length) { decision.reason = "压缩结果未变小"; return { bytes: original, mime, decision }; }
-      decision.used = true; decision.reason = "压缩后体积更小"; decision.compressedBytes = candidate.length; decision.width = width; decision.height = height;
-      return { bytes: candidate, mime, decision };
+      decision.used = true; decision.reason = outputMime === "image/webp" ? "转为 WebP 后体积更小" : "压缩后体积更小"; decision.compressedBytes = candidate.length; decision.width = width; decision.height = height; decision.outputMime = outputMime; decision.outputName = replaceImageExtension(name, outputMime);
+      return { bytes: candidate, mime: outputMime, decision };
     } finally { bitmap.close?.(); }
   }
   function parsePrivateHeader(raw) {
@@ -491,7 +520,7 @@
   async function compressRed(value, options = {}) {
     const raw = await readBytes(value);
     if (startsWith(raw, RED_PRIVATE)) throw new FreeCodecError("加密 RED v2 当前浏览器版本只做结构识别，暂不重新封包；请使用电脑后台版本", "private_red_unsupported");
-    const entries = await readZipEntries(raw), replacements = {}, decisions = [], output = [];
+    const entries = await readZipEntries(raw), replacements = {}, extensions = {}, paths = {}, decisions = [], output = [];
     const processed = await mapConcurrent(entries, options.concurrency || defaultConcurrency(3), async entry => {
       const bytes = entry.bytes;
       let result = { bytes, decision: { path: entry.name, mime: mimeFromBytes(bytes, entry.name), used: false, reason: "非图片资源" } };
@@ -500,13 +529,17 @@
         const [oldSha, newSha] = await Promise.all([sha256Hex(bytes), sha256Hex(result.bytes)]);
         replacements[md5Hex(bytes)] = md5Hex(result.bytes);
         replacements[oldSha] = newSha;
+        const nextName = result.decision.outputName || entry.name;
+        paths[entry.name] = nextName;
+        const extension = nextName.match(/\.([A-Za-z0-9]+)$/)?.[0] || "";
+        extensions[md5Hex(bytes)] = extension; extensions[oldSha] = extension;
       }
-      return {entry, result};
+      return {entry, result, outputName: result.decision.used ? (result.decision.outputName || entry.name) : entry.name};
     });
-    for (const {entry, result} of processed) { decisions.push(result.decision); output.push({ ...entry, bytes: result.bytes }); }
+    for (const {entry, result, outputName} of processed) { decisions.push(result.decision); output.push({ ...entry, name: outputName, bytes: result.bytes }); }
     if (Object.keys(replacements).length) {
       for (const entry of output) if (entry.name.toLowerCase().endsWith(".json")) {
-        try { const value = JSON.parse(text(entry.bytes)), mapped = mapHashes(value, replacements); entry.bytes = textBytes(JSON.stringify(mapped)); }
+        try { const value = JSON.parse(text(entry.bytes)), mapped = mapReferences(value, replacements, extensions, paths); entry.bytes = textBytes(JSON.stringify(mapped)); }
         catch { /* Non-JSON resources keep their original bytes. */ }
       }
     }

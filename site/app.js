@@ -218,6 +218,9 @@ function base64Bytes(value) {
   }
   return btoa(output);
 }
+function imageExtensionForMime(mime) {
+  return mime === "image/webp" ? "webp" : mime === "image/png" ? "png" : mime === "image/jpeg" ? "jpg" : mime === "image/gif" ? "gif" : "";
+}
 async function compressPrivateRedViaWorker(raw, codec, options = {}) {
   const previewEntries = await codec.extractPrivatePreviewImages(raw, { limit: 2000, maxBytes: 80 * 1024 * 1024 });
   const replacements = [];
@@ -227,7 +230,7 @@ async function compressPrivateRedViaWorker(raw, codec, options = {}) {
     const [oldSha256, newSha256, oldMd5, newMd5] = await Promise.all([
       codec.sha256Hex(entry.bytes), codec.sha256Hex(result.bytes), codec.md5Hex(entry.bytes), codec.md5Hex(result.bytes),
     ]);
-    replacements.push({ offset: entry.offset, end: entry.end, oldSha256, newSha256, oldMd5, newMd5, bytes: base64Bytes(result.bytes) });
+    replacements.push({ offset: entry.offset, end: entry.end, oldSha256, newSha256, oldMd5, newMd5, newExtension: imageExtensionForMime(result.mime), bytes: base64Bytes(result.bytes) });
   }
   if (!replacements.length) {
     return { bytes: raw, originalBytes: raw.length, compressedBytes: raw.length, savedBytes: 0, packageSelected: false, decisions: [], format: "red_private_v2", privateWorker: true };
@@ -235,7 +238,7 @@ async function compressPrivateRedViaWorker(raw, codec, options = {}) {
   const response = await fetch(apiUrl("/api/private/repack"), {
     method: "POST",
     headers: requestHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ red_base64: base64Bytes(raw), replacements: replacements.map(item => ({ offset: item.offset, end: item.end, old_sha256: item.oldSha256, old_md5: item.oldMd5, new_md5: item.newMd5, bytes_base64: item.bytes })) }),
+  body: JSON.stringify({ red_base64: base64Bytes(raw), replacements: replacements.map(item => ({ offset: item.offset, end: item.end, old_sha256: item.oldSha256, old_md5: item.oldMd5, new_md5: item.newMd5, new_extension: item.newExtension, bytes_base64: item.bytes })) }),
   });
   const responseText = await response.text();
   let data = {};
@@ -302,19 +305,37 @@ function browserDuplicateCandidates(name, author) {
   const target = `${normalizeIdentity(name)}\u0000${normalizeIdentity(author || "作者未记录")}`;
   return state.themes.filter(theme => `${normalizeIdentity(theme.name)}\u0000${normalizeIdentity(theme.author || "作者未记录")}` === target);
 }
+function filenameIdentityFallback(fileName) {
+  const stem = String(fileName || "主题").replace(/\.red$/i, "").replace(/\s*[([【（].*?(?:加密|未加密|日夜|夜间).*?[)\]】）]\s*$/i, "").replace(/\s*[-_·]?(?:未加密|加密|日夜|夜间)\s*$/i, "").replace(/\s*\(\d+\)\s*$/i, "").trim();
+  const parts = (stem.includes("_-_") ? stem.split(/_-_+/) : stem.split(/\s*[-—–]\s+/)).map(item => item.trim()).filter(Boolean);
+  if (parts.length < 3) return { name: stem || "主题", author: "作者未记录" };
+  const first = parts[0];
+  const author = parts[1];
+  const name = /^(?:应用主题|主题|reeden)$/i.test(first) ? parts.slice(2).join(" - ") : parts.slice(2).join(" - ");
+  return { name: name || stem || "主题", author: author || "作者未记录" };
+}
 function metadataFromEntries(entries, fileName) {
-  let name = String(fileName || "主题").replace(/\.red$/i, "").trim();
-  let author = "作者未记录";
+  const fallback = filenameIdentityFallback(fileName);
+  let name = fallback.name, author = fallback.author;
+  let metadataName = false, metadataAuthor = false;
+  const visit = value => {
+    if (!value || typeof value !== "object") return;
+    if (!metadataName) {
+      const candidate = value.name || value.title || value.themeName || value.theme_name;
+      if (typeof candidate === "string" && candidate.trim()) { name = candidate.trim(); metadataName = true; }
+    }
+    if (!metadataAuthor) {
+      const candidate = value.author || value.creator || value.designer || value.by || value.themeAuthor;
+      if (typeof candidate === "string" && candidate.trim()) { author = candidate.trim(); metadataAuthor = true; }
+    }
+    for (const child of Object.values(value)) if (child && typeof child === "object") visit(child);
+  };
   for (const entry of entries || []) {
     if (!entry.name?.toLowerCase().endsWith(".json")) continue;
     try {
       const value = JSON.parse(new TextDecoder().decode(entry.bytes));
-      const candidates = [value, value?.theme, value?.metadata, value?.info].filter(item => item && typeof item === "object");
-      for (const item of candidates) {
-        name = String(item.name || item.title || item.themeName || item.theme_name || name).trim() || name;
-        author = String(item.author || item.creator || item.designer || item.by || author).trim() || author;
-        if (name && author !== "作者未记录") return { name, author };
-      }
+      visit(value);
+      if (metadataName && metadataAuthor) break;
     } catch { /* JSON assets can be unrelated configuration. */ }
   }
   return { name, author };

@@ -210,9 +210,15 @@ async function decryptPrivateManifest(raw, env) {
 
 function cloneJson(value) { return JSON.parse(JSON.stringify(value)); }
 
-function mapPrivateRefs(value, replacements, pathReplacements) {
-  if (Array.isArray(value)) return value.map(item => mapPrivateRefs(item, replacements, pathReplacements));
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapPrivateRefs(item, replacements, pathReplacements)]));
+function replacePrivateExtension(path, extension) {
+  const ext = String(extension || "").replace(/^\./, "").toLowerCase();
+  const safe = ["png", "jpg", "jpeg", "webp", "gif"].includes(ext);
+  return safe && /\.(?:png|jpe?g|webp|gif|img)$/i.test(String(path || "")) ? String(path).replace(/\.(?:png|jpe?g|webp|gif|img)$/i, `.${ext}`) : path;
+}
+
+function mapPrivateRefs(value, replacements, pathReplacements, extensionReplacements = new Map()) {
+  if (Array.isArray(value)) return value.map(item => mapPrivateRefs(item, replacements, pathReplacements, extensionReplacements));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapPrivateRefs(item, replacements, pathReplacements, extensionReplacements)]));
   if (typeof value !== "string") return value;
   if (pathReplacements.has(value)) return pathReplacements.get(value);
   const exact = replacements.get(value) || replacements.get(value.toLowerCase());
@@ -220,7 +226,8 @@ function mapPrivateRefs(value, replacements, pathReplacements) {
   const match = value.match(/^([a-f0-9]{32}|[a-f0-9]{64})(\.[A-Za-z0-9]+)?$/i);
   if (!match) return value;
   const mapped = replacements.get(match[1].toLowerCase());
-  return mapped ? mapped + (match[2] || "") : value;
+  const extension = extensionReplacements.get(match[1].toLowerCase());
+  return mapped ? mapped + (extension ? `.${extension}` : (match[2] || "")) : value;
 }
 
 async function repackPrivateRed(request, env) {
@@ -245,6 +252,7 @@ async function repackPrivateRed(request, env) {
     const byPath = new Map(manifest.entries.map(entry => [entry.path, entry]));
     const replacements = new Map();
     const pathReplacements = new Map();
+    const extensionReplacements = new Map();
     const changed = new Map();
     for (const item of payload.replacements) {
       if (!item || typeof item !== "object") throw new Error("replacement 格式无效");
@@ -265,11 +273,14 @@ async function repackPrivateRed(request, env) {
       if (bytes.length > PRIVATE_MAX_RESOURCE) throw new Error(`资源超过处理上限：${itemPath}`);
       const newSha = await digestHex(bytes);
       const oldPath = itemPath;
-      const newPath = typeof item.new_path === "string" && item.new_path ? item.new_path : oldPath;
+      const newExtension = String(item.new_extension || "").replace(/^\./, "").toLowerCase();
+      if (newExtension && !["png", "jpg", "jpeg", "webp", "gif"].includes(newExtension)) throw new Error(`不支持的图片扩展名：${newExtension}`);
+      const newPath = typeof item.new_path === "string" && item.new_path ? item.new_path : replacePrivateExtension(oldPath, newExtension);
       if (newPath !== oldPath) pathReplacements.set(oldPath, newPath);
+      if (newExtension) extensionReplacements.set(oldSha.toLowerCase(), newExtension);
       replacements.set(oldSha, newSha);
       replacements.set(oldSha.toUpperCase(), newSha.toUpperCase());
-      if (item.old_md5 && item.new_md5) { replacements.set(String(item.old_md5).toLowerCase(), String(item.new_md5).toLowerCase()); replacements.set(String(item.old_md5).toUpperCase(), String(item.new_md5).toUpperCase()); }
+      if (item.old_md5 && item.new_md5) { replacements.set(String(item.old_md5).toLowerCase(), String(item.new_md5).toLowerCase()); replacements.set(String(item.old_md5).toUpperCase(), String(item.new_md5).toUpperCase()); if (newExtension) extensionReplacements.set(String(item.old_md5).toLowerCase(), newExtension); }
       changed.set(oldPath, {bytes, newPath, newSha});
     }
     const outputEntries = [];
@@ -285,7 +296,7 @@ async function repackPrivateRed(request, env) {
       if (entry.path.endsWith(".json")) {
         try {
           const document = JSON.parse(new TextDecoder().decode(bytes));
-          const mapped = mapPrivateRefs(document, replacements, pathReplacements);
+          const mapped = mapPrivateRefs(document, replacements, pathReplacements, extensionReplacements);
           bytes = new TextEncoder().encode(JSON.stringify(mapped));
         } catch { /* opaque JSON-like resources remain byte-for-byte unchanged */ }
       }

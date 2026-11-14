@@ -15,10 +15,10 @@ const replacement = Uint8Array.from([9, 8]);
 const imageSha = async bytes => [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map(byte => byte.toString(16).padStart(2, "0")).join("");
 const oldSha = await imageSha(image);
 const newSha = await imageSha(replacement);
-const theme = encoder.encode(JSON.stringify({name: "Test", light: {backgroundImage: oldSha}}));
+const theme = encoder.encode(JSON.stringify({name: "Test", light: {backgroundImage: "assets/image.img", backgroundHash: `${oldSha}.img`}}));
 const manifest = {version: 2, payloadKind: "directory", entries: [
   {path: "theme.json", offset: 0, length: theme.length, sha256: await imageSha(theme), customFlag: "kept"},
-  {path: "assets/image.png", offset: theme.length, length: image.length, sha256: oldSha},
+  {path: "assets/image.img", offset: theme.length, length: image.length, sha256: oldSha},
 ]};
 const nonce = crypto.getRandomValues(new Uint8Array(12));
 const key = await crypto.subtle.importKey("raw", keyBytes, {name: "AES-GCM"}, false, ["encrypt", "decrypt"]);
@@ -47,7 +47,7 @@ assert.equal(unauthorized.status, 401);
 const response = await handle(new Request("https://worker.example/api/private/repack", {
   method: "POST", headers: headers(), body: JSON.stringify({
     red_base64: toBase64(raw),
-    replacements: [{offset: imageOffset, end: imageEnd, bytes_base64: toBase64(replacement), old_sha256: oldSha}],
+    replacements: [{offset: imageOffset, end: imageEnd, bytes_base64: toBase64(replacement), old_sha256: oldSha, new_extension: "webp"}],
   }),
 }), env);
 assert.equal(response.status, 200);
@@ -64,8 +64,10 @@ const outputManifestEnd = 8 + outputHeaderLength + outputHeader.manifestLength;
 const outputManifest = JSON.parse(decoder.decode(await crypto.subtle.decrypt({name: "AES-GCM", iv: outputNonce}, key, output.subarray(8 + outputHeaderLength, outputManifestEnd))));
 assert.equal(outputManifest.entries[0].customFlag, "kept");
 assert.equal(outputManifest.entries[1].sha256, newSha);
+assert.equal(outputManifest.entries[1].path, "assets/image.webp");
 const outputPayload = output.subarray(outputManifestEnd);
 assert.deepEqual(Array.from(outputPayload.subarray(outputManifest.entries[1].offset, outputManifest.entries[1].offset + outputManifest.entries[1].length)), Array.from(replacement));
 const outputTheme = JSON.parse(decoder.decode(outputPayload.subarray(outputManifest.entries[0].offset, outputManifest.entries[0].offset + outputManifest.entries[0].length)));
-assert.equal(outputTheme.light.backgroundImage, newSha);
+assert.equal(outputTheme.light.backgroundImage, "assets/image.webp");
+assert.equal(outputTheme.light.backgroundHash, `${newSha}.webp`);
 console.log("private repack worker tests passed");
