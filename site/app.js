@@ -1145,7 +1145,7 @@ async function generateFontPreview(fontId, codec = null) {
     if (!response.ok) throw new Error(`字体文件读取失败（${response.status}）`);
     const source = await response.blob();
     const file = new File([source], font.file_name || `font.${font.extension || "ttf"}`, { type: source.type || `font/${font.extension || "ttf"}` });
-    const rendered = await codec.fontPreview(file, { text: "Aa 中文 123", width: 1200, height: 260, fontSize: 64 });
+    const rendered = await codec.fontPreview(file, { text: "Aa 你好世界 123", width: 1200, height: 680, fontSize: 150 });
     try {
       const previewBytes = await jpegBytesFromBlob(rendered.blob);
       if (!previewBytes) throw new Error("当前浏览器无法编码字体预览");
@@ -1505,7 +1505,7 @@ async function importFonts(files) {
           let previewError = "";
           try {
             transferStage("生成字体预览", file.name);
-            const rendered = await codec.fontPreview(file, { text: "Aa 中文 123", width: 1200, height: 260, fontSize: 64 });
+            const rendered = await codec.fontPreview(file, { text: "Aa 你好世界 123", width: 1200, height: 680, fontSize: 150 });
             try {
               const previewBytes = await jpegBytesFromBlob(rendered.blob);
               if (!previewBytes) throw new Error("当前浏览器无法编码字体预览");

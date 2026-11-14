@@ -557,7 +557,7 @@
     if (!root.FontFace || !root.document) throw new FreeCodecError("当前环境没有 FontFace/DOM，无法生成字体预览", "font_preview_unavailable");
     const bytes = await readBytes(value), info = await inspectFont(value), family = options.family || `ReedenFont_${info.sha256.slice(0, 12)}`;
     const url = root.URL.createObjectURL(new Blob([bytes], { type: `font/${info.extension}` }));
-    const canvas = root.document.createElement("canvas"); canvas.width = options.width || 900; canvas.height = options.height || 220;
+    const canvas = root.document.createElement("canvas"); canvas.width = options.width || 900; canvas.height = options.height || 520;
     const context = canvas.getContext("2d");
     if (!context) throw new FreeCodecError("当前环境无法创建字体预览画布", "font_preview_canvas_unavailable");
     context.fillStyle = options.background || "#ffffff"; context.fillRect(0, 0, canvas.width, canvas.height);
@@ -566,7 +566,13 @@
       // Passing the bytes directly avoids a WebView/CSP "A network error
       // occurred" from loading a large CJK font through a blob URL.
       face = new root.FontFace(family, bytes); await face.load(); root.document.fonts.add(face);
-      context.fillStyle = options.color || "#202530"; context.font = `${options.fontSize || 36}px "${family}"`; context.textBaseline = "top"; context.fillText(options.text || info.previewText, 24, 24);
+      const sampleText = options.text || info.previewText;
+      let size = options.fontSize || 36;
+      context.fillStyle = options.color || "#202530"; context.textBaseline = "middle"; context.textAlign = "center";
+      context.font = `${size}px "${family}"`;
+      const measured = context.measureText(sampleText).width;
+      if (measured > canvas.width - 80) { size *= (canvas.width - 80) / measured; context.font = `${size}px "${family}"`; }
+      context.fillText(sampleText, canvas.width / 2, canvas.height / 2);
     } catch (error) {
       // Some large CJK TTFs are valid but rejected by the browser's OTS
       // loader. OpenType.js can still read their glyph outlines locally.
@@ -575,8 +581,12 @@
       try {
         const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
         const parsed = parser.parse(buffer);
-        const size = options.fontSize || 36;
-        const path = parsed.getPath(options.text || info.previewText, 24, 24 + size, size);
+        const sampleText = options.text || info.previewText;
+        let size = options.fontSize || 36;
+        let advance = typeof parsed.getAdvanceWidth === "function" ? parsed.getAdvanceWidth(sampleText, size) : 0;
+        if (advance > canvas.width - 80) { size *= (canvas.width - 80) / advance; advance = parsed.getAdvanceWidth(sampleText, size); }
+        const x = Math.max(24, (canvas.width - advance) / 2);
+        const path = parsed.getPath(sampleText, x, canvas.height / 2 + size * 0.36, size);
         path.fill = options.color || "#202530";
         path.draw(context);
       } catch (fallbackError) {
