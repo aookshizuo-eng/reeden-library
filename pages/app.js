@@ -485,7 +485,9 @@ function previewImage(url, alt, className = "", details = {}) {
   if (!url) return `<span class="${className} preview-empty" role="img" aria-label="暂无可用预览">暂无预览</span>`;
   url = assetUrl(url);
   const description = details?.encrypted_source
-    ? "加密 RED 未解密清单，仅从包内可读取的明文图片资源合成预览；确认后原样保存。"
+    ? (browserSyncEnabled()
+      ? "加密 RED 未解密清单，仅从包内可读取的明文图片资源合成预览；当前设备暂保留原包，电脑本地服务可压缩图片并重新封包。"
+      : "加密 RED 清单保持加密；本机服务已从包内图片生成预览，并会压缩图片后重新封包。")
     : details?.simulation ? "书架使用主题真实素材离线合成，右侧为书架、轮播和封面图集。" + (details.kind === "shelf_and_splash" ? "左侧为启动图。" : "左侧为阅读页或阅读背景。") : "使用主题包内图片生成的轻量预览。";
   return `<button class="preview-open ${className}" type="button" aria-label="${escapeHtml(alt)}，点击放大" data-preview-url="${escapeHtml(url)}" data-preview-title="${escapeHtml(alt)}" data-preview-description="${escapeHtml(description)}"><img src="${escapeHtml(url)}" alt="${escapeHtml(alt)}" loading="lazy" /></button>`;
 }
@@ -552,12 +554,12 @@ function updateBulkControls() {
     $("#" + buttonId).title = storageDirty ? "请先保存存储设置" : "";
   });
   const chosenReview = state.review.filter(item => selections.review.has(item.staging_id));
-  const privateCount = chosenReview.filter(item => requiresOriginalPreservation(item.info)).length;
+  const privateCount = chosenReview.filter(item => browserSyncEnabled() && requiresOriginalPreservation(item.info)).length;
   const normalCount = chosenReview.length - privateCount;
   const onlyPrivate = privateCount > 0 && normalCount === 0;
   const syncSuffix = browserSyncEnabled() ? "、上传 R2" : autoSyncEnabled() ? "、同步" : "";
   $("#commitSelectedThemes").textContent = onlyPrivate ? `确认所选并原样保存${syncSuffix}` : `确认所选并压缩${syncSuffix || "保存"}`;
-  $("#compressionPlan").textContent = chosenReview.length ? `${normalCount} 个主题将压缩并重新封包${privateCount ? `；${privateCount} 个暂不支持的格式原样保存` : ""}。处理完成后显示压缩前后大小。` : "全选或勾选主题后确认，开始处理。普通主题在本机压缩；当前免费浏览器模式会对加密主题原样保存并提示原因。";
+  $("#compressionPlan").textContent = chosenReview.length ? `${browserSyncEnabled() ? normalCount : chosenReview.length} 个主题将压缩并重新封包${privateCount ? `；${privateCount} 个手机/静态模式下加密包先保留原包，电脑本机后台可压缩重封` : ""}。处理完成后显示压缩前后大小。` : "全选或勾选主题后确认，开始处理。加密主题的图片也会由电脑本地服务压缩并重新封包；手机/静态网页因不持有私有格式密钥会暂保留原包。";
   $$(".compression-controls input").forEach(input => { input.disabled = Boolean(state.operation); });
   $("#themeToolbar").hidden = !state.themes.length;
   $("#fontToolbar").hidden = !state.fonts.length;
@@ -651,10 +653,19 @@ function renderReview() {
   $("#reviewList").innerHTML = state.review.map(item => {
     const info = item.info;
     const duplicate = item.duplicates?.length > 0;
-    const privateTheme = requiresOriginalPreservation(info);
+    // The local Python service has the private RED format key and can
+    // authenticate/repack image replacements. Static Pages/Android cannot
+    // safely re-seal the encrypted manifest, so only that mode preserves the
+    // original browser-side package.
+    const privateTheme = browserSyncEnabled() && requiresOriginalPreservation(info);
     const preview = preferredPreview(item.preview_urls?.light, item.preview_urls?.dark);
     const duplicateThumbs = duplicate ? item.duplicates.map(candidate => `<div class="thumb-label">${previewImage(candidate.preview_light_url || candidate.preview_dark_url, `已有主题 ${candidate.name} · ${previewKind(candidate.preview_details)}`, "thumb", candidate.preview_details)}<span>${escapeHtml(candidate.name)}</span></div>`).join("") : "";
-    return `<article class="review-card" data-review-id="${escapeHtml(item.staging_id)}"><div class="review-top"><div><label class="item-heading">${selectInput("review", item.staging_id, `待确认主题 ${info.name || info.source_name}`)}<span class="review-title">${escapeHtml(info.name || info.source_name)}</span></label><div class="review-meta">${escapeHtml(info.author || "作者未记录")} · ${formatBytes(info.bytes)} · ${escapeHtml(info.source_name)}</div></div><span class="badge ${duplicate ? "" : "is-good"}">${duplicate ? `疑似重复 ${item.duplicates.length}` : "未发现同名作者"}</span></div>${privateTheme ? `<p class="review-meta">加密主题：已从包内可读取的明文图片区生成预览；清单无法解密，确认后原样保存。</p>` : info.container_format === "red_private_v2" ? `<p class="review-meta">加密主题：当前免费浏览器模式只识别并原样保存，不会伪造重封包。</p>` : ""}${duplicate ? `<div class="duplicate-note">已有库中存在同名作者主题。下面只展示缩略图，是否重复由你确认。</div><div class="duplicate-thumbs">${duplicateThumbs}</div>` : ""}<div class="duplicate-thumbs"><div class="thumb-label">${previewImage(preview.url, `待审核主题${preview.label} · ${previewKind(info.preview_details)}`, "thumb", info.preview_details)}<span>新主题 · ${preview.label}</span><span>${escapeHtml(previewKind(info.preview_details))} · 点击放大</span></div></div>${item.commitError ? `<p class="inline-error">${escapeHtml(item.commitError)}</p>` : ""}<div class="review-actions"><button class="primary-button commit-theme" data-id="${escapeHtml(item.staging_id)}">${privateTheme ? "确认并原样保存" : "确认并压缩保存"}${autoSyncEnabled() ? "并后台同步" : "（后台处理）"}</button><button class="secondary-button discard-review" data-id="${escapeHtml(item.staging_id)}">暂不处理</button></div></article>`;
+    const privateNote = info.container_format === "red_private_v2"
+      ? (browserSyncEnabled()
+        ? `<p class="review-meta">加密主题：已从包内可读取的明文图片生成预览；当前设备没有私有格式密钥，确认后暂保留原包。需要压缩图片请使用电脑本地服务。</p>`
+        : `<p class="review-meta">加密主题：清单保持加密；本机服务会压缩包内图片并重新封包，同时保留权限、资源哈希和原始包。</p>`)
+      : "";
+    return `<article class="review-card" data-review-id="${escapeHtml(item.staging_id)}"><div class="review-top"><div><label class="item-heading">${selectInput("review", item.staging_id, `待确认主题 ${info.name || info.source_name}`)}<span class="review-title">${escapeHtml(info.name || info.source_name)}</span></label><div class="review-meta">${escapeHtml(info.author || "作者未记录")} · ${formatBytes(info.bytes)} · ${escapeHtml(info.source_name)}</div></div><span class="badge ${duplicate ? "" : "is-good"}">${duplicate ? `疑似重复 ${item.duplicates.length}` : "未发现同名作者"}</span></div>${privateNote}${duplicate ? `<div class="duplicate-note">已有库中存在同名作者主题。下面只展示缩略图，是否重复由你确认。</div><div class="duplicate-thumbs">${duplicateThumbs}</div>` : ""}<div class="duplicate-thumbs"><div class="thumb-label">${previewImage(preview.url, `待审核主题${preview.label} · ${previewKind(info.preview_details)}`, "thumb", info.preview_details)}<span>新主题 · ${preview.label}</span><span>${escapeHtml(previewKind(info.preview_details))} · 点击放大</span></div></div>${item.commitError ? `<p class="inline-error">${escapeHtml(item.commitError)}</p>` : ""}<div class="review-actions"><button class="primary-button commit-theme" data-id="${escapeHtml(item.staging_id)}">${privateTheme ? "确认并保存原包（电脑后台压缩）" : "确认并压缩保存"}${autoSyncEnabled() ? "并后台同步" : "（后台处理）"}</button><button class="secondary-button discard-review" data-id="${escapeHtml(item.staging_id)}">暂不处理</button></div></article>`;
   }).join("");
   $$(".commit-theme").forEach(button => button.addEventListener("click", () => commitTheme(button.dataset.id)));
   $$(".discard-review").forEach(button => button.addEventListener("click", () => discardReview(button.dataset.id)));

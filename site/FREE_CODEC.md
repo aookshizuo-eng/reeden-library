@@ -15,7 +15,7 @@
 
 明确不支持：
 
-- 加密 `RED\\x10` 的解密和重新封包。它只解析公开头并返回 `private_red_unsupported`，不会把密文当普通 ZIP 或生成伪压缩包；
+- 加密 `RED\\x10` 的清单无法在免费浏览器中解密，但包内明文图片仍可提取用于预览；浏览器不重新封包，避免破坏 AES-GCM 目录。电脑本机 Python 后台可以认证、压缩图片并重新封包；
 - ZIP64、加密 ZIP 项、未知 ZIP 压缩方法；
 - 浏览器不支持 `CompressionStream`、`DecompressionStream`、`createImageBitmap` 或 Canvas 时的图片压缩。
 
