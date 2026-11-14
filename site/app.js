@@ -238,6 +238,9 @@ async function compressPrivateRedViaWorker(raw, codec, options = {}) {
   if (!data.bytes) throw new Error("加密主题重封接口没有返回压缩包");
   const encoded = atob(data.bytes), output = new Uint8Array(encoded.length);
   for (let index = 0; index < encoded.length; index++) output[index] = encoded.charCodeAt(index);
+  if (output.length >= raw.length) {
+    return { bytes: raw, originalBytes: raw.length, compressedBytes: raw.length, savedBytes: 0, packageSelected: false, decisions: replacements.map(item => ({ path: `private@${item.offset}`, used: false, reason: "重封后未变小，保留原包", original_bytes: item.end - item.offset, compressed_bytes: atob(item.bytes).length })), format: "red_private_v2", privateWorker: true };
+  }
   return { bytes: output, originalBytes: raw.length, compressedBytes: output.length, savedBytes: Math.max(0, raw.length - output.length), packageSelected: output.length < raw.length, decisions: replacements.map(item => ({ path: `private@${item.offset}`, used: true, reason: "压缩后由同步 Worker 认证重封", original_bytes: item.end - item.offset, compressed_bytes: atob(item.bytes).length })), format: "red_private_v2", privateWorker: true };
 }
 async function browserCodec() {
