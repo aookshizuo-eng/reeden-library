@@ -103,7 +103,7 @@ function requestHeaders(headers = {}) {
   if (apiBase && syncToken) result.set("Authorization", `Bearer ${syncToken}`);
   return result;
 }
-const state = { themes: [], fonts: [], assets: [], review: [], jobs: [], activeView: "import", importKind: "theme", assetFilter: "all", assetSearch: "", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs"), importAssetIds: readSessionIds("reeden-import-assets") };
+const state = { themes: [], fonts: [], assets: [], review: [], jobs: [], activeView: "import", importKind: "theme", assetFilter: "all", assetSearch: "", fontSearch: "", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs"), importAssetIds: readSessionIds("reeden-import-assets") };
 const selections = { review: new Set(), theme: new Set(), font: new Set(), asset: new Set() };
 const loadedFontFaces = new Set();
 const BROWSER_TASK_CONCURRENCY = 3;
@@ -737,6 +737,24 @@ function classificationEditor(record, kind) {
   const tags = recordTags(record);
   return `<div class="record-classifications">${author ? `<span class="category-chip">作者：${escapeHtml(author)}</span>` : `<span class="category-chip is-empty">未分作者</span>`}${style ? `<span class="category-chip">风格：${escapeHtml(style)}</span>` : `<span class="category-chip is-empty">未分风格</span>`}${tags.map(tag => `<span class="category-chip">#${escapeHtml(tag)}</span>`).join("")}</div><form class="asset-meta-form record-classification-form" data-record-form="${escapeHtml(record?.id || "")}" data-record-kind="${escapeHtml(kind)}"><div class="asset-meta-fields"><label>作者<input name="author" value="${escapeHtml(author)}" placeholder="作者" /></label><label>风格<input name="style" value="${escapeHtml(style)}" placeholder="风格" /></label><label>标签<input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="标签，用逗号分隔" /></label></div><button class="text-button" type="submit">保存分类</button></form>`;
 }
+function inferFontCategory(font) {
+  const text = [font?.family, font?.file_name, font?.subfamily].filter(Boolean).join(" ").toLocaleLowerCase("zh-CN");
+  if (/(?:可爱|萌|童趣|儿童|cute|comic|kids)/i.test(text)) return "可爱字形";
+  if (/(?:手写|书写|行书|草书|毛笔|硬笔|手札|hand|script|brush|cursive)/i.test(text)) return "手写体";
+  if (/(?:像素|点阵|pixel|bitmap|dot)/i.test(text)) return "像素体";
+  if (/(?:圆体|圆润|圆|丸|round|maru|rounded)/i.test(text)) return "圆体";
+  if (/(?:楷体|楷书|kai)/i.test(text)) return "楷体";
+  if (/(?:仿宋|fangsong)/i.test(text)) return "仿宋";
+  if (/(?:宋体|明朝|song|serif|mincho)/i.test(text)) return "宋体";
+  if (/(?:黑体|无衬线|黑|hei|sans|gothic|雅黑|苹方)/i.test(text)) return "黑体";
+  if (/(?:艺术|装饰|display|decorative)/i.test(text)) return "艺术体";
+  return "其他";
+}
+function fontClassificationEditor(font) {
+  const style = String(font?.style || "").trim() || inferFontCategory(font);
+  const tags = recordTags(font);
+  return `<div class="record-classifications"><span class="category-chip">分类：${escapeHtml(style)}</span>${tags.map(tag => `<span class="category-chip">#${escapeHtml(tag)}</span>`).join("")}</div><form class="asset-meta-form record-classification-form" data-record-form="${escapeHtml(font?.id || "")}" data-record-kind="font"><div class="asset-meta-fields"><label>分类<input name="style" value="${escapeHtml(style === "其他" && !font?.style ? "" : style)}" placeholder="宋体、黑体、圆体、手写体" /></label><label>标签<input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="标签，用逗号分隔" /></label></div><button class="text-button" type="submit">保存分类</button></form>`;
+}
 function renderThemes() {
   const list = $("#themeList");
   $("#themeCount").textContent = `${state.themes.length} 个主题`;
@@ -787,9 +805,12 @@ function renderReview() {
   updateBulkControls();
 }
 function renderFonts() {
-  $("#fontCount").textContent = `${state.fonts.length} 个字体`;
-  $("#fontEmpty").hidden = state.fonts.length > 0;
-    $("#fontList").innerHTML = state.fonts.map(font => `<article class="font-card"><div><label class="item-heading">${selectInput("font", font.id, `字体 ${font.family || font.file_name}`, savedToCloud(font))}<span class="theme-title">${escapeHtml(font.family || font.file_name)}</span></label><div class="font-meta"><span>${escapeHtml(font.subfamily || "Regular")}</span><span>${escapeHtml((font.extension || "font").toUpperCase())}</span><span>${formatBytes(font.bytes)}</span><span>${escapeHtml(syncLabel(font))}</span></div><div class="font-specimen" style="font-family: 'font-${escapeHtml(font.id)}', sans-serif">Aa 中文 0123 · Reeden Theme</div><div class="font-hash">SHA-256 ${escapeHtml(font.sha256)}</div>${font.sync_error ? `<p class="inline-error">${escapeHtml(typeof font.sync_error === "string" ? font.sync_error : Object.values(font.sync_error).join("；"))}</p>` : ""}${font.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof font.cleanup_warning === "string" ? font.cleanup_warning : Object.values(font.cleanup_warning).join("；"))}</p>` : ""}${classificationEditor(font, "font")}</div><div class="font-actions"><button class="text-button sync-font" data-id="${escapeHtml(font.id)}" data-completed="${savedToCloud(font)}">${savedToCloud(font) ? "R2 已保存" : "同步字体到 R2"}</button>${font.url ? `<a class="download-link" href="${escapeHtml(assetUrl(font.url))}">下载原字体</a>` : ""}</div></article>`).join("");
+  const visible = state.fonts.filter(fontMatchesSearch);
+  $("#fontCount").textContent = visible.length === state.fonts.length ? `${state.fonts.length} 个字体` : `${visible.length} / ${state.fonts.length} 个字体`;
+  $("#fontEmpty").hidden = visible.length > 0;
+  $("#fontEmpty h3").textContent = state.fonts.length && !visible.length ? "没有匹配的字体" : "还没有字体";
+  $("#fontEmpty p").textContent = state.fonts.length && !visible.length ? "换一个字体名称或文件名关键词试试。" : "从单个文件或文件夹开始建立字体索引。";
+  $("#fontList").innerHTML = visible.map(font => `<article class="font-card"><div><label class="item-heading">${selectInput("font", font.id, `字体 ${font.family || font.file_name}`, savedToCloud(font))}<span class="theme-title">${escapeHtml(font.family || font.file_name)}</span></label><div class="font-specimen" style="font-family: 'font-${escapeHtml(font.id)}', sans-serif">Aa 中文 123</div><div class="font-meta"><span>${escapeHtml(font.subfamily || "Regular")}</span><span>${escapeHtml((font.extension || "font").toUpperCase())}</span><span>${formatBytes(font.bytes)}</span><span>${escapeHtml(syncLabel(font))}</span></div><div class="font-hash">SHA-256 ${escapeHtml(font.sha256)}</div>${font.sync_error ? `<p class="inline-error">${escapeHtml(typeof font.sync_error === "string" ? font.sync_error : Object.values(font.sync_error).join("；"))}</p>` : ""}${font.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof font.cleanup_warning === "string" ? font.cleanup_warning : Object.values(font.cleanup_warning).join("；"))}</p>` : ""}${fontClassificationEditor(font)}</div><div class="font-actions"><button class="text-button sync-font" data-id="${escapeHtml(font.id)}" data-completed="${savedToCloud(font)}">${savedToCloud(font) ? "R2 已保存" : "同步字体到 R2"}</button>${font.url ? `<a class="download-link" href="${escapeHtml(assetUrl(font.url))}">下载原字体</a>` : ""}</div></article>`).join("");
   // A FontFace preview works without a build step and keeps the original file untouched.
   state.fonts.forEach(font => {
     const url = assetUrl(font.view_url || font.url);
@@ -800,6 +821,12 @@ function renderFonts() {
   $$(".sync-font").forEach(button => button.addEventListener("click", () => syncFont(button.dataset.id)));
   renderImportedFonts();
   updateBulkControls();
+}
+function fontMatchesSearch(font) {
+  const needle = String(state.fontSearch || "").trim().toLocaleLowerCase("zh-CN");
+  if (!needle) return true;
+  return [font.family, font.file_name]
+    .some(value => String(value || "").toLocaleLowerCase("zh-CN").includes(needle));
 }
 function assetTypeLabel(asset) {
   return String(asset.asset_type || asset.extension || "").toLowerCase() === "svg" ? "SVG" : "HTML";
@@ -907,7 +934,7 @@ function renderImportedFonts() {
   const fonts = state.importFontIds.map(id => state.fonts.find(font => font.id === id)).filter(Boolean);
   $("#fontImportResults").hidden = !fonts.length;
   $("#fontBatchDescription").textContent = `本批 ${fonts.length} 个新字体；此前收录的字体在字体库中单独查看。`;
-  $("#importedFontList").innerHTML = fonts.map(font => `<article class="font-card import-font-card"><div><div class="theme-title">${escapeHtml(font.family || font.file_name)}</div><div class="font-meta"><span>${escapeHtml(font.subfamily || "Regular")}</span><span>${escapeHtml((font.extension || "font").toUpperCase())}</span><span>${formatBytes(font.bytes)}</span><span>${escapeHtml(syncLabel(font))}</span></div><div class="font-specimen" style="font-family: 'font-${escapeHtml(font.id)}', sans-serif">Aa 中文 0123 · Reeden Theme</div>${font.sync_error ? `<p class="inline-error">${escapeHtml(font.sync_error)}</p>` : ""}</div><button class="text-button" data-open-view="jobs">查看同步任务</button></article>`).join("");
+  $("#importedFontList").innerHTML = fonts.map(font => `<article class="font-card import-font-card"><div><div class="theme-title">${escapeHtml(font.family || font.file_name)}</div><div class="font-specimen" style="font-family: 'font-${escapeHtml(font.id)}', sans-serif">Aa 中文 123</div><div class="font-meta"><span>${escapeHtml(font.subfamily || "Regular")}</span><span>${escapeHtml((font.extension || "font").toUpperCase())}</span><span>${formatBytes(font.bytes)}</span><span>${escapeHtml(syncLabel(font))}</span></div><div class="record-classifications"><span class="category-chip">分类：${escapeHtml(font.style || inferFontCategory(font))}</span></div>${font.sync_error ? `<p class="inline-error">${escapeHtml(font.sync_error)}</p>` : ""}</div><button class="text-button" data-open-view="jobs">查看同步任务</button></article>`).join("");
 }
 function rememberJob(job) {
   if (!job?.id) throw new Error("后台没有返回任务编号，请刷新后检查任务列表");
@@ -1387,24 +1414,11 @@ async function importFonts(files) {
           const bytes = new Uint8Array(await file.arrayBuffer());
           transferStage("上传字体文件", file.name);
           const fontPath = await uploadBrowserObject("fonts", info.sha256, info.extension, bytes, `font/${info.extension}`);
-          let previewPath = "";
-          try {
-            transferStage("生成字体预览", file.name);
-            const preview = await codec.fontPreview(file);
-            try {
-              const previewBytes = await jpegBytesFromBlob(preview.blob);
-              if (previewBytes) {
-                const previewSha = await codec.sha256Hex(previewBytes);
-                transferStage("上传字体预览", file.name);
-                previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg");
-              }
-            } finally { preview.release?.(); }
-          } catch { /* Font preview is optional; the original font remains usable. */ }
           transferStage("写入字体清单", file.name);
           const record = await uploadBrowserRecord({
             kind: "font", id: `font-${info.sha256.slice(0, 16)}`, sha256: info.sha256, file_name: file.name,
-            family: file.name.replace(/\.[^.]+$/, ""), subfamily: "Regular", extension: info.extension, bytes: info.bytes,
-            url: fontPath, view_url: fontPath, preview_url: previewPath, saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
+            family: file.name.replace(/\.[^.]+$/, ""), subfamily: "Regular", extension: info.extension, bytes: info.bytes, style: inferFontCategory({ family: file.name }), tags: [],
+            url: fontPath, view_url: fontPath, preview_url: "", saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
           }, codec);
           transferDone(file.name);
           operationMessage(output, `已上传字体 ${++finished} / ${unique.length}…`);
@@ -1776,6 +1790,7 @@ $("#chooseUnifiedFolder").addEventListener("click", () => { if (!state.operation
 $("#unifiedFolderInput").addEventListener("change", async event => { await importUnifiedFiles(event.target.files); event.target.value = ""; });
 $("#refreshThemes").addEventListener("click", () => loadThemes(true));
 $("#refreshFonts").addEventListener("click", () => loadFonts(true));
+$("#fontSearchInput").addEventListener("input", event => { state.fontSearch = event.target.value; renderFonts(); });
 $("#refreshAssets").addEventListener("click", () => loadAssets(true));
 $("#selectAllReview").addEventListener("change", event => toggleAll("review", event.target.checked));
 $("#selectAllThemes").addEventListener("change", event => toggleAll("theme", event.target.checked));
