@@ -948,7 +948,8 @@ async function loginPan123Quick(event) {
   } catch (error) {
     const message = error instanceof TypeError ? "浏览器没能连上 123 登录接口（可能被扩展或网络拦截）。" : error.message;
     const advice = message.includes("扫码连接") ? "" : "如果提示需要验证码，请改用「扫码连接」，或在下方直接粘贴会话 Token。";
-    operationMessage(output, `${message}。${advice}`.trim(), true);
+    const text = advice ? `${String(message).replace(/[。.]$/, "")}。${advice}` : String(message);
+    operationMessage(output, text, true);
   } finally {
     // 密码用完即弃：成功失败都不留在表单里。
     form.reset();
