@@ -839,8 +839,11 @@ function pan123TokenSourceLabel(source) {
 }
 function acceptPan123Tokens(payload) {
   let list = [];
-  try { list = JSON.parse(String(payload || "[]")); } catch { list = []; }
-  const tokens = (Array.isArray(list) ? list : []).filter(item => item && typeof item.token === "string" && item.token);
+  // 原生回传的是 JSON 字符串，浏览器直连拿到的是数组，两种都要收下。
+  if (Array.isArray(payload)) list = payload;
+  else { try { list = JSON.parse(String(payload || "[]")); } catch { list = []; } }
+  if (!Array.isArray(list)) list = [];
+  const tokens = list.filter(item => item && typeof item.token === "string" && item.token);
   const output = $("#pan123BackupStatus");
   if (!tokens.length) {
     operationMessage(output, "登录页里没有找到会话 Token。请确认页面已经显示登录状态，再点一次「取回会话 Token」。", true);
@@ -886,8 +889,8 @@ async function pan123DirectSignIn(username, password) {
   const token = String(data?.data?.token || "");
   if (![0, 200].includes(code) || !token) {
     const detail = String(data?.message || data?.msg || "").trim();
-    if (!detail && Number(code) === -1) throw new Error("账号或密码不正确。若账号开了二次验证，请改用「扫码连接」。");
-    throw new Error(detail || `123 登录失败（HTTP ${response.status}）`);
+    if (detail) throw new Error(detail);
+    throw new Error("123 没有接受这次登录：账号或密码不正确，或该账号需要短信验证码。若密码登录一直不过，请改用「扫码连接」。");
   }
   return token;
 }
@@ -936,7 +939,8 @@ async function loginPan123Quick(event) {
     await acceptPan123Tokens([{token, source: "password"}]);
   } catch (error) {
     const message = error instanceof TypeError ? "浏览器没能连上 123 登录接口（可能被扩展或网络拦截）。" : error.message;
-    operationMessage(output, `123 登录失败：${message}。如果提示需要验证码，请改用「扫码连接」，或在下方直接粘贴会话 Token。`, true);
+    const advice = message.includes("扫码连接") ? "" : "如果提示需要验证码，请改用「扫码连接」，或在下方直接粘贴会话 Token。";
+    operationMessage(output, `${message}。${advice}`.trim(), true);
   } finally {
     // 密码用完即弃：成功失败都不留在表单里。
     form.reset();
