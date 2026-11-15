@@ -65,7 +65,26 @@
             </section>
             <section class="compression-panel" aria-labelledby="compressionTitle">
               <div class="compression-copy"><h2 id="compressionTitle">RED 图片压缩</h2><p>选择主题并确认后，在当前设备压缩图片、重新封包，再生成书架与书封预览。完成后按存储设置同步。</p><p class="field-help">透明图片保留透明度，动画保留原样；整包没有变小时保留原字节。加密 RED 的明文图片在手机和电脑都可先压缩；同步 Worker 或电脑本地服务负责认证清单、更新哈希并重新封包。</p></div>
-              <div class="compression-controls" id="compressionPresetGroup" role="radiogroup" aria-label="压缩方案"><label class="preset-card"><input type="radio" name="compressionPreset" value="balanced" /><span class="preset-body"><strong>最高性价比</strong><span>静态图保留原尺寸，普通图片用 94% 画质 WebP，底栏在无损与有损结果里取更小的一张。GIF 保留尺寸、帧数和播放节奏，只合并非常接近的颜色。</span></span></label><label class="preset-card"><input type="radio" name="compressionPreset" value="max" checked /><span class="preset-body"><strong>最大压缩</strong><span>底栏 384 px，启动图与阅读背景 1920 px，其余静态图 1600 px，只缩小超过上限的图片；90% 画质 WebP，底栏逐张比较无损与有损。GIF 尺寸帧数不变，合并更多近似颜色。</span></span></label><label class="preset-card"><input type="radio" name="compressionPreset" value="custom" /><span class="preset-body"><strong>自定义</strong><span>手动指定图片质量与长边上限，适合已知素材尺寸的主题。</span></span></label><div class="compression-custom" id="compressionCustomFields" hidden><label>图片质量（1–100）<input id="compressionQuality" type="number" min="1" max="100" step="1" value="88" aria-describedby="compressionQualityHelp" /><span id="compressionQualityHelp">用于 JPEG / WebP，数值越高越清晰。</span></label><label>图片长边上限（像素）<input id="compressionMaxEdge" type="number" min="64" max="8192" step="1" value="2048" aria-describedby="compressionMaxEdgeHelp" /><span id="compressionMaxEdgeHelp">超出时等比缩小；动画与九宫格保留。填 0 表示不缩小。</span></label></div></div>
+              <div class="compression-controls" id="compressionPresetGroup" role="radiogroup" aria-label="压缩方案"><label class="preset-card"><input type="radio" name="compressionPreset" value="balanced" /><span class="preset-body"><strong>最高性价比</strong><span>静态图保留原尺寸，普通图片用 94% 画质 WebP，底栏在无损与有损结果里取更小的一张。GIF 保留尺寸、帧数和播放节奏，只合并非常接近的颜色。</span></span></label><label class="preset-card"><input type="radio" name="compressionPreset" value="max" checked /><span class="preset-body"><strong>最大压缩</strong><span>底栏 384 px，启动图、阅读背景与书架底 2560 px，其余静态图 1600 px，只缩小超过上限的图片；90% 画质 WebP，底栏逐张比较无损与有损。GIF 尺寸帧数不变，合并更多近似颜色。</span></span></label><label class="preset-card"><input type="radio" name="compressionPreset" value="custom" /><span class="preset-body"><strong>自选模式</strong><span>自己定编码方式、画质、长边上限和 GIF 处理，适合已知素材尺寸或想精确控制体积的主题。</span></span></label><div class="compression-custom" id="compressionCustomFields" hidden>
+                <fieldset class="custom-group"><legend>静态图片编码</legend>
+                  <label class="custom-choice"><input type="radio" name="compressionCodec" value="webp" checked /><span><strong>高画质 WebP</strong><small>有损编码，体积最小，画质可调。</small></span></label>
+                  <label class="custom-choice"><input type="radio" name="compressionCodec" value="png" /><span><strong>无损 PNG</strong><small>不改像素，只按长边上限等比缩小；照片类通常压不动，会自动保留原图。</small></span></label>
+                </fieldset>
+                <div class="custom-row" id="compressionQualityRow"><span class="custom-label" id="compressionQualityLabel">画质</span>
+                  <div class="range-row"><button type="button" class="range-step" id="compressionQualityDown" aria-label="降低画质">−</button><input id="compressionQuality" type="range" min="50" max="100" step="1" value="95" aria-labelledby="compressionQualityLabel" aria-describedby="compressionQualityHelp" /><button type="button" class="range-step" id="compressionQualityUp" aria-label="提高画质">+</button><output id="compressionQualityValue" for="compressionQuality">95%</output></div>
+                  <p class="custom-help" id="compressionQualityHelp">仅对 WebP 有损编码生效，95% 以上基本看不出差别。</p>
+                </div>
+                <div class="custom-row"><label class="custom-label" for="compressionMaxEdge">静态图片最长边上限</label>
+                  <select id="compressionMaxEdge" aria-describedby="compressionMaxEdgeHelp"><option value="0" selected>保持原尺寸</option><option value="2560">2560 px</option><option value="1920">1920 px</option><option value="1600">1600 px</option><option value="1280">1280 px</option><option value="1024">1024 px</option></select>
+                  <p class="custom-help" id="compressionMaxEdgeHelp">超出时等比缩小；GIF 保持尺寸与帧数。</p>
+                </div>
+                <div class="custom-row"><label class="custom-label" for="compressionGifColors">GIF 处理</label>
+                  <select id="compressionGifColors" aria-describedby="compressionGifColorsHelp"><option value="0">仅无损重编码（GIF 保持原样）</option><option value="256">量化到 256 色</option><option value="128">量化到 128 色</option><option value="64">量化到 64 色</option></select>
+                  <p class="custom-help" id="compressionGifColorsHelp">量化只合并颜色，尺寸、帧数和播放节奏不变。</p>
+                </div>
+                <label class="custom-check"><input type="checkbox" id="compressionReader" checked /><span>同时压缩阅读背景</span></label>
+                <label class="custom-check"><input type="checkbox" id="compressionIconLossless" checked /><span>底栏图标在无损与有损结果里取更小的一张</span></label>
+              </div></div>
             </section>
           <section class="review-area" id="reviewArea" hidden>
             <div class="section-heading"><div><h2>待确认并压缩</h2><p>确认后压缩图片并重新封包；加密主题保持清单、权限和资源哈希有效。同步 Worker 或电脑本地服务不可用时会保留原包并说明原因。</p></div><span class="review-count" id="reviewCount">0</span></div>

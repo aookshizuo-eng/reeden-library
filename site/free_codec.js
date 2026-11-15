@@ -271,7 +271,11 @@
   // bar needs to stay crisp at its small draw size.
   const COMPRESSION_PRESETS = {
     balanced: { label: "最高性价比", quality: 94, maxEdge: 0, roleCaps: null, iconLossless: true, gifColors: 128 },
-    max: { label: "最大压缩", quality: 90, maxEdge: 1920, roleCaps: { icon: 384, splash: 1920, reader: 1920, card: 1600, cover: 1600, carousel: 1600, shelf: 1920, other: 1600 }, iconLossless: true, gifColors: 64 },
+    // Full-screen art (启动图/阅读背景/书架底) gets 2560 so it still holds up on
+    // 2K/4K displays; only the card-sized surfaces stay at 1600.  Measured on
+    // real themes: 2656px art keeps PSNR 40.7dB at 2560 instead of dropping to
+    // 36.7dB at 1920, for a few hundred KB more per theme.
+    max: { label: "最大压缩", quality: 90, maxEdge: 2560, roleCaps: { icon: 384, splash: 2560, reader: 2560, card: 1600, cover: 1600, carousel: 1600, shelf: 2560, other: 1600 }, iconLossless: true, gifColors: 64 },
     custom: { label: "自定义", quality: 88, maxEdge: 2048, roleCaps: null, iconLossless: false, gifColors: 96 },
   };
   function imageRole(name) {
@@ -290,10 +294,20 @@
     const role = imageRole(name);
     if (!preset || options.preset === "custom") {
       const maxEdge = Number.isFinite(options.maxEdge) ? Math.max(0, options.maxEdge) : (preset ? preset.maxEdge : 2048);
-      return { role, maxEdge, quality: Number(options.quality ?? (preset ? preset.quality : 88)), iconLossless: Boolean(preset?.iconLossless), gifColors: preset ? preset.gifColors : 0, preset: options.preset || "custom" };
+      // "自选" mode exposes the encoder, quality, long-edge cap, GIF palette and
+      // whether reading backgrounds participate.  codec "png" means lossless:
+      // only the long-edge cap changes the pixels.
+      const codec = options.codec === "png" ? "png" : "webp";
+      const gifColors = Number.isFinite(options.gifColors) ? Math.max(0, options.gifColors) : (preset ? preset.gifColors : 96);
+      return {
+        role, maxEdge, codec, gifColors, preset: options.preset || "custom",
+        quality: Number(options.quality ?? (preset ? preset.quality : 88)),
+        iconLossless: options.iconLossless === undefined ? Boolean(preset?.iconLossless) : Boolean(options.iconLossless),
+        skip: role === "reader" && options.compressReader === false,
+      };
     }
     const cap = preset.roleCaps ? (preset.roleCaps[role] ?? preset.roleCaps.other) : 0;
-    return { role, maxEdge: cap || preset.maxEdge, quality: preset.quality, iconLossless: preset.iconLossless, gifColors: preset.gifColors, preset: options.preset };
+    return { role, maxEdge: cap || preset.maxEdge, quality: preset.quality, codec: "webp", iconLossless: preset.iconLossless, gifColors: preset.gifColors, preset: options.preset, skip: false };
   }
   // Animated GIFs cannot go through canvas without losing frames, so they are
   // re-quantized instead: omggif (vendored, MIT) decodes each frame into its own
@@ -433,8 +447,9 @@
     const decision = { path: name, mime, used: false, originalBytes: original.length };
     const target = resolveImageTarget(name, options);
     decision.role = target.role; decision.preset = target.preset;
+    if (target.skip) { decision.reason = "阅读背景按设置保留原样"; return { bytes: original, mime, decision }; }
     if (mime === "image/gif") {
-      if (!target.gifColors) { decision.reason = "动画 GIF 保留原样"; return { bytes: original, mime, decision }; }
+      if (!target.gifColors) { decision.reason = "GIF 按设置保留原样"; return { bytes: original, mime, decision }; }
       if (original.length < 64 * 1024) { decision.reason = "GIF 体积较小，保留原样"; return { bytes: original, mime, decision }; }
       try {
         const result = requantizeGif(original, target.gifColors);
@@ -488,14 +503,15 @@
         : new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new FreeCodecError("图片编码失败", "image_encode_failed")), type, quality));
       let outputMime = mime;
       let blob = null;
-      if (mime !== "image/webp") {
+      if (target.codec !== "png" && mime !== "image/webp") {
         try { blob = await encode("image/webp"); if (blob?.size && blob.size < original.length) outputMime = "image/webp"; else blob = null; } catch { blob = null; }
       }
-      if (!blob) blob = await encode(mime);
+      if (!blob) blob = await encode(target.codec === "png" ? "image/png" : mime);
       // The tab bar is drawn at a few dozen pixels but ships as a big bitmap;
       // lossless PNG of the resized copy is often smaller *and* crisper than
-      // lossy WebP, so compare the two and keep the better one.
-      if (target.iconLossless && width * height <= 2048 * 2048) {
+      // lossy WebP, so compare the two and keep the better one.  A PNG target is
+      // already lossless, so there is nothing to compare.
+      if (target.iconLossless && target.codec !== "png" && width * height <= 2048 * 2048) {
         try {
           const lossless = await encode("image/png");
           if (lossless?.size && lossless.size < blob.size) { blob = lossless; outputMime = "image/png"; }

@@ -8,7 +8,8 @@
 - 普通 `RED\\x04 + ZIP` 的安全目录读取；
 - DEFLATE/Stored ZIP 读取与重新写入；
 - PNG/JPEG/WebP 静态图片的 Canvas 缩放与 WebP/同格式编码，只采用更小结果；`OffscreenCanvas` 与 `HTMLCanvasElement` 都用同一个编码入口，PNG/JPEG 会真正转成 WebP（早前按“格式相同才编码”的判断会让大图继续以 PNG/JPEG 落盘，整包只省三成）；
-- 三档压缩方案（`COMPRESSION_PRESETS`）：`balanced` 保留原尺寸、94% 画质 WebP；`max` 按角色限制长边（底栏 384、启动图/阅读背景 1920、其余 1600）、90% 画质 WebP，且底栏会在无损 PNG 与有损 WebP 里取更小的一张；`custom` 用面板里的质量与长边上限；
+- 自选模式：`{preset:"custom", codec:"webp"|"png", quality, maxEdge, gifColors, iconLossless, compressReader}`。`codec:"png"` 只做等比缩小、不做有损编码；`gifColors:0` 表示 GIF 仅无损处理、保留原字节；`compressReader:false` 让 `reader` 角色的图片整张保留（决策原因「阅读背景按设置保留原样」）。
+- 三档压缩方案（`COMPRESSION_PRESETS`）：`balanced` 保留原尺寸、94% 画质 WebP；`max` 按角色限制长边（底栏 384、启动图/阅读背景/书架底 2560、其余 1600）、90% 画质 WebP，且底栏会在无损 PNG 与有损 WebP 里取更小的一张；`custom` 用面板里的质量与长边上限；
 - 动图 GIF（≥64 KB）用 vendored 的 omggif 重新量化：按帧矩形解码、把所有帧的颜色合并到 64/96/128 色调色板、按原来的 x/y/宽高/延时/disposal 写回，尺寸、帧数和播放节奏都不变；编码结果不小于原图时保留原字节；
 - APNG、动画 WebP、`.9.png` 与带 `npTc` 标记的九宫格资源仍原样保留；
 - 主题清单里的图片是用内容 MD5 引用的：替换后只改哈希，裸哈希保持裸哈希，带扩展名的引用才跟着换成新扩展名；

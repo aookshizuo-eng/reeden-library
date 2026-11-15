@@ -1137,7 +1137,7 @@ function compressionSummary(theme) {
   const saved = Math.max(0, before - after);
   return `${formatBytes(before)} → ${formatBytes(after)} · ${saved ? `节省 ${(saved / before * 100).toFixed(1)}%` : "原包已较小，保留原字节"}`;
 }
-const COMPRESSION_PRESET_LABELS = {balanced: "最高性价比", max: "最大压缩", custom: "自定义"};
+const COMPRESSION_PRESET_LABELS = {balanced: "最高性价比", max: "最大压缩", custom: "自选模式"};
 // Measured on real themes: still images drop to roughly a seventh of their bytes
 // under 最大压缩 (WebP + per-role caps), while animated GIFs only merge colors
 // and keep every frame, so they stay around three quarters of their size.
@@ -1153,21 +1153,43 @@ function selectedCompressionPreset() {
 function compressionOptions() {
   const preset = selectedCompressionPreset();
   if (preset === "custom") {
+    const codec = document.querySelector("input[name='compressionCodec']:checked")?.value === "png" ? "png" : "webp";
     const quality = Number($("#compressionQuality").value);
     const max_edge = Number($("#compressionMaxEdge").value);
-    if (!Number.isInteger(quality) || quality < 1 || quality > 100) throw new Error("图片质量请填写 1–100 的整数");
-    if (!Number.isInteger(max_edge) || max_edge < 0 || max_edge > 8192) throw new Error("图片长边上限请填写 0–8192 的整数（0 表示不缩小）");
-    return { preset, quality, max_edge };
+    const gif_colors = Number($("#compressionGifColors").value);
+    if (!Number.isInteger(quality) || quality < 1 || quality > 100) throw new Error("画质请选择 1–100 之间的数值");
+    if (!Number.isInteger(max_edge) || max_edge < 0 || max_edge > 8192) throw new Error("静态图片长边上限请选择 0–8192 之间的数值（0 表示保持原尺寸）");
+    return {
+      preset, codec, quality, max_edge,
+      gif_colors: Number.isInteger(gif_colors) && gif_colors >= 0 ? gif_colors : 0,
+      icon_lossless: Boolean($("#compressionIconLossless")?.checked),
+      compress_reader: Boolean($("#compressionReader")?.checked),
+    };
   }
-  const fixed = preset === "balanced" ? { quality: 94, max_edge: 0 } : { quality: 90, max_edge: 1920 };
+  const fixed = preset === "balanced" ? { quality: 94, max_edge: 0 } : { quality: 90, max_edge: 2560 };
   return { preset, ...fixed };
 }
 function syncCompressionControls() {
   const preset = selectedCompressionPreset();
   const custom = $("#compressionCustomFields");
   if (custom) custom.hidden = preset !== "custom";
-  $$("#compressionCustomFields input").forEach(input => { input.disabled = Boolean(state.operation) || preset !== "custom"; });
-  $$("input[name='compressionPreset']").forEach(input => { input.disabled = Boolean(state.operation); });
+  const busy = Boolean(state.operation);
+  $$("#compressionCustomFields input").forEach(input => { input.disabled = busy || preset !== "custom"; });
+  $$("input[name='compressionPreset']").forEach(input => { input.disabled = busy; });
+  // Quality only means something for the lossy WebP encoder; a PNG target is
+  // lossless, so the slider is disabled instead of silently ignored.
+  const lossless = document.querySelector("input[name='compressionCodec']:checked")?.value === "png";
+  const qualityRow = $("#compressionQualityRow");
+  if (qualityRow) qualityRow.classList.toggle("is-muted", lossless);
+  ["#compressionQuality", "#compressionQualityDown", "#compressionQualityUp"].forEach(selector => {
+    const node = $(selector);
+    if (node) node.disabled = busy || preset !== "custom" || lossless;
+  });
+  const output = $("#compressionQualityValue");
+  if (output) {
+    const value = Number($("#compressionQuality").value);
+    output.textContent = `${Number.isFinite(value) ? value : 95}%`;
+  }
 }
 function themeSizeEstimate(item, factors) {
   const entries = item.inspection?.entries;
@@ -1182,12 +1204,25 @@ function themeSizeEstimate(item, factors) {
   if (!gif && !still) return null;
   return {bytes: still * factors.still + gif * factors.gif + other, gif, still};
 }
+// 自选模式的比例没有固定值，按画质/编码方式反推一个经验系数，只为估算区间。
+function customCompressionFactors(options) {
+  const quality = Math.min(100, Math.max(50, Number(options?.quality) || 90));
+  const maxEdge = Number(options?.max_edge) || 0;
+  const still = options?.codec === "png"
+    ? (maxEdge > 0 ? 0.5 : 0.95)
+    : Math.min(0.9, Math.max(0.05, 0.13 * Math.pow(quality / 90, 4)));
+  const colors = Number(options?.gif_colors || 0);
+  const gif = colors === 0 ? 1 : colors >= 256 ? 0.85 : colors >= 128 ? 0.78 : 0.7;
+  return { still, gif, fallback: [still * 0.75, Math.min(1, still * 2.2)] };
+}
 function compressionEstimate(chosen) {
   if (!chosen.length) return "";
   let options = null;
   try { options = compressionOptions(); } catch { options = null; }
   const preset = options?.preset || "max";
-  const factors = COMPRESSION_PRESET_FACTORS[preset] || COMPRESSION_PRESET_FACTORS.max;
+  const factors = preset === "custom" && options
+    ? customCompressionFactors(options)
+    : (COMPRESSION_PRESET_FACTORS[preset] || COMPRESSION_PRESET_FACTORS.max);
   let before = 0, low = 0, high = 0, gifTotal = 0;
   for (const item of chosen) {
     const size = Number(item.info?.bytes || item.bytes?.length || item.file?.size || 0);
@@ -1201,10 +1236,15 @@ function compressionEstimate(chosen) {
   if (!before) return "";
   const toMb = value => (Math.max(0, value) / 1048576).toFixed(2);
   const gifShare = gifTotal / before;
-  const gifNote = gifShare > 0.35
-    ? `其中动图约 ${toMb(gifTotal)} MB：GIF 会保留尺寸、帧数与播放节奏，只能合并颜色，压缩幅度比静态图小。`
-    : "";
-  return `按「${COMPRESSION_PRESET_LABELS[preset]}」压缩，原包 ${toMb(before)} MB，预计约 ${toMb(Math.min(low, before))}–${toMb(Math.min(high, before))} MB（经验估算，以实际导出为准）。${gifNote}`;
+  const gifNote = factors.gif >= 0.99
+    ? `其中动图约 ${toMb(gifTotal)} MB：GIF 按你的设置保持原样，这部分体积不会变小。`
+    : gifShare > 0.35
+      ? `其中动图约 ${toMb(gifTotal)} MB：GIF 会保留尺寸、帧数与播放节奏，只能合并颜色，压缩幅度比静态图小。`
+      : "";
+  const label = preset === "custom" && options
+    ? `自选（${options.codec === "png" ? "无损 PNG" : `WebP ${options.quality}%`}${Number(options.max_edge) > 0 ? `，长边 ${options.max_edge} px` : "，保持原尺寸"}${Number(options.gif_colors) > 0 ? `，GIF ${options.gif_colors} 色` : "，GIF 不改"})`
+    : COMPRESSION_PRESET_LABELS[preset];
+  return `按「${label}」压缩，原包 ${toMb(before)} MB，预计约 ${toMb(Math.min(low, before))}–${toMb(Math.min(high, before))} MB（经验估算，以实际导出为准）。${gifNote}`;
 }
 function renderCompressionResults() {
   const batch = new Set(state.jobs.filter(job => state.importThemeJobIds.includes(job.id)).flatMap(job => job.ids || []));
@@ -2112,7 +2152,7 @@ async function commitThemes(ids = [...selections.review]) {
           const encrypted = item.info?.compression_supported === false || item.inspection?.format === "red_private_v2";
           transferStage(encrypted ? "压缩图片并重新封包" : "压缩图片", name);
           const compressionOptions = options.preset === "custom"
-            ? { preset: options.preset, quality: options.quality, maxEdge: options.max_edge, concurrency: Math.min(4, Number(navigator.hardwareConcurrency) || 2) }
+            ? { preset: options.preset, codec: options.codec, quality: options.quality, maxEdge: options.max_edge, gifColors: options.gif_colors, iconLossless: options.icon_lossless, compressReader: options.compress_reader, concurrency: Math.min(4, Number(navigator.hardwareConcurrency) || 2) }
             : { preset: options.preset, concurrency: Math.min(4, Number(navigator.hardwareConcurrency) || 2) };
           const result = encrypted
             ? await compressPrivateRedViaWorker(raw, codec, compressionOptions)
@@ -2952,9 +2992,24 @@ $("#openJobs").addEventListener("click", () => setView("jobs"));
 $("#refreshJobs").addEventListener("click", () => loadJobs().catch(() => {}));
 $("#resumeStagedJobs").addEventListener("click", () => resumeStagedJobs());
 $$("input[name='compressionPreset']").forEach(input => input.addEventListener("change", () => { syncCompressionControls(); updateBulkControls(); }));
-["#compressionQuality", "#compressionMaxEdge"].forEach(selector => {
+$$("input[name='compressionCodec']").forEach(input => input.addEventListener("change", () => { syncCompressionControls(); updateBulkControls(); }));
+["#compressionQuality", "#compressionMaxEdge", "#compressionGifColors", "#compressionReader", "#compressionIconLossless"].forEach(selector => {
   const input = $(selector);
-  if (input) input.addEventListener("input", () => { if (selectedCompressionPreset() === "custom") updateBulkControls(); });
+  if (!input) return;
+  const event = input.tagName === "SELECT" || input.type === "checkbox" ? "change" : "input";
+  input.addEventListener(event, () => { if (selectedCompressionPreset() === "custom") { syncCompressionControls(); updateBulkControls(); } });
+});
+[["#compressionQualityDown", -1], ["#compressionQualityUp", 1]].forEach(([selector, delta]) => {
+  const button = $(selector);
+  if (!button) return;
+  button.addEventListener("click", () => {
+    const range = $("#compressionQuality");
+    if (!range) return;
+    const next = Math.min(Number(range.max) || 100, Math.max(Number(range.min) || 1, (Number(range.value) || 95) + delta));
+    range.value = String(next);
+    syncCompressionControls();
+    if (selectedCompressionPreset() === "custom") updateBulkControls();
+  });
 });
 const autoResumeBox = $("#autoResumeQueue");
 if (autoResumeBox) {
@@ -3060,7 +3115,26 @@ updateRuntimeMode();
 try {
   const options = JSON.parse(sessionStorage.getItem("reeden-compression-options") || "null");
   if (options && Number.isInteger(options.quality) && options.quality >= 1 && options.quality <= 100) $("#compressionQuality").value = options.quality;
-  if (options && Number.isInteger(options.max_edge) && options.max_edge >= 0 && options.max_edge <= 8192) $("#compressionMaxEdge").value = options.max_edge;
+  if (options && Number.isInteger(options.max_edge) && options.max_edge >= 0 && options.max_edge <= 8192) {
+    const select = $("#compressionMaxEdge");
+    if (select) {
+      const value = String(options.max_edge);
+      select.value = [...select.options].some(option => option.value === value) ? value : select.options[0].value;
+    }
+  }
+  if (options?.codec) {
+    const codec = document.querySelector(`input[name='compressionCodec'][value='${options.codec === "png" ? "png" : "webp"}']`);
+    if (codec) codec.checked = true;
+  }
+  if (options && Number.isInteger(options.gif_colors)) {
+    const select = $("#compressionGifColors");
+    if (select) {
+      const value = String(options.gif_colors);
+      select.value = [...select.options].some(option => option.value === value) ? value : "0";
+    }
+  }
+  if (options && typeof options.icon_lossless === "boolean" && $("#compressionIconLossless")) $("#compressionIconLossless").checked = options.icon_lossless;
+  if (options && typeof options.compress_reader === "boolean" && $("#compressionReader")) $("#compressionReader").checked = options.compress_reader;
   if (options && COMPRESSION_PRESET_LABELS[options.preset]) {
     const radio = document.querySelector(`input[name='compressionPreset'][value='${options.preset}']`);
     if (radio) radio.checked = true;

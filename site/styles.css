@@ -319,8 +319,30 @@ button:disabled { cursor: not-allowed; opacity: .65; }
 .preset-card:has(input:disabled) { opacity: 0.6; }
 .preset-body { display: grid; gap: 4px; }
 .preset-body strong { font-size: 13px; font-weight: 600; }
-.compression-custom { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 4px; }
+.compression-custom { display: grid; grid-template-columns: 1fr; gap: 16px; margin-top: 2px; padding: 15px 16px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--raised); }
 .compression-custom[hidden] { display: none; }
+.custom-group { display: grid; gap: 8px; margin: 0; padding: 0; border: 0; }
+.custom-group legend { padding: 0; color: var(--muted); font-size: 12px; }
+.compression-controls .custom-choice { display: flex; align-items: flex-start; gap: 9px; padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); cursor: pointer; }
+.compression-controls .custom-choice input { width: 16px; height: 16px; min-width: 16px; margin: 2px 0 0; padding: 0; accent-color: var(--accent); flex: none; }
+.custom-choice span { display: grid; gap: 2px; }
+.custom-choice strong { color: var(--text); font-size: 13px; font-weight: 500; }
+.custom-choice small { color: var(--muted); font-size: 12px; line-height: 1.45; }
+.custom-choice:has(input:checked) { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
+.custom-row { display: grid; gap: 7px; }
+.compression-controls .custom-row > .custom-label { color: var(--text); font-size: 13px; }
+.compression-controls .custom-row.is-muted { opacity: 0.45; }
+.range-row { display: flex; align-items: center; gap: 10px; }
+.compression-controls .range-step { width: 34px; height: 34px; min-width: 34px; flex: none; padding: 0; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); font-size: 16px; line-height: 1; cursor: pointer; }
+.compression-controls .range-step:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
+.compression-controls .range-step:disabled { opacity: 0.4; cursor: default; }
+.compression-controls .range-row input[type="range"] { flex: 1; width: auto; min-width: 0; height: 26px; padding: 0; border: 0; background: transparent; accent-color: var(--accent); }
+.range-row output { min-width: 46px; color: var(--text); font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; }
+.custom-help { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.compression-controls .custom-row select { width: 100%; height: 40px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); color: var(--text); font-size: 13px; }
+.compression-controls .custom-check { display: flex; align-items: center; gap: 9px; color: var(--text); font-size: 13px; cursor: pointer; }
+.compression-controls .custom-check input { width: 16px; height: 16px; min-width: 16px; flex: none; margin: 0; padding: 0; accent-color: var(--accent); }
+.compression-controls .custom-check span { color: var(--text); font-size: 13px; }
 .compression-plan { margin: -6px 0 16px; color: var(--muted); font-size: 13px; }
 .compression-results { display: grid; gap: 10px; margin-top: 16px; }
 .compression-result { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 14px 18px; border: 1px solid var(--border); border-radius: var(--radius-card); }
