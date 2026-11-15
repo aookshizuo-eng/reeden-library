@@ -1104,7 +1104,7 @@ function previewRole(name) {
   if (/custom_splash|splash|launch|startup|welcome|opening|启动|开屏/i.test(value)) return "splash";
   if (/reader_schema|reader_background|reading|article|content|book_page|reader|正文|阅读/i.test(value)) return "reader";
   if (/cover_gallery|book_cover|cover|封面|书封|图集/i.test(value)) return "cover";
-  if (/carousel|banner|轮播|横幅/i.test(value)) return "carousel";
+  if (/carousel|banner|slider|swiper|轮播|横幅|焦点图/i.test(value)) return "carousel";
   if (/card_bg|cardbackground|card-background|book_card|bookshelf_card|书架卡片|书卡|卡片/i.test(value)) return "card";
   if (/theme_bg|bookshelf|shelf|library|background|书架|书架底|首页|主页/i.test(value)) return "shelf";
   return "other";
@@ -1284,16 +1284,19 @@ async function composeThemePreviewBlob(entries, codec) {
   else { context.fillStyle = "#f2ece1"; context.fillRect(0, 0, SCREEN_W, panelH); }
   if (shelf) await fillScene(shelf, panelX, 0, panelW, panelH);
   else { context.fillStyle = "#f2ece1"; context.fillRect(panelX, 0, panelW, panelH); }
-  if (carousel) {
+  // 书架页上方固定留一条横幅位置给轮播图；包里没有轮播才把整块还给背景。
+  // 横幅是宽图，用 cover 会被裁成一条色带，所以这里也走「模糊铺底 + 完整图」。
+  const carouselBox = carousel ? {x: panelX + 16, y: 16, w: panelW - 32, h: 190} : null;
+  if (carouselBox) {
     context.save();
-    clipRoundRect(panelX + 18, 18, panelW - 36, 168, 12); context.clip();
-    await drawFit(carousel, panelX + 18, 18, panelW - 36, 168, "cover");
+    clipRoundRect(carouselBox.x, carouselBox.y, carouselBox.w, carouselBox.h, 12); context.clip();
+    await fillScene(carousel, carouselBox.x, carouselBox.y, carouselBox.w, carouselBox.h);
     context.restore();
   }
   if (card) {
     // card_bg 是实际的横版书架卡片，重复几次就能看出主题真实的书架密度。
     const cardX = panelX + 20, cardW = panelW - 40, cardH = 150;
-    const firstY = carousel ? 210 : 88, rowGap = 16;
+    const firstY = carouselBox ? 232 : 88, rowGap = 16;
     for (let index = 0; index < Math.min(covers.length, 4); index++) {
       const y = firstY + index * (cardH + rowGap);
       if (y + cardH > panelH - 24) break;
@@ -1310,12 +1313,13 @@ async function composeThemePreviewBlob(entries, codec) {
   } else if (covers.length) {
     // 背景是主题真实的书架图，封面直接浮上去；底部用渐变压暗而不是铺白块，
     // 既保证看得清，又不会在缩略图上再制造一圈白边。
-    const shade = context.createLinearGradient(0, 520, 0, 1000);
+    const shadeTop = carouselBox ? 600 : 520;
+    const shade = context.createLinearGradient(0, shadeTop, 0, 1000);
     shade.addColorStop(0, "rgba(16,13,10,0)"); shade.addColorStop(1, "rgba(16,13,10,.5)");
-    context.fillStyle = shade; context.fillRect(panelX, 520, panelW, 480);
+    context.fillStyle = shade; context.fillRect(panelX, shadeTop, panelW, 1000 - shadeTop);
     const cardWidth = 84, cardHeight = 148, gap = 14, columns = 5;
     const startX = panelX + (panelW - (columns * cardWidth + (columns - 1) * gap)) / 2;
-    const startY = 620;
+    const startY = carouselBox ? 700 : 620;
     for (let index = 0; index < covers.length; index++) {
       const column = index % columns, row = Math.floor(index / columns);
       const x = startX + column * (cardWidth + gap), y = startY + row * (cardHeight + 28);
