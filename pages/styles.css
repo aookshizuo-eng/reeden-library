@@ -308,10 +308,19 @@ button:disabled { cursor: not-allowed; opacity: .65; }
 .compression-copy h2 { font-size: 16px; margin: 0 0 8px; }
 .compression-copy p { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
 .compression-copy .field-help { margin-bottom: 0; }
-.compression-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-content: start; }
+.compression-controls { display: grid; grid-template-columns: 1fr; gap: 8px; align-content: start; }
 .compression-controls label { display: grid; gap: 8px; color: var(--text); font-size: 13px; }
 .compression-controls input { width: 100%; min-width: 0; height: 40px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); color: var(--text); }
 .compression-controls label span { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.compression-controls .preset-card { display: flex; align-items: flex-start; gap: 10px; padding: 11px 13px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); cursor: pointer; }
+.compression-controls .preset-card input { width: 16px; height: 16px; min-width: 16px; margin: 2px 0 0; padding: 0; accent-color: var(--accent); flex: none; }
+.preset-card:has(input:checked) { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
+.preset-card input:disabled { cursor: default; }
+.preset-card:has(input:disabled) { opacity: 0.6; }
+.preset-body { display: grid; gap: 4px; }
+.preset-body strong { font-size: 13px; font-weight: 600; }
+.compression-custom { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 4px; }
+.compression-custom[hidden] { display: none; }
 .compression-plan { margin: -6px 0 16px; color: var(--muted); font-size: 13px; }
 .compression-results { display: grid; gap: 10px; margin-top: 16px; }
 .compression-result { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 14px 18px; border: 1px solid var(--border); border-radius: var(--radius-card); }

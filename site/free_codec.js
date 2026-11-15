@@ -137,7 +137,11 @@
   }
   function isSkippableImage(bytes, mime, name) {
     const lower = String(name).toLowerCase();
-    if (mime === "image/gif" || lower.includes(".9.png") || lower.includes("card_bg") || lower.includes("cardbackground")) return "动画 GIF 或九宫格资源保留原样";
+    // `card_bg` used to be skipped by name alone, which cost a third of the
+    // package on themes that ship a plain PNG card background (real 9-patch
+    // files are still caught by the `.9.png` name, the `npTc` chunk and the
+    // APNG/GIF checks below).
+    if (lower.includes(".9.png")) return "九宫格资源保留原样";
     if (mime === "image/png" && hasSignature(bytes, [0x61, 0x63, 0x54, 0x4c])) return "APNG 动画保留原样";
     if (mime === "image/webp" && (hasSignature(bytes, [0x41, 0x4e, 0x49, 0x4d]) || hasSignature(bytes, [0x41, 0x4e, 0x4d, 0x46]))) return "动画 WebP 保留原样";
     if (hasSignature(bytes.slice(0, 100000), [0x6e, 0x70, 0x54, 0x63])) return "九宫格资源保留原样";
@@ -245,7 +249,10 @@
       const hash = value.match(/^([0-9a-fA-F]{32}|[0-9a-fA-F]{64})(\.[A-Za-z0-9]+)?$/);
       if (hash && replacements[hash[1].toLowerCase()]) {
         const replacement = replacements[hash[1].toLowerCase()];
-        const extension = extensions[hash[1].toLowerCase()] || hash[2] || "";
+        // Keep the reference shape: a bare hash reference stays bare (Reeden
+        // resolves it by content hash), while an explicit `.png`/`.img` suffix
+        // is swapped for the new payload type.
+        const extension = hash[2] ? (extensions[hash[1].toLowerCase()] || hash[2]) : "";
         return (hash[1] === hash[1].toUpperCase() ? replacement.toUpperCase() : replacement) + extension;
       }
       if (/^\s*[\[{]/.test(value)) {
@@ -257,6 +264,162 @@
     if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapReferences(item, replacements, extensions, paths)]));
     return value;
   }
+  // Compression profiles mirror what users see in the import panel.  The two
+  // named profiles pick per-role resolution caps, because a Reeden theme is
+  // dominated by a handful of very large bitmaps: resizing the splash and the
+  // reading background is what actually moves the package size, while the tab
+  // bar needs to stay crisp at its small draw size.
+  const COMPRESSION_PRESETS = {
+    balanced: { label: "最高性价比", quality: 94, maxEdge: 0, roleCaps: null, iconLossless: true, gifColors: 128 },
+    max: { label: "最大压缩", quality: 90, maxEdge: 1920, roleCaps: { icon: 384, splash: 1920, reader: 1920, card: 1600, cover: 1600, carousel: 1600, shelf: 1920, other: 1600 }, iconLossless: true, gifColors: 64 },
+    custom: { label: "自定义", quality: 88, maxEdge: 2048, roleCaps: null, iconLossless: false, gifColors: 96 },
+  };
+  function imageRole(name) {
+    const value = String(name || "").replace(/\\/g, "/").toLowerCase();
+    if (/navbar_pack|navbar|bottom_bar|tabbar|(^|[/_.-])(icon|normal|selected)([/_.-]|$)/.test(value)) return "icon";
+    if (/custom_splash|splash|launch|startup|welcome|opening|启动|开屏/.test(value)) return "splash";
+    if (/reader_schema|reader_background|reading|article|content|book_page|reader|正文|阅读/.test(value)) return "reader";
+    if (/cover_gallery|book_cover|cover|封面|书封|图集/.test(value)) return "cover";
+    if (/carousel|banner|轮播|横幅/.test(value)) return "carousel";
+    if (/card_bg|cardbackground|card-background|book_card|bookshelf_card|书架卡片|书卡|卡片/.test(value)) return "card";
+    if (/theme_bg|bookshelf|shelf|library|background|书架|书架底|首页|主页/.test(value)) return "shelf";
+    return "other";
+  }
+  function resolveImageTarget(name, options = {}) {
+    const preset = COMPRESSION_PRESETS[options.preset] || null;
+    const role = imageRole(name);
+    if (!preset || options.preset === "custom") {
+      const maxEdge = Number.isFinite(options.maxEdge) ? Math.max(0, options.maxEdge) : (preset ? preset.maxEdge : 2048);
+      return { role, maxEdge, quality: Number(options.quality ?? (preset ? preset.quality : 88)), iconLossless: Boolean(preset?.iconLossless), gifColors: preset ? preset.gifColors : 0, preset: options.preset || "custom" };
+    }
+    const cap = preset.roleCaps ? (preset.roleCaps[role] ?? preset.roleCaps.other) : 0;
+    return { role, maxEdge: cap || preset.maxEdge, quality: preset.quality, iconLossless: preset.iconLossless, gifColors: preset.gifColors, preset: options.preset };
+  }
+  // Animated GIFs cannot go through canvas without losing frames, so they are
+  // re-quantized instead: omggif (vendored, MIT) decodes each frame into its own
+  // rectangle, the colors are merged into a smaller palette, and the frames are
+  // written back with their original rect, delay and disposal.  Size, frame
+  // count and playback rhythm stay untouched.
+  function gifCodecApi() {
+    return typeof root.GifReader === "function" && typeof root.GifWriter === "function"
+      ? { reader: root.GifReader, writer: root.GifWriter } : null;
+  }
+  function gifLoopCount(bytes) {
+    for (let i = 0; i + 11 < bytes.length; i++) {
+      if (bytes[i] !== 0x4e || bytes[i + 1] !== 0x45) continue;
+      if (text(bytes.subarray(i, i + 11)) !== "NETSCAPE2.0") continue;
+      let p = i + 11;
+      if (bytes[p] === 0x03) return bytes[p + 1] | (bytes[p + 2] << 8);
+      return 0;
+    }
+    return 0;
+  }
+  function medianCutPalette(pixels, maxColors) {
+    let boxes = [pixels];
+    while (boxes.length < maxColors) {
+      let index = -1, best = 0;
+      for (let i = 0; i < boxes.length; i++) {
+        const box = boxes[i];
+        if (box.length < 2) continue;
+        let rmin = 255, rmax = 0, gmin = 255, gmax = 0, bmin = 255, bmax = 0, weight = 0;
+        for (const item of box) {
+          const [r, g, b] = item.rgb;
+          if (r < rmin) rmin = r; if (r > rmax) rmax = r;
+          if (g < gmin) gmin = g; if (g > gmax) gmax = g;
+          if (b < bmin) bmin = b; if (b > bmax) bmax = b;
+          weight += item.w;
+        }
+        const range = Math.max(rmax - rmin, gmax - gmin, bmax - bmin) * Math.log2(weight + 1);
+        if (range > best) { best = range; index = i; }
+      }
+      if (index < 0) break;
+      const box = boxes[index];
+      let rmin = 255, rmax = 0, gmin = 255, gmax = 0, bmin = 255, bmax = 0;
+      for (const item of box) {
+        const [r, g, b] = item.rgb;
+        if (r < rmin) rmin = r; if (r > rmax) rmax = r;
+        if (g < gmin) gmin = g; if (g > gmax) gmax = g;
+        if (b < bmin) bmin = b; if (b > bmax) bmax = b;
+      }
+      const dr = rmax - rmin, dg = gmax - gmin, db = bmax - bmin;
+      const channel = dr >= dg && dr >= db ? 0 : dg >= db ? 1 : 2;
+      box.sort((a, b) => a.rgb[channel] - b.rgb[channel]);
+      const total = box.reduce((sum, item) => sum + item.w, 0);
+      let acc = 0, cut = 1;
+      for (let i = 0; i < box.length - 1; i++) { acc += box[i].w; if (acc >= total / 2) { cut = i + 1; break; } }
+      boxes.splice(index, 1, box.slice(0, cut), box.slice(cut));
+    }
+    return boxes.filter(box => box.length).map(box => {
+      let r = 0, g = 0, b = 0, weight = 0;
+      for (const item of box) { r += item.rgb[0] * item.w; g += item.rgb[1] * item.w; b += item.rgb[2] * item.w; weight += item.w; }
+      return [Math.round(r / weight), Math.round(g / weight), Math.round(b / weight)];
+    });
+  }
+  function requantizeGif(bytes, paletteSize) {
+    const api = gifCodecApi();
+    if (!api) return { reason: "GIF 编解码库未加载" };
+    const reader = new api.reader(bytes);
+    const width = reader.width, height = reader.height, total = reader.numFrames();
+    if (!width || !height || !total) return { reason: "GIF 尺寸或帧数无效" };
+    const canvas = new Uint8Array(width * height * 4);
+    const frames = [];
+    for (let index = 0; index < total; index++) {
+      const info = reader.frameInfo(index);
+      if (!info?.width || !info?.height) return { reason: "GIF 帧信息无效" };
+      canvas.fill(0);
+      reader.decodeAndBlitFrameRGBA(index, canvas);
+      const patch = new Uint8Array(info.width * info.height * 4);
+      for (let row = 0; row < info.height; row++) {
+        const start = ((info.y + row) * width + info.x) * 4;
+        patch.set(canvas.subarray(start, start + info.width * 4), row * info.width * 4);
+      }
+      frames.push({ info, patch });
+    }
+    const counts = new Map();
+    for (const frame of frames) {
+      const patch = frame.patch;
+      for (let i = 0; i < patch.length; i += 4) {
+        if (patch[i + 3] < 128) continue;
+        const key = (patch[i] << 16) | (patch[i + 1] << 8) | patch[i + 2];
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+    }
+    if (!counts.size) return { reason: "GIF 没有不透明像素" };
+    const wanted = Math.max(2, Math.min(256, paletteSize | 0));
+    const colors = medianCutPalette([...counts.entries()].map(([key, w]) => ({ rgb: [(key >> 16) & 255, (key >> 8) & 255, key & 255], w })), wanted - 1);
+    const entries = 1 << Math.max(1, Math.ceil(Math.log2(colors.length + 1)));
+    const palette = new Array(entries).fill(0);
+    colors.forEach((c, i) => { if (i + 1 < entries) palette[i + 1] = (c[0] << 16) | (c[1] << 8) | c[2]; });
+    const lookup = new Map();
+    const nearest = (r, g, b) => {
+      const key = (r << 16) | (g << 8) | b;
+      const hit = lookup.get(key);
+      if (hit !== undefined) return hit;
+      let best = 1, bestDistance = Infinity;
+      for (let i = 0; i < colors.length; i++) {
+        const d = (colors[i][0] - r) ** 2 + (colors[i][1] - g) ** 2 + (colors[i][2] - b) ** 2;
+        if (d < bestDistance) { bestDistance = d; best = i + 1; }
+      }
+      lookup.set(key, best);
+      return best;
+    };
+    // The encoder needs one contiguous buffer, so reserve the original size plus
+    // headroom; an overflow always lands above the original length and is then
+    // rejected by the caller.
+    const buffer = new Uint8Array(bytes.length + (2 << 20));
+    const writer = new api.writer(buffer, width, height, { palette, loop: gifLoopCount(bytes) });
+    for (const frame of frames) {
+      const { info, patch } = frame;
+      const indexed = new Uint8Array(info.width * info.height);
+      for (let i = 0, p = 0; i < patch.length; i += 4, p++) {
+        indexed[p] = patch[i + 3] < 128 ? 0 : nearest(patch[i], patch[i + 1], patch[i + 2]);
+      }
+      writer.addFrame(info.x, info.y, info.width, info.height, indexed, { delay: info.delay, disposal: info.disposal, transparent: 0 });
+    }
+    const length = writer.end();
+    if (!length || length >= buffer.length) return { reason: "GIF 重新编码超出预留空间" };
+    return { bytes: buffer.subarray(0, length), frames: total, colors: colors.length, size: length };
+  }
   function extensionForMime(mime) { return mime === "image/webp" ? "webp" : mime === "image/png" ? "png" : mime === "image/jpeg" ? "jpg" : mime === "image/gif" ? "gif" : ""; }
   function replaceImageExtension(name, mime) {
     const extension = extensionForMime(mime);
@@ -266,8 +429,28 @@
     return extension && /\.(?:png|jpe?g|webp|gif|img)$/i.test(String(name || "")) ? String(name).replace(/\.(?:png|jpe?g|webp|gif|img)$/i, `.${extension}`) : String(name || "");
   }
   async function compressImage(bytes, name, options = {}) {
-    const original = bytesOf(bytes), mime = mimeFromBytes(original, name), skipped = isSkippableImage(original, mime, name);
+    const original = bytesOf(bytes), mime = mimeFromBytes(original, name);
     const decision = { path: name, mime, used: false, originalBytes: original.length };
+    const target = resolveImageTarget(name, options);
+    decision.role = target.role; decision.preset = target.preset;
+    if (mime === "image/gif") {
+      if (!target.gifColors) { decision.reason = "动画 GIF 保留原样"; return { bytes: original, mime, decision }; }
+      if (original.length < 64 * 1024) { decision.reason = "GIF 体积较小，保留原样"; return { bytes: original, mime, decision }; }
+      try {
+        const result = requantizeGif(original, target.gifColors);
+        if (!result.bytes || result.size >= original.length) { decision.reason = result.reason || "GIF 重新量化后未变小"; return { bytes: original, mime, decision }; }
+        decision.used = true;
+        decision.reason = `GIF 保留 ${result.frames} 帧、尺寸与播放节奏，颜色合并为 ${result.colors} 色`;
+        decision.compressedBytes = result.size; decision.outputMime = "image/gif";
+        decision.gif_frames = result.frames; decision.gif_colors = result.colors;
+        return { bytes: result.bytes, mime, decision };
+      } catch (error) {
+        decision.reason = "GIF 重新量化失败，保留原样";
+        decision.error = error?.message || "gif_requantize_failed";
+        return { bytes: original, mime, decision };
+      }
+    }
+    const skipped = isSkippableImage(original, mime, name);
     if (skipped) { decision.reason = skipped; return { bytes: original, mime, decision }; }
     if (!(mime === "image/png" || mime === "image/jpeg" || mime === "image/webp")) { decision.reason = "格式不在浏览器兼容压缩范围"; return { bytes: original, mime, decision }; }
     if (typeof root.createImageBitmap !== "function") throw new FreeCodecError("当前浏览器不支持 createImageBitmap，无法本地压缩图片", "image_decode_unavailable");
@@ -285,7 +468,7 @@
       return { bytes: original, mime, decision };
     }
     try {
-      const maxEdge = Number.isFinite(options.maxEdge) ? Math.max(0, options.maxEdge) : 2048;
+      const maxEdge = target.maxEdge;
       const scale = maxEdge ? Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height)) : 1;
       const width = Math.max(1, Math.round(bitmap.width * scale)), height = Math.max(1, Math.round(bitmap.height * scale));
       const canvas = root.OffscreenCanvas ? new root.OffscreenCanvas(width, height) : root.document?.createElement("canvas");
@@ -293,8 +476,14 @@
       canvas.width = width; canvas.height = height;
       const context = canvas.getContext("2d"); if (!context) throw new FreeCodecError("无法创建 Canvas 2D 上下文", "canvas_unavailable");
       context.imageSmoothingEnabled = true; context.imageSmoothingQuality = "high"; context.drawImage(bitmap, 0, 0, width, height);
-      const quality = Math.min(1, Math.max(0.01, Number(options.quality ?? 88) / 100));
-      const encode = type => canvas.convertToBlob && type === mime
+      const quality = Math.min(1, Math.max(0.01, Number(target.quality ?? 88) / 100));
+      // OffscreenCanvas only exposes convertToBlob(); HTMLCanvasElement only
+      // exposes toBlob().  Using toBlob whenever the requested type differed
+      // from the source type made every PNG/JPEG keep its original format (the
+      // call threw and fell into the same-type branch), which is why package
+      // savings stayed around 30% instead of turning the large bitmaps into
+      // WebP.
+      const encode = type => canvas.convertToBlob
         ? canvas.convertToBlob({ type, quality })
         : new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new FreeCodecError("图片编码失败", "image_encode_failed")), type, quality));
       let outputMime = mime;
@@ -303,9 +492,19 @@
         try { blob = await encode("image/webp"); if (blob?.size && blob.size < original.length) outputMime = "image/webp"; else blob = null; } catch { blob = null; }
       }
       if (!blob) blob = await encode(mime);
+      // The tab bar is drawn at a few dozen pixels but ships as a big bitmap;
+      // lossless PNG of the resized copy is often smaller *and* crisper than
+      // lossy WebP, so compare the two and keep the better one.
+      if (target.iconLossless && width * height <= 2048 * 2048) {
+        try {
+          const lossless = await encode("image/png");
+          if (lossless?.size && lossless.size < blob.size) { blob = lossless; outputMime = "image/png"; }
+        } catch { /* keep the lossy candidate */ }
+      }
       const candidate = new Uint8Array(await blob.arrayBuffer());
       if (candidate.length >= original.length) { decision.reason = "压缩结果未变小"; return { bytes: original, mime, decision }; }
       decision.used = true; decision.reason = outputMime === "image/webp" ? "转为 WebP 后体积更小" : "压缩后体积更小"; decision.compressedBytes = candidate.length; decision.width = width; decision.height = height; decision.outputMime = outputMime; decision.outputName = replaceImageExtension(name, outputMime);
+      decision.role = target.role; decision.preset = target.preset; decision.max_edge = maxEdge; decision.quality = Math.round(quality * 100);
       return { bytes: candidate, mime: outputMime, decision };
     } finally { bitmap.close?.(); }
   }
@@ -599,7 +798,7 @@
     const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new FreeCodecError("字体预览编码失败", "font_preview_encode_failed")), "image/png"));
     return { ...info, family, blob, release() { if (face) root.document.fonts.delete(face); root.URL.revokeObjectURL(url); } };
   }
-  const api = { FreeCodecError, RED_ZIP, RED_PRIVATE, sha256Hex, md5Hex, crc32, mimeFromBytes, readZipEntries, writeZipEntries, inspectContainer, extractPrivatePreviewImages, compressImage, compressRed, inspectFont, fontPreview };
+  const api = { FreeCodecError, RED_ZIP, RED_PRIVATE, COMPRESSION_PRESETS, imageRole, requantizeGif, sha256Hex, md5Hex, crc32, mimeFromBytes, readZipEntries, writeZipEntries, inspectContainer, extractPrivatePreviewImages, compressImage, compressRed, inspectFont, fontPreview };
   if (root && typeof root === "object") root.ReedenFreeCodec = api;
   return api;
 });

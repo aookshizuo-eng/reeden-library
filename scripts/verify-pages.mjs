@@ -33,13 +33,13 @@ const [app, html] = await Promise.all([
   readFile(path.join(source, "index.html"), "utf8"),
 ]);
 for (const marker of ["function fontPreviewMarkup", "function loadFontPreviewFace", "function recoverFontPreviewImage", "new FontFace(", "font-preview-frame", "font-preview-fallback", "data-font-preview-id", "data-font-id", "function renderFonts",
-  "function analyzeFontGlyphs", "function inkProfile", "window.opentype", "glyph_method", "function downloadSelectedRecords", "function fetchDownloadableBytes", "function renderThemeAuthorFilter", "function compressPrivateRedWithDirectory", "function queueFilesForLater", "function resumeStagedJobs", "function backupOriginalTo123", "function runCodecTask", "function loadLibraryAfterConnection", "function fetchWithReadTimeout", "API_READ_TIMEOUT_MS", "已连接共享库", "function verifyPan123Backup", "/api/backup/123/verify", "已连接 123 云盘", "function refreshPan123BackupList", "function verifyPan123Write", "/api/backup/123/list", "123 已备份", "encodeURIComponent(config.folder)", "encodeURIComponent(fileName)", "已用 ${seconds} 秒", "function autoResumeStagedQueue", "reeden-auto-resume-queue", "auto_commit", 'fetch(apiUrl(key), {method: "DELETE"']) {
+  "function analyzeFontGlyphs", "function inkProfile", "window.opentype", "glyph_method", "function downloadSelectedRecords", "function fetchDownloadableBytes", "function renderThemeAuthorFilter", "function compressPrivateRedWithDirectory", "function queueFilesForLater", "function resumeStagedJobs", "function backupOriginalTo123", "function runCodecTask", "function loadLibraryAfterConnection", "function fetchWithReadTimeout", "API_READ_TIMEOUT_MS", "已连接共享库", "function verifyPan123Backup", "/api/backup/123/verify", "已连接 123 云盘", "function refreshPan123BackupList", "function verifyPan123Write", "/api/backup/123/list", "123 已备份", "encodeURIComponent(config.folder)", "encodeURIComponent(fileName)", "已用 ${seconds} 秒", "function autoResumeStagedQueue", "reeden-auto-resume-queue", "auto_commit", 'fetch(apiUrl(key), {method: "DELETE"', "function compressionEstimate", "COMPRESSION_PRESET_LABELS", "compressionCustomFields"]) {
   if (!app.includes(marker)) errors.push(`前端缺少关键回归标记：${marker}`);
 }
-for (const id of ["fontList", "fontCount", "fontEmpty", "themeAuthorFilter", "downloadSelectedTheme", "downloadSelectedFont", "downloadSelectedAsset", "queueForLater", "resumeStagedJobs", "pan123BackupToken", "verifyPan123Backup", "listPan123Backup", "verifyPan123Write", "pan123BackupList", "autoResumeQueue"]) {
+for (const id of ["fontList", "fontCount", "fontEmpty", "themeAuthorFilter", "downloadSelectedTheme", "downloadSelectedFont", "downloadSelectedAsset", "queueForLater", "resumeStagedJobs", "pan123BackupToken", "verifyPan123Backup", "listPan123Backup", "verifyPan123Write", "pan123BackupList", "autoResumeQueue", "compressionPresetGroup", "compressionCustomFields", "compressionQuality", "compressionMaxEdge"]) {
   if (!html.includes(`id=\"${id}\"`)) errors.push(`页面结构回归检查失败：缺少 #${id}`);
 }
-for (const file of ["app.js", "free_codec.js", "free_codec_worker.js", "opentype.min.js"]) {
+for (const file of ["app.js", "free_codec.js", "free_codec_worker.js", "omggif.js", "opentype.min.js"]) {
   const result = spawnSync(process.execPath, ["--check", path.join(source, file)], {encoding: "utf8"});
   if (result.status !== 0) errors.push(`${file} 语法检查失败：${(result.stderr || result.stdout).trim()}`);
 }
@@ -64,6 +64,15 @@ if (!workerApi.includes("function headerText") || !workerApi.includes('headerTex
 if (!workerApi.includes("function deleteStagingObject") || !workerApi.includes('spec.kind === "staging" && request.method === "DELETE"')) errors.push("pages/worker-api.js 缺少暂存文件删除，处理完的原始副本会永久占用 R2");
 const [codecSource] = await Promise.all([readFile(path.join(source, "free_codec.js"), "utf8")]);
 if (!codecSource.includes("options.store")) errors.push("site/free_codec.js 缺少 Stored ZIP 选项，批量下载会重复压缩字体");
+// Compression quality regression: the OffscreenCanvas encoder must accept every
+// target type. A `type === mime` guard silently kept PNG/JPEG bytes and held
+// real themes at ~30% savings instead of turning the big bitmaps into WebP.
+for (const marker of ["COMPRESSION_PRESETS", "function resolveImageTarget", "convertToBlob({ type, quality })", "iconLossless", "function requantizeGif", "GifWriter"]) {
+  if (!codecSource.includes(marker)) errors.push(`site/free_codec.js 缺少压缩方案实现：${marker}`);
+}
+if (!html.includes("omggif.js")) errors.push("site/index.html 未加载 omggif.js，GIF 无法重新量化");
+if (!(await readFile(path.join(source, "omggif.js"), "utf8")).includes("function GifWriter")) errors.push("site/omggif.js 缺失或被截断");
+if (/convertToBlob\s*&&\s*type === mime/.test(codecSource)) errors.push("site/free_codec.js 又退回同格式编码，PNG/JPEG 不会转 WebP，压缩率会掉回三成");
 
 const urlArg = process.argv.find(value => value.startsWith("--url="));
 const liveUrl = (urlArg ? urlArg.slice("--url=".length) : process.env.REEDEN_CHECK_URL || "").replace(/\/+$/, "");

@@ -7,8 +7,11 @@
 - 字体 TTF/OTF/WOFF/WOFF2 的 SHA-256 查重；
 - 普通 `RED\\x04 + ZIP` 的安全目录读取；
 - DEFLATE/Stored ZIP 读取与重新写入；
-- PNG/JPEG/WebP 静态图片的 Canvas 缩放与 WebP/同格式编码，只采用更小结果；
-- GIF、APNG、动画 WebP、九宫格资源原样保留；
+- PNG/JPEG/WebP 静态图片的 Canvas 缩放与 WebP/同格式编码，只采用更小结果；`OffscreenCanvas` 与 `HTMLCanvasElement` 都用同一个编码入口，PNG/JPEG 会真正转成 WebP（早前按“格式相同才编码”的判断会让大图继续以 PNG/JPEG 落盘，整包只省三成）；
+- 三档压缩方案（`COMPRESSION_PRESETS`）：`balanced` 保留原尺寸、94% 画质 WebP；`max` 按角色限制长边（底栏 384、启动图/阅读背景 1920、其余 1600）、90% 画质 WebP，且底栏会在无损 PNG 与有损 WebP 里取更小的一张；`custom` 用面板里的质量与长边上限；
+- 动图 GIF（≥64 KB）用 vendored 的 omggif 重新量化：按帧矩形解码、把所有帧的颜色合并到 64/96/128 色调色板、按原来的 x/y/宽高/延时/disposal 写回，尺寸、帧数和播放节奏都不变；编码结果不小于原图时保留原字节；
+- APNG、动画 WebP、`.9.png` 与带 `npTc` 标记的九宫格资源仍原样保留；
+- 主题清单里的图片是用内容 MD5 引用的：替换后只改哈希，裸哈希保持裸哈希，带扩展名的引用才跟着换成新扩展名；
 - 普通 RED JSON 中精确的 MD5/SHA-256 图片引用更新；
 - 普通 RED 重新封包前后长度比较；
 - 加密 `RED\\x10` 的明文图片帧扫描（旧版 Worker 的兼容路径）。

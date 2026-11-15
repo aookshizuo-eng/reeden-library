@@ -24,6 +24,8 @@ Android APK 加载 `https://aookshizuo-eng.github.io/reeden-library/`，它来�
 
 免费模式的压缩仍由浏览器执行：Cloudflare Workers 免费运行时没有画布（`createImageBitmap` / `OffscreenCanvas`），CPU 也只有 10ms，所以图片重压缩不可能搬到云端。队列本身在 R2，关掉页面不会丢，换设备或重开页面会自动继续；其中一条 `running` 任务若因关页中断，会在空闲两分钟后被下一台打开的设备接管，避免两台设备同时处理同一批。
 
+压缩方案有三档，导入页「RED 图片压缩」里可选：「最高性价比」保留原尺寸、94% 画质 WebP；「最大压缩」把底栏限制到 384 px、启动图与阅读背景 1920 px、其余静态图 1600 px，用 90% 画质 WebP，并让底栏在无损与有损结果里取更小的一张；「自定义」自己填质量和长边上限。PNG/JPEG 现在会真正转成 WebP（早期版本因为编码入口判断写错，大图其实只是被重新编码成原格式，整包只省三成左右；修正后 PNG/JPEG 主题通常能省 70%–90%）。动图 GIF 用 `omggif` 重新量化：保留尺寸、帧数、延时与 disposal，只把颜色合并到 64/96/128 色，重新编码不比原来小时保留原字节；动画 WebP、APNG 和九宫格资源仍原样保留。勾选主题后，导入页会按包里静态图和动图各占多少给出预计大小区间。
+
 ## 免费 Worker
 
 `pages/worker-api.js`（由 `pages/_worker.js` 挂载，R2 绑定 `R2_ASSETS`）是 Cloudflare Pages 正在使用的同步接口；`worker/worker.js` 是同一实现的可单独部署入口（R2 绑定 `ASSETS`）。接口包含内容寻址对象读写、共享对象安全的删除（`DELETE /api/objects/staging/<sha>.<ext>` 只允许删暂存副本，库内对象走记录删除）、分类更新、持久化任务（`/api/jobs`）、加密目录 `/api/private/directory`、前缀重封 `/api/private/seal`、兼容旧客户端的 `/api/private/repack`，可选的原包备份 `/api/backup/123`、只读连接校验 `/api/backup/123/verify`、只读备份清单 `/api/backup/123/list`，以及流式批量下载 `/api/download?kind=font&ids=...`（`&probe=1` 只返回文件清单，不读取对象字节）。Worker 不持有 123 会话，浏览器也拿不到服务端私有格式密钥。
