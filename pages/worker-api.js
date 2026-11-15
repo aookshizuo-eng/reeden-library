@@ -689,6 +689,8 @@ async function updateRecordClassification(request, env, kind, id) {
         author: normalizeAssetClassification(payload.author),
         style: normalizeAssetClassification(payload.style),
         tags: normalizeAssetTags(payload.tags),
+        // 主题分类：词表在客户端可增删，记录里只存这个主题实际用到的标签。
+        categories: normalizeAssetTags(payload.categories ?? record.categories).map((item) => item.slice(0, 24)),
         updated_at: new Date().toISOString(),
       };
       const bytes = new TextEncoder().encode(JSON.stringify(updated));

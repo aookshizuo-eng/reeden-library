@@ -163,6 +163,40 @@ h3 { font-size: 14.5px; line-height: 1.35; margin-bottom: 4px; font-weight: 600;
 .section-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .review-count { min-width: 24px; height: 24px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); border-radius: 999px; font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .review-list, .theme-list, .font-list { display: grid; gap: 12px; }
+/* 待处理：字体和收藏在确认前只占一行，勾选后与主题一起上传 */
+/* 主题分类：卡片上只留极小色块标签，编辑都在细节弹窗里 */
+.theme-categories { display: inline-flex; gap: 4px; flex-wrap: wrap; margin-left: 6px; }
+.theme-categories em {
+  font-style: normal; font-size: 9.5px; letter-spacing: .04em; padding: 1px 5px;
+  border-radius: 999px; background: var(--accent-soft); color: var(--accent);
+}
+.theme-category-editor { margin: 14px 0 4px; padding-top: 12px; border-top: 1px solid var(--rule); display: grid; gap: 8px; }
+.theme-category-chips, .theme-category-suggest, .theme-category-vocabulary { display: flex; flex-wrap: wrap; gap: 6px; }
+.category-chip, .category-suggest {
+  display: inline-flex; align-items: center; gap: 4px; padding: 4px 9px;
+  border: 1px solid var(--border); border-radius: 999px; background: var(--surface);
+  color: var(--text); font-size: 11.5px; cursor: pointer;
+}
+.category-chip span { color: var(--faint); font-size: 12px; }
+.category-chip.is-static { cursor: default; }
+.category-chip.is-static button { border: 0; background: none; color: var(--faint); font-size: 12px; cursor: pointer; padding: 0 0 0 2px; }
+.theme-category-add { display: flex; gap: 8px; align-items: center; }
+.theme-category-add input {
+  flex: 1; min-width: 0; padding: 6px 9px; font-size: 12px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text);
+}
+.theme-category-manage summary { cursor: pointer; font-size: 11.5px; color: var(--muted); }
+.pending-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.pending-card {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  border: 1px solid var(--rule); border-radius: 12px; background: var(--surface);
+}
+.pending-card .item-heading { display: flex; align-items: center; gap: 9px; min-width: 0; margin: 0; flex: 1; }
+.pending-card strong { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pending-card .badge { flex: none; }
+.pending-card .pending-size { flex: none; color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+.pending-card .text-button { flex: none; font-size: 11px; }
+
 .asset-list { display: grid; gap: 14px; }
 .asset-library-list { grid-template-columns: repeat(auto-fill, minmax(172px, 1fr)); align-items: start; gap: 10px; }
 .asset-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 0 0 14px; }
@@ -628,6 +662,8 @@ button:disabled { cursor: not-allowed; opacity: .5; }
   .mobile-more button:active { background: var(--raised); }
   .more-hint { margin: 0; padding: 6px 12px 4px; color: var(--faint); font-size: 11.5px; }
   .toast { bottom: calc(80px + env(safe-area-inset-bottom)); }
+  .pending-card { padding: 9px 10px; gap: 8px; }
+  .pending-card .pending-size { display: none; }
   /* 网页登录是 123 备份的主入口，占满一行并给足触控高度 */
   .web-login-block button { justify-self: stretch; width: 100%; min-height: 46px; }
   .topbar { position: fixed; top: 0; left: 0; right: 0; height: 54px; z-index: 15; background: var(--surface); border-bottom: 1px solid var(--rule); padding: 0 12px; gap: 8px; }

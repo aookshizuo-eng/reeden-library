@@ -141,7 +141,7 @@ function requestHeaders(headers = {}) {
   if (apiBase && syncToken) result.set("Authorization", `Bearer ${syncToken}`);
   return result;
 }
-const state = { themes: [], fonts: [], assets: [], review: [], jobs: [], activeView: "import", themeDensity: "grid", importKind: "theme", themeSearch: "", themeAuthor: "all", assetFilter: "all", assetSearch: "", fontSearch: "", fontFilter: "all", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs"), importAssetIds: readSessionIds("reeden-import-assets") };
+const state = { themes: [], fonts: [], assets: [], review: [], pending: [], jobs: [], activeView: "import", themeDensity: "grid", importKind: "theme", themeSearch: "", themeAuthor: "all", themeCategory: "all", assetFilter: "all", assetSearch: "", fontSearch: "", fontFilter: "all", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs"), importAssetIds: readSessionIds("reeden-import-assets") };
 const selections = { review: new Set(), theme: new Set(), font: new Set(), asset: new Set() };
 const loadedFontFaces = new Set();
 const BROWSER_TASK_CONCURRENCY = 3;
@@ -1095,9 +1095,13 @@ async function composeThemePreviewBlob(entries, codec) {
     // metadata roles are retained when available, and the shape-based signal
     // fills only the missing shelf/reader bindings.
     const shelfBackgrounds = tallPortraits.filter(item => !splash || item.index > splash.index);
-    shelf = shelfBackgrounds[0] || namedShelf || null;
+    // 只有一张竖长图、又没有启动图时，它更可能是阅读页背景而不是书架背景：
+    // 纯阅读主题就是这么打包的（只有阅读背景 + 高亮图）。误判成书架会让右侧
+    // 书架面板显示一张被裁掉的阅读页，所以这种歧义情况一律当作 reader。
+    const singlePortrait = shelfBackgrounds.length === 1 && !splash;
+    shelf = singlePortrait ? null : (shelfBackgrounds[0] || namedShelf || null);
     const readerBackgrounds = shelfBackgrounds.filter(item => item !== shelf);
-    reader = readerBackgrounds[readerBackgrounds.length - 1] || reader || images.find(item => item.role === "reader") || images.find(item => item.mime === "image/png" && item.width >= 1000 && item.aspect < .7) || null;
+    reader = (singlePortrait ? shelfBackgrounds[0] : null) || readerBackgrounds[readerBackgrounds.length - 1] || reader || images.find(item => item.role === "reader") || images.find(item => item.mime === "image/png" && item.width >= 1000 && item.aspect < .7) || null;
     carousel = images.find(item => item.role === "carousel") || null;
     const coverLimit = splash ? splash.index : (shelfBackgrounds[0]?.index ?? images.length);
     covers = images.filter(item => item.index < coverLimit && item !== splash && item !== shelf && item !== reader && item.role !== "card" && item.width <= 1100 && item.height <= 1600).slice(0, 6);
@@ -1132,6 +1136,51 @@ async function composeThemePreviewBlob(entries, codec) {
       context.drawImage(bitmap, dx, dy, drawWidth, drawHeight); context.restore();
     } finally { bitmap.close?.(); }
   };
+  // 取一次 32x32 缩略统计平均色：亮度、饱和度、冷暖决定自动分类。
+  const sampleTone = () => {
+    try {
+      const sample = document.createElement("canvas");
+      sample.width = 32; sample.height = 32;
+      const sampleContext = sample.getContext("2d", {willReadFrequently: true});
+      if (!sampleContext) return null;
+      sampleContext.drawImage(canvas, 0, 0, 32, 32);
+      const data = sampleContext.getImageData(0, 0, 32, 32).data;
+      let r = 0, g = 0, b = 0;
+      for (let index = 0; index < data.length; index += 4) { r += data[index]; g += data[index + 1]; b += data[index + 2]; }
+      const pixels = data.length / 4;
+      r /= pixels; g /= pixels; b /= pixels;
+      const max = Math.max(r, g, b), min = Math.min(r, g, b);
+      return {light: (0.299 * r + 0.587 * g + 0.114 * b) / 255, saturation: max ? (max - min) / max : 0, warm: r >= b + 8};
+    } catch { return null; }
+  };
+  const largestImage = images.slice().sort((a, b) => (b.width * b.height) - (a.width * a.height))[0] || null;
+  const libraryArt = Boolean(splash || shelf || card || carousel || (covers && covers.length));
+  if (!libraryArt) {
+    // 阅读主题 / 纯高亮主题：包里没有启动图、书架背景和封面。旧逻辑会在左侧画
+    // 「无可用阅读页」、右侧留白。这里改成整张缩略图就用面积最大的那张（通常是
+    // 阅读页背景），其余高亮图缩成底部一排色块，能直接看出主题观感。
+    const hero = reader || largestImage;
+    if (!hero) return null;
+    const extras = images.filter(item => item !== hero).slice(0, 5);
+    const stripHeight = extras.length ? 168 : 0;
+    context.fillStyle = "#e9e7df"; context.fillRect(0, 0, 1000, 1000);
+    await drawFit(hero, 0, 0, 1000, 1000 - stripHeight, "cover");
+    if (extras.length) {
+      context.fillStyle = "rgba(24,21,17,.72)"; context.fillRect(0, 1000 - stripHeight, 1000, stripHeight);
+      const thumbWidth = 150, thumbHeight = 120, gap = 14;
+      const startX = (1000 - (extras.length * thumbWidth + (extras.length - 1) * gap)) / 2;
+      for (let index = 0; index < extras.length; index++) {
+        const x = startX + index * (thumbWidth + gap);
+        await drawFit(extras[index], x, 1000 - stripHeight + 24, thumbWidth, thumbHeight, "cover");
+      }
+    }
+    const tone = sampleTone();
+    if (tone) { try { entries.previewTone = tone; } catch {} }
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", .86));
+    try { entries.previewKind = reader ? "reader" : "single"; } catch {}
+    entries.previewCategory = themeToneCategory(tone, {kind: entries.previewKind});
+    return blob;
+  }
   // Keep the thumbnail square, but let the actual theme artwork dominate it:
   // a real splash goes left when present; otherwise use a real reader page.
   context.fillStyle = "#e9e7df"; context.fillRect(16, 16, 968, 968);
@@ -1176,8 +1225,11 @@ async function composeThemePreviewBlob(entries, codec) {
       await drawFit(covers[index], x, y, cardWidth, cardHeight, "cover");
     }
   }
+  const finalTone = sampleTone();
+  if (finalTone) { try { entries.previewTone = finalTone; } catch {} }
   const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", .86));
   try { entries.previewKind = splash ? "shelf_and_splash" : "shelf_and_reader"; } catch {}
+  entries.previewCategory = themeToneCategory(finalTone, {kind: entries.previewKind});
   return blob;
 }
 /**
@@ -1496,18 +1548,58 @@ function renderCompressionResults() {
     return `<article class="compression-result"><div><strong>${escapeHtml(theme.name || theme.source_name || "主题")}</strong><p>${escapeHtml(compressionSummary(theme))}</p><p>${escapeHtml(syncLabel(theme))}</p></div>${url ? `<a class="download-link" href="${escapeHtml(url)}">${requiresOriginalPreservation(theme) ? "下载原样主题" : "下载压缩 RED"}</a>` : ""}</article>`;
   }).join("");
 }
+/* 主题分类 ---------------------------------------------------------------
+   自动分类不猜「这是什么类型的图」——那需要人工标注的数据集；改成读预览图的
+   整体色调（亮度 / 饱和度 / 冷暖），这是能可靠算出来的，而且和用户挑主题的
+   直觉一致。类别词表存在本地，可以随时增删；每个主题的分类写在记录的
+   categories 字段里，跟着同步走。 */
+const THEME_CATEGORY_KEY = "reeden-theme-categories";
+const DEFAULT_THEME_CATEGORIES = ["暖色", "冷色", "暗色", "明亮", "低饱和", "阅读主题"];
+function themeCategoryVocabulary() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(THEME_CATEGORY_KEY) || "null");
+    if (Array.isArray(raw)) return raw.map(item => String(item || "").trim()).filter(Boolean);
+  } catch {}
+  return [...DEFAULT_THEME_CATEGORIES];
+}
+function saveThemeCategoryVocabulary(list) {
+  const cleaned = [...new Set((list || []).map(item => String(item || "").trim()).filter(Boolean))].slice(0, 40);
+  try { localStorage.setItem(THEME_CATEGORY_KEY, JSON.stringify(cleaned)); } catch {}
+  return cleaned;
+}
+function themeToneCategory(tone, previewDetails = {}) {
+  if (!tone) return previewDetails.kind === "reader" ? "阅读主题" : "";
+  const light = Number(tone.light) || 0, saturation = Number(tone.saturation) || 0, warm = Boolean(tone.warm);
+  if (light < .32) return "暗色";
+  if (saturation < .14) return light > .78 ? "明亮" : "低饱和";
+  return warm ? "暖色" : "冷色";
+}
+function themeCategoryList(theme) {
+  const own = Array.isArray(theme?.categories) ? theme.categories : [];
+  const fallback = theme?.auto_category ? [theme.auto_category] : [];
+  return [...new Set([...own, ...fallback].map(item => String(item || "").trim()).filter(Boolean))];
+}
 function preferredPreview(light, dark) {
   return {url: light || dark || "", label: light ? "日间" : dark ? "夜间补位" : "暂无预览"};
 }
 function previewCompositionKind(entries) {
   if (entries?.previewKind) return entries.previewKind;
-  return (entries || []).some(entry => (entry?.role || previewRole(entry?.name)) === "splash") ? "shelf_and_splash" : "shelf_and_reader";
+  const roles = (entries || []).map(entry => entry?.role || previewRole(entry?.name));
+  if (roles.some(role => role === "splash")) return "shelf_and_splash";
+  // 没有启动图、书架、封面、轮播的包就是阅读主题或纯高亮主题，标签不要再说
+  // 「书架 + 阅读页」，否则用户会以为漏读了书架素材。
+  if (!roles.some(role => ["shelf", "cover", "carousel", "card"].includes(role))) {
+    return roles.includes("reader") ? "reader" : "single";
+  }
+  return "shelf_and_reader";
 }
 function previewKind(details = {}) {
   if (details?.kind === "shelf_and_splash") return "书架 + 启动";
   if (details?.kind === "shelf_and_reader") return "书架 + 阅读页";
   if (details?.kind === "shelf") return "书架模拟";
   if (details?.kind === "splash") return "启动图";
+  if (details?.kind === "reader") return "阅读页";
+  if (details?.kind === "single") return "主题图片";
   return "主题预览";
 }
 function previewImage(url, alt, className = "", details = {}) {
@@ -1663,13 +1755,14 @@ function finishTransferProgress(message, failed = transferState.failed) {
 function r2Enabled() { return browserSyncEnabled() || state.storage?.library?.provider === "cloudflare_r2"; }
 function autoSyncEnabled() { return browserSyncEnabled() || (r2Enabled() && state.storage?.library?.autoSync); }
 function savedToCloud(record) { return record.saved_to_cloud === true || (record.sync_status?.library === "synced" && record.local_status === "cloud_only" && !record.sync_error); }
+function pendingIds() { return state.pending.map(item => item.id); }
 function eligibleIds(kind) {
-  if (kind === "review") return state.review.filter(item => !isAssetBusy("staging", item.staging_id)).map(item => item.staging_id);
+  if (kind === "review") return [...state.review.filter(item => !isAssetBusy("staging", item.staging_id)).map(item => item.staging_id), ...pendingIds()];
   const collection = kind === "theme" ? state.themes : kind === "font" ? state.fonts : state.assets;
   return collection.filter(item => !savedToCloud(item) && !isAssetBusy(kind, item.id)).map(item => item.id);
 }
 function selectableIds(kind) {
-  if (kind === "review") return state.review.filter(item => !isAssetBusy("staging", item.staging_id)).map(item => item.staging_id);
+  if (kind === "review") return [...state.review.filter(item => !isAssetBusy("staging", item.staging_id)).map(item => item.staging_id), ...pendingIds()];
   const collection = kind === "theme" ? state.themes : kind === "font" ? state.fonts : state.assets;
   return collection.filter(item => !isAssetBusy(kind, item.id)).map(item => item.id);
 }
@@ -1709,11 +1802,18 @@ function updateBulkControls() {
     if (bar) bar.classList.toggle("has-selection", count > 0);
   });
   const chosenReview = state.review.filter(item => selections.review.has(item.staging_id));
+  const chosenPending = state.pending.filter(item => selections.review.has(item.id));
+  const pendingFonts = chosenPending.filter(item => item.kind === "font").length;
+  const pendingAssets = chosenPending.length - pendingFonts;
+  const pendingText = [pendingFonts ? `${pendingFonts} 个字体` : "", pendingAssets ? `${pendingAssets} 个收藏` : ""].filter(Boolean).join("、");
   const privateCount = chosenReview.filter(item => !browserPrivateCompressionEnabled() && requiresOriginalPreservation(item.info)).length;
   const normalCount = chosenReview.length - privateCount;
   const onlyPrivate = privateCount > 0 && normalCount === 0;
   const syncSuffix = browserSyncEnabled() ? "、上传 R2" : autoSyncEnabled() ? "、同步" : "";
-  $("#commitSelectedThemes").textContent = onlyPrivate ? `确认所选并原样保存${syncSuffix}` : `确认所选并压缩${syncSuffix || "保存"}`;
+  const commitLabel = !chosenReview.length && pendingText
+    ? `确认并上传（${pendingText}）`
+    : onlyPrivate ? `确认所选并原样保存${syncSuffix}` : `确认所选并压缩${syncSuffix || "保存"}`;
+  $("#commitSelectedThemes").textContent = pendingText && chosenReview.length ? `${commitLabel} + ${pendingText}` : commitLabel;
   const basePlan = chosenReview.length ? `${chosenReview.length} 个主题将压缩并重新封包${privateCount ? `；${privateCount} 个当前设备无法认证的加密包先保留原包` : ""}。处理完成后显示压缩前后大小。` : "全选或勾选主题后确认，开始处理。加密主题会先压缩包内图片，再由同步 Worker 认证清单并重新封包。";
   $("#compressionPlan").textContent = [basePlan, compressionEstimate(chosenReview)].filter(Boolean).join(" ");
   syncCompressionControls();
@@ -1895,6 +1995,45 @@ function themeDetailRow(label, value) {
   if (!value) return "";
   return `<div class="detail-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`;
 }
+function renderThemeCategoryFilter() {
+  const select = $("#themeCategoryFilter");
+  if (!select) return;
+  const counts = new Map();
+  state.themes.forEach(theme => themeCategoryList(theme).forEach(category => counts.set(category, (counts.get(category) || 0) + 1)));
+  const vocabulary = [...new Set([...themeCategoryVocabulary(), ...counts.keys()])];
+  if (state.themeCategory !== "all" && !counts.has(state.themeCategory)) state.themeCategory = "all";
+  select.innerHTML = `<option value="all">全部类别 (${state.themes.length})</option>` + vocabulary
+    .filter(category => counts.has(category))
+    .map(category => `<option value="${escapeHtml(category)}">${escapeHtml(category)} (${counts.get(category)})</option>`).join("");
+  select.value = state.themeCategory;
+}
+function themeCategoryEditorMarkup(theme) {
+  const own = themeCategoryList(theme);
+  const vocabulary = themeCategoryVocabulary();
+  return `<div class="theme-category-editor" data-theme-categories="${escapeHtml(theme.id)}">
+    <div class="theme-category-chips">${own.length ? own.map(category => `<button class="category-chip" type="button" data-category-remove="${escapeHtml(category)}" aria-label="移除类别 ${escapeHtml(category)}">${escapeHtml(category)}<span aria-hidden="true">×</span></button>`).join("") : `<span class="field-help">还没有分类，点下面的常用类别或自己起一个。</span>`}</div>
+    <div class="theme-category-add"><input type="text" maxlength="16" placeholder="新类别，例如 深色护眼" aria-label="新建主题类别" /><button class="text-button" type="button" data-category-add>添加</button></div>
+    <div class="theme-category-suggest">${vocabulary.filter(category => !own.includes(category)).map(category => `<button class="category-suggest" type="button" data-category-suggest="${escapeHtml(category)}">${escapeHtml(category)}</button>`).join("")}</div>
+    <details class="theme-category-manage"><summary>管理类别词表</summary><div class="theme-category-vocabulary">${vocabulary.map(category => `<span class="category-chip is-static">${escapeHtml(category)}<button type="button" data-category-forget="${escapeHtml(category)}" aria-label="从词表删除 ${escapeHtml(category)}">×</button></span>`).join("")}</div><p class="field-help">删除词表条目只会让它不再出现在建议里，已归类主题的标签保留。</p></details>
+  </div>`;
+}
+async function saveThemeCategories(themeId, categories) {
+  const theme = state.themes.find(item => String(item.id) === String(themeId));
+  if (!theme || state.operation) return;
+  setOperation("theme-categories");
+  try {
+    const result = await api(`/api/themes/${encodeURIComponent(themeId)}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ author: theme.author === "作者未记录" ? "" : theme.author, style: theme.style || "", tags: theme.tags || [], categories }),
+    });
+    Object.assign(theme, result.item || {}, { categories });
+    if (browserSyncEnabled()) invalidateBrowserLibraryRecords();
+    renderThemes();
+    if ($("#themeDialog").open) openThemeDialog(themeId);
+    toast("分类已保存");
+  } catch (error) { toast(`分类保存失败：${error.message}`); }
+  finally { setOperation(""); }
+}
 function openThemeDialog(id) {
   const theme = state.themes.find(item => String(item.id) === String(id));
   const dialog = $("#themeDialog");
@@ -1914,13 +2053,45 @@ function openThemeDialog(id) {
       ${themeDetailRow("123 备份", backup)}
       ${themeDetailRow("资源角色", roles.join(" · "))}
       ${themeDetailRow("源文件", theme.source_name || theme.file_name || "")}
-    </dl>${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}<div class="theme-dialog-actions">
+      ${themeDetailRow("类别", themeCategoryList(theme).join(" · ") || "未分类")}
+    </dl>${themeCategoryEditorMarkup(theme)}${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}<div class="theme-dialog-actions">
       ${themeFile ? `<a class="secondary-button" href="${escapeHtml(assetUrl(themeFile))}">下载主题</a>` : ""}
       ${theme.original_url ? `<a class="secondary-button" href="${escapeHtml(assetUrl(theme.original_url))}">下载原始包</a>` : ""}
       ${themeFile && !savedToCloud(theme) ? `<button class="primary-button" id="themeDialogSync" type="button">同步到 R2</button>` : ""}
       <button class="text-button" id="themeDialogRebuild" type="button">更新预览</button>
       <button class="text-button danger-text" id="themeDialogDelete" type="button">删除</button>
     </div></div>`;
+  const categoryEditor = $("#themeDialogBody .theme-category-editor");
+  if (categoryEditor) {
+    const current = () => themeCategoryList(theme);
+    categoryEditor.querySelector("[data-category-add]")?.addEventListener("click", () => {
+      const input = categoryEditor.querySelector(".theme-category-add input");
+      const value = String(input?.value || "").trim();
+      if (!value) { toast("先输入类别名"); return; }
+      if (current().includes(value)) { toast("已经有这个类别"); return; }
+      const vocabulary = themeCategoryVocabulary();
+      if (!vocabulary.includes(value)) saveThemeCategoryVocabulary([...vocabulary, value]);
+      saveThemeCategories(theme.id, [...current(), value]);
+    });
+    categoryEditor.querySelector(".theme-category-add input")?.addEventListener("keydown", event => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      categoryEditor.querySelector("[data-category-add]")?.click();
+    });
+    categoryEditor.querySelectorAll("[data-category-remove]").forEach(button => button.addEventListener("click", () => {
+      saveThemeCategories(theme.id, current().filter(category => category !== button.dataset.categoryRemove));
+    }));
+    categoryEditor.querySelectorAll("[data-category-suggest]").forEach(button => button.addEventListener("click", () => {
+      const value = button.dataset.categorySuggest;
+      if (current().includes(value)) return;
+      saveThemeCategories(theme.id, [...current(), value]);
+    }));
+    categoryEditor.querySelectorAll("[data-category-forget]").forEach(button => button.addEventListener("click", () => {
+      saveThemeCategoryVocabulary(themeCategoryVocabulary().filter(category => category !== button.dataset.categoryForget));
+      openThemeDialog(theme.id);
+      toast("已从类别词表移除");
+    }));
+  }
   $("#themeDialogSync")?.addEventListener("click", () => { dialog.close(); syncTheme(theme.id); });
   $("#themeDialogRebuild")?.addEventListener("click", () => { dialog.close(); rebuildPreview(theme.id); });
   $("#themeDialogDelete")?.addEventListener("click", () => { dialog.close(); deleteSelectedRecords("theme", [theme.id]); });
@@ -1959,7 +2130,10 @@ function restoreThemeDensity() {
 function renderThemes() {
   const list = $("#themeList");
   renderThemeAuthorFilter();
-  const visible = state.themes.filter(theme => themeMatchesSearch(theme) && (state.themeAuthor === "all" || themeAuthorLabel(theme) === state.themeAuthor));
+  renderThemeCategoryFilter();
+  const visible = state.themes.filter(theme => themeMatchesSearch(theme)
+    && (state.themeAuthor === "all" || themeAuthorLabel(theme) === state.themeAuthor)
+    && (state.themeCategory === "all" || themeCategoryList(theme).includes(state.themeCategory)));
   $("#themeCount").textContent = visible.length === state.themes.length ? `${state.themes.length} 个主题` : `${visible.length} / ${state.themes.length} 个主题`;
   $("#themeEmpty").hidden = visible.length > 0;
   $("#themeEmpty h3").textContent = state.themes.length && !visible.length ? "没有匹配的主题" : "还没有已收录主题";
@@ -1974,7 +2148,7 @@ function renderThemes() {
     // 都收进点击后打开的主题细节弹窗，跟参考站的卡片一样安静。
     return `<article class="theme-card" data-theme-id="${escapeHtml(theme.id)}">
       <div class="theme-preview">${previewImage(preview.url, `${theme.name} ${preview.label} · ${previewKind(theme.preview_details)}`, "", theme.preview_details)}<span class="preview-caption">${escapeHtml(previewKind(theme.preview_details))}</span><button class="theme-more" type="button" data-theme-open="${escapeHtml(theme.id)}" aria-label="查看 ${escapeHtml(theme.name || "未命名主题")} 的主题细节">⋯</button></div>
-      <div class="theme-info"><div class="item-heading">${selectInput("theme", theme.id, `主题 ${theme.name || "未命名主题"}`, isAssetBusy("theme", theme.id))}<button class="theme-title theme-open" type="button" data-theme-open="${escapeHtml(theme.id)}">${escapeHtml(theme.name || "未命名主题")}</button></div><div class="theme-meta"><span class="theme-author">${escapeHtml(themeAuthorLabel(theme))}</span>${roleText ? `<span class="theme-roles"> · ${escapeHtml(roleText)}</span>` : ""}</div><p>${compressionText}</p>${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === "string" ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join("；"))}</p>` : ""}</div>
+      <div class="theme-info"><div class="item-heading">${selectInput("theme", theme.id, `主题 ${theme.name || "未命名主题"}`, isAssetBusy("theme", theme.id))}<button class="theme-title theme-open" type="button" data-theme-open="${escapeHtml(theme.id)}">${escapeHtml(theme.name || "未命名主题")}</button></div><div class="theme-meta"><span class="theme-author">${escapeHtml(themeAuthorLabel(theme))}</span>${themeCategoryList(theme).length ? `<span class="theme-categories">${themeCategoryList(theme).map(category => `<em>${escapeHtml(category)}</em>`).join("")}</span>` : ""}${roleText ? `<span class="theme-roles"> · ${escapeHtml(roleText)}</span>` : ""}</div><p>${compressionText}</p>${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === "string" ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join("；"))}</p>` : ""}</div>
     </article>`;
   }).join("");
   $$("[data-theme-open]").forEach(button => button.addEventListener("click", event => { event.stopPropagation(); openThemeDialog(button.dataset.themeOpen); }));
@@ -1988,10 +2162,75 @@ function renderThemes() {
   renderCompressionResults();
   updateBulkControls();
 }
+/* 字体和收藏也走「待处理」：选完不立刻上传，和主题一起在待确认区勾选，
+   点一次按钮统一上传。上传阶段沿用原来的 importFonts / importAssets，
+   只是把清理本地文件的弹窗挪到整批结束后合并成一次。 */
+const deferredCleanup = [];
+function stagePendingFiles(files, kind) {
+  const label = kind === "font" ? "字体" : "收藏";
+  const accepted = kind === "font"
+    ? [...(files || [])].filter(file => /\.(ttf|otf|woff2?)$/i.test(file.name || ""))
+    : [...(files || [])].filter(file => ["svg", "html", "htm"].includes(assetExtension(file)));
+  if (!accepted.length) { toast(kind === "font" ? "请选择 TTF、OTF、WOFF 或 WOFF2 文件" : "请选择 SVG、HTML 或 HTM 文件"); return; }
+  let added = 0;
+  for (const file of accepted) {
+    const duplicate = state.pending.some(item => item.kind === kind && item.name === file.name && item.size === file.size);
+    if (duplicate) continue;
+    const id = `pending-${kind}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    state.pending.push({id, kind, file, name: file.name || `${label}文件`, size: Number(file.size) || 0});
+    // 手动选进来的文件默认勾上：用户选它就是为了上传，不再要求二次勾选。
+    selections.review.add(id);
+    added++;
+  }
+  renderReview();
+  toast(added ? `已加入待处理：${added} 个${label}，勾选后统一上传` : `这些${label}已在待处理列表中`);
+}
+function dropPending(items) {
+  const ids = new Set(items.map(item => item.id));
+  state.pending = state.pending.filter(item => !ids.has(item.id));
+  ids.forEach(id => selections.review.delete(id));
+  renderReview();
+}
+function renderPending() {
+  const list = $("#pendingList");
+  if (!list) return;
+  list.hidden = state.pending.length === 0;
+  list.innerHTML = state.pending.map(item => {
+    const label = item.kind === "font" ? "字体" : "收藏";
+    return `<article class="pending-card" data-pending-id="${escapeHtml(item.id)}"><label class="item-heading">${selectInput("review", item.id, `${label} ${item.name}`)}<strong>${escapeHtml(item.name)}</strong></label><span class="badge">${label}</span><span class="pending-size">${formatBytes(item.size)}</span><button class="text-button" type="button" data-pending-remove="${escapeHtml(item.id)}">移除</button></article>`;
+  }).join("");
+  $$("[data-pending-remove]").forEach(button => button.addEventListener("click", () => {
+    dropPending(state.pending.filter(item => item.id === button.dataset.pendingRemove));
+    toast("已移出待处理");
+  }));
+}
+async function commitSelection() {
+  if (state.operation || storageDirty) return;
+  const themeIds = state.review.filter(item => selections.review.has(item.staging_id)).map(item => item.staging_id);
+  const chosen = state.pending.filter(item => selections.review.has(item.id));
+  if (!themeIds.length && !chosen.length) return;
+  deferredCleanup.length = 0;
+  try {
+    if (themeIds.length) await commitThemes(themeIds);
+    const fonts = chosen.filter(item => item.kind === "font");
+    const assets = chosen.filter(item => item.kind === "asset");
+    if (fonts.length) { await importFonts(fonts.map(item => item.file), {deferCleanup: true}); dropPending(fonts); }
+    if (assets.length) { await importAssets(assets.map(item => item.file), {deferCleanup: true}); dropPending(assets); }
+  } finally {
+    if (deferredCleanup.length) {
+      const files = [...new Set(deferredCleanup)];
+      deferredCleanup.length = 0;
+      offerLocalCleanup(files, `本批 ${files.length} 个文件已上传成功，可以删掉本地副本释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
+    }
+  }
+}
 function renderReview() {
   const area = $("#reviewArea");
-  area.hidden = state.review.length === 0;
-  $("#reviewCount").textContent = String(state.review.length);
+  const pendingTotal = state.review.length + state.pending.length;
+  area.hidden = pendingTotal === 0;
+  $("#reviewCount").textContent = String(pendingTotal);
+  // 待处理区只放「选了但还没上传」的字体和收藏，主题有自己的压缩选项卡片。
+  $("#reviewToolbar").hidden = pendingTotal === 0;
   $("#reviewList").innerHTML = state.review.map(item => {
     const info = item.info;
     const duplicate = item.duplicates?.length > 0;
@@ -2011,6 +2250,7 @@ function renderReview() {
   }).join("");
   $$(".commit-theme").forEach(button => button.addEventListener("click", () => commitTheme(button.dataset.id)));
   $$(".discard-review").forEach(button => button.addEventListener("click", () => discardReview(button.dataset.id)));
+  renderPending();
   updateBulkControls();
 }
 function renderFonts() {
@@ -2483,7 +2723,9 @@ async function analyzeFiles(files) {
           if (preview) previewUrl = URL.createObjectURL(preview);
           previewDetails = { ...previewDetails, kind: previewCompositionKind(entries) };
         }
-        const info = { ...identity, source_name: file.name, bytes: raw.length, container_format: inspection.format, compression_supported: inspection.compressionSupported !== false, preview_details: previewDetails };
+        const tone = entries.previewTone || null;
+        const autoCategory = themeToneCategory(tone, previewDetails);
+        const info = { ...identity, source_name: file.name, bytes: raw.length, container_format: inspection.format, compression_supported: inspection.compressionSupported !== false, preview_details: previewDetails, preview_tone: tone, auto_category: autoCategory };
         const duplicateRecords = browserDuplicateCandidates(identity.name, identity.author);
         return { staging_id: `browser-${crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`}`, file, bytes: raw, inspection, info, duplicates: duplicateRecords.map(record => ({ ...record })), preview_urls: { light: previewUrl, dark: "" } };
       });
@@ -2578,6 +2820,7 @@ async function commitThemes(ids = [...selections.review]) {
             kind: "theme", id: `theme-${assetSha.slice(0, 16)}`, name: item.info.name || item.info.source_name, author: item.info.author || "作者未记录",
             sha256: assetSha, original_sha256: originalSha, original_size: raw.length, compressed_size: compressedBytes.length,
             compression_supported: true, status: "browser_compressed", source_name: item.info.source_name,
+            categories: [...new Set([item.info.auto_category, ...(item.info.categories || [])].map(value => String(value || "").trim()).filter(Boolean))],
             compressed_url: compressedPath, library_url: compressedPath, preview_light_url: previewPath, preview_dark_url: "", preview_details: previewDetails,
             saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: "", original_url: originalPath,
             original_123: backup && !backup.error ? backup : null, original_123_error: backup?.error || ""
@@ -2850,7 +3093,7 @@ async function rebuildPreview(themeId) {
   } catch (error) { toast(error.message); }
   finally { setOperation(""); }
 }
-async function importFonts(files) {
+async function importFonts(files, options = {}) {
   if (state.operation) { toast("请等待当前批次处理完成"); return; }
   const valid = [...files].filter(file => /\.(ttf|otf|woff2?)$/i.test(file.name));
   if (!valid.length) { toast("请选择 TTF、OTF、WOFF 或 WOFF2 文件"); return; }
@@ -2920,7 +3163,8 @@ async function importFonts(files) {
       const succeededFiles = unique.filter(file => !failedFiles.has(file));
       const message = `已上传 ${added.length} 个字体，重复跳过 ${duplicates} 个${failures.length ? `，失败 ${failures.length} 个` : ""}。`;
       operationMessage(output, message, Boolean(failures.length)); toast(message);
-      offerLocalCleanup(succeededFiles, `本次 ${succeededFiles.length} 个字体已上传成功，可以删掉本地副本释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
+      if (options.deferCleanup) deferredCleanup.push(...succeededFiles);
+      else offerLocalCleanup(succeededFiles, `本次 ${succeededFiles.length} 个字体已上传成功，可以删掉本地副本释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
       return;
     }
     operationMessage(output, `查重完成，正在接收 ${unique.length} 个新字体，完成后交给后台…`);
@@ -2942,7 +3186,7 @@ function assetExtension(file) {
   const match = String(file?.name || "").toLowerCase().match(/\.([a-z0-9]+)$/);
   return match?.[1] === "htm" ? "html" : match?.[1] || "";
 }
-async function importAssets(files) {
+async function importAssets(files, options = {}) {
   if (state.operation) { toast("请等待当前批次处理完成"); return; }
   const valid = [...files].filter(file => ["svg", "html", "htm"].includes(assetExtension(file)));
   if (!valid.length) { toast("请选择 SVG、HTML 或 HTM 文件"); return; }
@@ -3014,7 +3258,8 @@ async function importAssets(files) {
       const succeededAssetFiles = unique.filter(item => !failedAssetFiles.has(item.file)).map(item => item.file);
       const message = `已上传 ${added.length} 个收藏，重复跳过 ${duplicates} 个${failures.length ? `，失败 ${failures.length} 个` : ""}。`;
       operationMessage(output, message, Boolean(failures.length)); toast(message);
-      offerLocalCleanup(succeededAssetFiles, `本次 ${succeededAssetFiles.length} 个收藏已上传成功，可以删掉本地副本释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
+      if (options.deferCleanup) deferredCleanup.push(...succeededAssetFiles);
+      else offerLocalCleanup(succeededAssetFiles, `本次 ${succeededAssetFiles.length} 个收藏已上传成功，可以删掉本地副本释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
       return;
     }
     operationMessage(output, `查重完成，正在接收 ${unique.length} 个新收藏…`);
@@ -3572,8 +3817,8 @@ async function importUnifiedFiles(fileList) {
   }
   operationMessage(status, `已识别 ${groups.theme.length} 个主题、${groups.font.length} 个字体、${groups.asset.length} 个收藏，正在依次处理…`);
   if (groups.theme.length) await analyzeFiles(groups.theme);
-  if (groups.font.length) await importFonts(groups.font);
-  if (groups.asset.length) await importAssets(groups.asset);
+  if (groups.font.length) stagePendingFiles(groups.font, "font");
+  if (groups.asset.length) stagePendingFiles(groups.asset, "asset");
   operationMessage(status, `本批已分流：${groups.theme.length} 个主题、${groups.font.length} 个字体、${groups.asset.length} 个收藏。${unsupported.length ? `已跳过不支持的文件：${unsupported.join("、")}` : ""}`, Boolean(unsupported.length));
 }
 // 从别的应用「分享」到 APK：原生把文件复制进 cache，并用 shouldInterceptRequest
@@ -3631,16 +3876,16 @@ $("#existingThemeFolderInput").addEventListener("change", async e => { await ind
 setupDropZone($("#themeDropZone"), analyzeFiles);
 $("#themeDropZone").addEventListener("click", () => { if (!state.operation) $("#themeInput").click(); });
 $("#chooseFonts").addEventListener("click", () => $("#fontInput").click());
-$("#chooseFontFolder").addEventListener("click", () => pickFolderWithAccess("fontFolderInput", importFonts));
-$("#fontInput").addEventListener("change", async e => { await importFonts(e.target.files); e.target.value = ""; });
-$("#fontFolderInput").addEventListener("change", async e => { await importFonts(e.target.files); e.target.value = ""; });
-setupDropZone($("#fontDropZone"), importFonts);
+$("#chooseFontFolder").addEventListener("click", () => pickFolderWithAccess("fontFolderInput", files => stagePendingFiles(files, "font")));
+$("#fontInput").addEventListener("change", async e => { stagePendingFiles(e.target.files, "font"); e.target.value = ""; });
+$("#fontFolderInput").addEventListener("change", async e => { stagePendingFiles(e.target.files, "font"); e.target.value = ""; });
+setupDropZone($("#fontDropZone"), files => stagePendingFiles(files, "font"));
 $("#fontDropZone").addEventListener("click", () => { if (!state.operation) $("#fontInput").click(); });
 $("#chooseAssets").addEventListener("click", () => $("#assetInput").click());
-$("#chooseAssetFolder").addEventListener("click", () => pickFolderWithAccess("assetFolderInput", importAssets));
-$("#assetInput").addEventListener("change", async e => { await importAssets(e.target.files); e.target.value = ""; });
-$("#assetFolderInput").addEventListener("change", async e => { await importAssets(e.target.files); e.target.value = ""; });
-setupDropZone($("#assetDropZone"), importAssets);
+$("#chooseAssetFolder").addEventListener("click", () => pickFolderWithAccess("assetFolderInput", files => stagePendingFiles(files, "asset")));
+$("#assetInput").addEventListener("change", async e => { stagePendingFiles(e.target.files, "asset"); e.target.value = ""; });
+$("#assetFolderInput").addEventListener("change", async e => { stagePendingFiles(e.target.files, "asset"); e.target.value = ""; });
+setupDropZone($("#assetDropZone"), files => stagePendingFiles(files, "asset"));
 $("#assetDropZone").addEventListener("click", () => { if (!state.operation) $("#assetInput").click(); });
 setupDropZone($("#unifiedDropZone"), importUnifiedFiles);
 $("#unifiedDropZone").addEventListener("click", () => { if (!state.operation) $("#unifiedInput").click(); });
@@ -3655,6 +3900,7 @@ $("#localCleanupEnabled").addEventListener("change", event => {
 });
 refreshCleanupHint();
 $("#refreshThemes").addEventListener("click", () => loadThemes(true));
+$("#themeCategoryFilter")?.addEventListener("change", event => { state.themeCategory = event.target.value; renderThemes(); });
 $("#themeSearchInput").addEventListener("input", event => { state.themeSearch = event.target.value; renderThemes(); });
 $("#themeAuthorFilter").addEventListener("change", event => { state.themeAuthor = event.target.value || "all"; renderThemes(); });
 $("#refreshFonts").addEventListener("click", () => loadFonts(true));
@@ -3664,7 +3910,7 @@ $("#selectAllReview").addEventListener("change", event => toggleAll("review", ev
 $("#selectAllThemes").addEventListener("change", event => toggleAll("theme", event.target.checked));
 $("#selectAllFonts").addEventListener("change", event => toggleAll("font", event.target.checked));
 $("#selectAllAssets").addEventListener("change", event => toggleAll("asset", event.target.checked));
-$("#commitSelectedThemes").addEventListener("click", () => commitThemes());
+$("#commitSelectedThemes").addEventListener("click", () => commitSelection());
 $("#syncSelectedThemes").addEventListener("click", () => syncSelectedAssets("theme"));
 $("#syncSelectedFonts").addEventListener("click", () => syncSelectedAssets("font"));
 $("#syncSelectedAssets")?.addEventListener("click", () => syncSelectedAssets("asset"));

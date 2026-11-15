@@ -61,8 +61,10 @@ public final class MainActivity extends Activity {
     private boolean fileChooserMulti = false;
     // Documents the user opened through this app's own chooser. The web layer may
     // only ask to delete these, matched by display name and size, so a stray call
-    // can never reach a file the user never picked here.
-    private final List<Uri> pickedUris = new ArrayList<>();
+    // can never reach a file the user never picked here. 按「名字@大小」累积：
+    // 以前每次选择都清空，批量导入后再统一删除时只剩最后一批能对上，表现就是
+    // 弹窗里列了 N 个文件却只删掉一个。
+    private final Map<String, Uri> pickedDocuments = new java.util.LinkedHashMap<>();
     private volatile String currentPageUrl = HOME_URL;
     // 从别的应用分享进来的文件：先复制到 cache，再让网页用同源 URL 读走。
     // 用 URL 而不是 base64 桥，是因为主题动辄 20 MB，base64 字符串会直接
@@ -437,10 +439,7 @@ public final class MainActivity extends Activity {
             return;
         }
         // 记下这次选择的文档，后面「上传后删除本地副本」要用它按名字+大小匹配。
-        synchronized (pickedUris) {
-            pickedUris.clear();
-            for (Uri uri : results) if (uri != null) pickedUris.add(uri);
-        }
+        rememberPickedDocuments(results);
         if (results.length > 1 || multiMode) {
             // 多选时不再把 content URI 数组交回 WebView。国产 ROM 的文档提供器
             // 经常只让 WebView 拿到第一个 URI（其余静默丢掉），有时干脆一个都不
@@ -524,19 +523,40 @@ public final class MainActivity extends Activity {
 
     // Removing the bookmark after a successful match keeps a second call from
     // deleting a different file that happens to share the same name.
-    private Uri takePickedUri(String name, long size) {
-        synchronized (pickedUris) {
-            for (Iterator<Uri> iterator = pickedUris.iterator(); iterator.hasNext(); ) {
-                Uri uri = iterator.next();
+    private static String documentKey(String name, long size) {
+        return (name == null ? "" : name) + "@" + size;
+    }
+
+    private void rememberPickedDocuments(Uri[] results) {
+        if (results == null) return;
+        synchronized (pickedDocuments) {
+            for (Uri uri : results) {
+                if (uri == null) continue;
                 DocumentInfo info = describe(uri);
-                if (info == null) {
-                    iterator.remove();
-                    continue;
-                }
-                if (!name.equals(info.name)) continue;
-                if (size >= 0 && info.size >= 0 && size != info.size) continue;
+                if (info == null) continue;
+                pickedDocuments.put(documentKey(info.name, info.size), uri);
+            }
+            // 长时间使用不该无限增长；只保留最近 200 个文档。
+            while (pickedDocuments.size() > 200) {
+                Iterator<String> oldest = pickedDocuments.keySet().iterator();
+                if (!oldest.hasNext()) break;
+                oldest.next();
+                oldest.remove();
+            }
+        }
+    }
+
+    private Uri takePickedUri(String name, long size) {
+        synchronized (pickedDocuments) {
+            Uri exact = pickedDocuments.remove(documentKey(name, size));
+            if (exact != null) return exact;
+            // 有些提供器给的 SIZE 是 -1，或者网页读到的是复制后的字节数，大小对不上
+            // 就退回按文件名匹配（仍然只在这个 App 选择过的文档里找）。
+            for (Iterator<Map.Entry<String, Uri>> iterator = pickedDocuments.entrySet().iterator(); iterator.hasNext(); ) {
+                Map.Entry<String, Uri> entry = iterator.next();
+                if (!entry.getKey().startsWith((name == null ? "" : name) + "@")) continue;
                 iterator.remove();
-                return uri;
+                return entry.getValue();
             }
             return null;
         }
