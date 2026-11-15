@@ -97,7 +97,7 @@ public final class MainActivity extends Activity {
 
     private void configureWebView(WebView view) {
         WebView.setWebContentsDebuggingEnabled(false);
-        view.setBackgroundColor(0xFFF7F9FA);
+        view.setBackgroundColor(0xFFFFFDF8);
         view.getSettings().setJavaScriptEnabled(true);
         view.getSettings().setDomStorageEnabled(true);
         view.getSettings().setDatabaseEnabled(true);

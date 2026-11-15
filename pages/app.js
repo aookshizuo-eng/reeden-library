@@ -139,7 +139,7 @@ function requestHeaders(headers = {}) {
   if (apiBase && syncToken) result.set("Authorization", `Bearer ${syncToken}`);
   return result;
 }
-const state = { themes: [], fonts: [], assets: [], review: [], jobs: [], activeView: "import", importKind: "theme", themeSearch: "", themeAuthor: "all", assetFilter: "all", assetSearch: "", fontSearch: "", fontFilter: "all", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs"), importAssetIds: readSessionIds("reeden-import-assets") };
+const state = { themes: [], fonts: [], assets: [], review: [], jobs: [], activeView: "import", themeDensity: "grid", importKind: "theme", themeSearch: "", themeAuthor: "all", assetFilter: "all", assetSearch: "", fontSearch: "", fontFilter: "all", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs"), importAssetIds: readSessionIds("reeden-import-assets") };
 const selections = { review: new Set(), theme: new Set(), font: new Set(), asset: new Set() };
 const loadedFontFaces = new Set();
 const BROWSER_TASK_CONCURRENCY = 3;
@@ -1556,12 +1556,19 @@ function updateBulkControls() {
     checkbox.disabled = Boolean(state.operation) || !ids.length;
     $("#" + countId).textContent = `已选 ${count} / ${ids.length} 项`;
     const syncCount = [...selections[kind]].filter(id => eligibleIds(kind).includes(id)).length;
-    $("#" + buttonId).disabled = Boolean(state.operation) || storageDirty || !syncCount || (["theme", "font", "asset"].includes(kind) && !r2Enabled());
-    $("#" + buttonId).title = storageDirty ? "请先保存存储设置" : "";
+    const syncButton = $("#" + buttonId);
+    if (syncButton) {
+      syncButton.disabled = Boolean(state.operation) || storageDirty || !syncCount || (["theme", "font", "asset"].includes(kind) && !r2Enabled());
+      syncButton.title = storageDirty ? "请先保存存储设置" : "";
+    }
     const deleteButton = $("#deleteSelected" + kind[0].toUpperCase() + kind.slice(1));
     if (deleteButton) deleteButton.disabled = Boolean(state.operation) || !count;
     const downloadButton = $("#downloadSelected" + kind[0].toUpperCase() + kind.slice(1));
     if (downloadButton) downloadButton.disabled = Boolean(state.operation) || !count;
+    // Phones pin the bulk bar only while something is selected; otherwise it
+    // would eat 96px at the top of every scroll for nothing.
+    const bar = $("#" + kind + "Toolbar");
+    if (bar) bar.classList.toggle("has-selection", count > 0);
   });
   const chosenReview = state.review.filter(item => selections.review.has(item.staging_id));
   const privateCount = chosenReview.filter(item => !browserPrivateCompressionEnabled() && requiresOriginalPreservation(item.info)).length;
@@ -1716,7 +1723,7 @@ function fontCard(font, imported = false) {
   const selection = imported ? "" : selectInput("font", font.id, `字体 ${name}`, isAssetBusy("font", font.id));
   const actions = imported
     ? `<button class="text-button" data-open-view="jobs">查看同步任务</button>`
-    : `<button class="text-button sync-font" data-id="${escapeHtml(font.id)}" data-completed="${savedToCloud(font)}">${savedToCloud(font) ? "R2 已保存" : "同步字体到 R2"}</button>${font.url ? `<a class="download-link" href="${escapeHtml(assetUrl(font.url))}">下载原字体</a>` : ""}<button class="text-button danger-text delete-record" data-kind="font" data-id="${escapeHtml(font.id)}">删除</button>`;
+    : `${savedToCloud(font) ? "" : `<button class="text-button sync-font" data-id="${escapeHtml(font.id)}" data-completed="false">同步字体到 R2</button>`}${font.url ? `<a class="download-link" href="${escapeHtml(assetUrl(font.url))}">下载原字体</a>` : ""}<button class="text-button danger-text delete-record" data-kind="font" data-id="${escapeHtml(font.id)}">删除</button>`;
   return `<article class="font-card ${imported ? "import-font-card" : ""}"><div class="font-card-top">${selection}<span class="category-chip">${escapeHtml(category)}</span></div>${fontPreviewMarkup(font)}<div class="font-card-body"><h3 class="font-name">${escapeHtml(name)}</h3><div class="font-meta"><span>${escapeHtml((font.extension || "font").toUpperCase())}</span><span>${formatBytes(font.bytes)}</span><span>${escapeHtml(syncLabel(font))}</span></div>${font.sync_error ? `<p class="inline-error">${escapeHtml(typeof font.sync_error === "string" ? font.sync_error : Object.values(font.sync_error).join("；"))}</p>` : ""}${font.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof font.cleanup_warning === "string" ? font.cleanup_warning : Object.values(font.cleanup_warning).join("；"))}</p>` : ""}${imported ? "" : fontClassificationEditor(font)}</div><div class="font-actions">${actions}</div></article>`;
 }
 function themeMatchesSearch(theme) {
@@ -1738,6 +1745,68 @@ function renderThemeAuthorFilter() {
   select.innerHTML = `<option value="all">全部作者 (${state.themes.length})</option>` + authors.map(author => `<option value="${escapeHtml(author)}">${escapeHtml(author)} (${counts.get(author)})</option>`).join("");
   select.value = state.themeAuthor;
 }
+function themeDetailRow(label, value) {
+  if (!value) return "";
+  return `<div class="detail-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`;
+}
+function openThemeDialog(id) {
+  const theme = state.themes.find(item => String(item.id) === String(id));
+  const dialog = $("#themeDialog");
+  if (!theme || !dialog) return;
+  const preview = preferredPreview(theme.preview_light_url, theme.preview_dark_url);
+  const roles = [...new Set((theme.resource_summary || []).map(item => item.role).filter(Boolean))];
+  const themeFile = theme.compressed_url || theme.library_url;
+  const backup = theme.original_123?.key ? "123 已备份" : theme.original_123_error ? "123 备份失败" : "123 未备份";
+  $("#themeDialogTitle").textContent = theme.name || "未命名主题";
+  $("#themeDialogSub").textContent = `${themeAuthorLabel(theme)} · ${previewKind(theme.preview_details)} · ${syncLabel(theme)}`;
+  $("#themeDialogBody").innerHTML = `<div class="theme-dialog-preview">${previewImage(preview.url, `${theme.name} ${preview.label} · ${previewKind(theme.preview_details)}`, "", theme.preview_details)}</div>
+    <div class="theme-dialog-details"><dl class="detail-list">
+      ${themeDetailRow("压缩结果", compressionSummary(theme))}
+      ${themeDetailRow("原始体积", theme.original_size ? formatBytes(theme.original_size) : "")}
+      ${themeDetailRow("压缩后体积", theme.compressed_size ? formatBytes(theme.compressed_size) : "")}
+      ${themeDetailRow("同步状态", syncLabel(theme))}
+      ${themeDetailRow("123 备份", backup)}
+      ${themeDetailRow("资源角色", roles.join(" · "))}
+      ${themeDetailRow("源文件", theme.source_name || theme.file_name || "")}
+    </dl>${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}<div class="theme-dialog-actions">
+      ${themeFile ? `<a class="secondary-button" href="${escapeHtml(assetUrl(themeFile))}">下载主题</a>` : ""}
+      ${theme.original_url ? `<a class="secondary-button" href="${escapeHtml(assetUrl(theme.original_url))}">下载原始包</a>` : ""}
+      ${themeFile && !savedToCloud(theme) ? `<button class="primary-button" id="themeDialogSync" type="button">同步到 R2</button>` : ""}
+      <button class="text-button" id="themeDialogRebuild" type="button">更新预览</button>
+      <button class="text-button danger-text" id="themeDialogDelete" type="button">删除</button>
+    </div></div>`;
+  $("#themeDialogSync")?.addEventListener("click", () => { dialog.close(); syncTheme(theme.id); });
+  $("#themeDialogRebuild")?.addEventListener("click", () => { dialog.close(); rebuildPreview(theme.id); });
+  $("#themeDialogDelete")?.addEventListener("click", () => { dialog.close(); deleteSelectedRecords("theme", [theme.id]); });
+  if (!dialog.open) dialog.showModal();
+}
+const THEME_DENSITY_KEY = "reeden-theme-density";
+// A theme preview is a composite of shelf + splash art, so a square frame at
+// full card width pushed every action below the fold. Grid keeps a 16:9 strip,
+// list drops it to a 96px thumbnail; phones start in list mode.
+function themeDensityDefault() {
+  try { return window.matchMedia("(max-width: 680px)").matches ? "list" : "grid"; } catch { return "grid"; }
+}
+function applyThemeDensity(mode, persist = true) {
+  const density = mode === "list" ? "list" : "grid";
+  state.themeDensity = density;
+  const list = $("#themeList");
+  if (list) {
+    list.classList.toggle("is-list", density === "list");
+    list.classList.toggle("is-grid", density === "grid");
+  }
+  $$("#themeDensity .density-option").forEach(button => {
+    const active = button.dataset.density === density;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  if (persist) { try { localStorage.setItem(THEME_DENSITY_KEY, density); } catch {} }
+}
+function restoreThemeDensity() {
+  let saved = "";
+  try { saved = localStorage.getItem(THEME_DENSITY_KEY) || ""; } catch {}
+  applyThemeDensity(saved || themeDensityDefault(), false);
+}
 function renderThemes() {
   const list = $("#themeList");
   renderThemeAuthorFilter();
@@ -1750,20 +1819,20 @@ function renderThemes() {
     const preview = preferredPreview(theme.preview_light_url, theme.preview_dark_url);
     const resources = theme.resource_summary || [];
     const roles = [...new Set(resources.map(item => item.role).filter(Boolean))].slice(0, 4);
-    const syncAction = theme.compressed_url || theme.library_url || theme.original_url ? `<button class="text-button sync-theme" data-id="${escapeHtml(theme.id)}" data-completed="${savedToCloud(theme)}">${savedToCloud(theme) ? "R2 已保存" : "同步到 R2"}</button>` : "";
-    // "下载压缩包" and "下载主题" used to point at the same stored object, so
-    // every card showed the same link twice. Keep one link for the packaged
-    // theme plus the untouched original; bundling only happens in bulk.
-    const themeFile = theme.compressed_url || theme.library_url;
-    const themeLink = themeFile ? `<a class="download-link" href="${escapeHtml(assetUrl(themeFile))}">下载主题</a>` : "";
-    const originalLink = theme.original_url ? `<a class="download-link" href="${escapeHtml(assetUrl(theme.original_url))}">下载原始包</a>` : "";
     const compressionText = compressionSummary(theme);
-    return `<article class="theme-card">
-      <div class="theme-preview">${previewImage(preview.url, `${theme.name} ${preview.label} · ${previewKind(theme.preview_details)}`, "", theme.preview_details)}<span class="preview-caption">${escapeHtml(previewKind(theme.preview_details))} · 点击放大</span></div>
-      <div class="theme-info"><label class="item-heading">${selectInput("theme", theme.id, `主题 ${theme.name || "未命名主题"}`, isAssetBusy("theme", theme.id))}<span class="theme-title">${escapeHtml(theme.name || "未命名主题")}</span></label><div class="theme-meta">${escapeHtml(theme.author || "作者未记录")}</div><p>${compressionText} · ${escapeHtml(syncLabel(theme))}</p>${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === "string" ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join("；"))}</p>` : ""}<div class="theme-badges">${roles.map(role => `<span class="badge">${escapeHtml(role)}</span>`).join("")}${theme.original_123?.key ? `<span class="badge is-good" title="${escapeHtml(theme.original_123.key)}">123 已备份</span>` : theme.original_123_error ? `<span class="badge" title="${escapeHtml(theme.original_123_error)}">123 备份失败</span>` : `<span class="badge">123 未备份</span>`}</div></div>
-      <div class="theme-actions"><span class="size-line">${formatBytes(theme.compressed_size || theme.library_size || theme.original_size)}</span><button class="text-button rebuild-preview" data-id="${escapeHtml(theme.id)}">更新预览</button>${syncAction}${themeLink}${originalLink}<button class="text-button danger-text delete-record" data-kind="theme" data-id="${escapeHtml(theme.id)}">删除</button></div>
+    const roleText = roles.join(" · ");
+    // 卡片只留作品名、作者和一行压缩结果；体积、角色、123 备份、同步与删除
+    // 都收进点击后打开的主题细节弹窗，跟参考站的卡片一样安静。
+    return `<article class="theme-card" data-theme-id="${escapeHtml(theme.id)}">
+      <div class="theme-preview">${previewImage(preview.url, `${theme.name} ${preview.label} · ${previewKind(theme.preview_details)}`, "", theme.preview_details)}<span class="preview-caption">${escapeHtml(previewKind(theme.preview_details))}</span><button class="theme-more" type="button" data-theme-open="${escapeHtml(theme.id)}" aria-label="查看 ${escapeHtml(theme.name || "未命名主题")} 的主题细节">⋯</button></div>
+      <div class="theme-info"><div class="item-heading">${selectInput("theme", theme.id, `主题 ${theme.name || "未命名主题"}`, isAssetBusy("theme", theme.id))}<button class="theme-title theme-open" type="button" data-theme-open="${escapeHtml(theme.id)}">${escapeHtml(theme.name || "未命名主题")}</button></div><div class="theme-meta">${escapeHtml(themeAuthorLabel(theme))}${roleText ? ` · ${escapeHtml(roleText)}` : ""}</div><p>${compressionText}</p>${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === "string" ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join("；"))}</p>` : ""}</div>
     </article>`;
   }).join("");
+  $$("[data-theme-open]").forEach(button => button.addEventListener("click", event => { event.stopPropagation(); openThemeDialog(button.dataset.themeOpen); }));
+  $$("#themeList .theme-card").forEach(card => card.addEventListener("click", event => {
+    if (event.target.closest("input, button, a, label")) return;
+    openThemeDialog(card.dataset.themeId);
+  }));
   $$(".sync-theme").forEach(button => button.addEventListener("click", () => syncTheme(button.dataset.id)));
   $$(".rebuild-preview").forEach(button => button.addEventListener("click", () => rebuildPreview(button.dataset.id)));
   $$(".delete-record[data-kind='theme']").forEach(button => button.addEventListener("click", () => deleteSelectedRecords("theme", [button.dataset.id])));
@@ -1850,13 +1919,15 @@ function assetCard(asset, imported = false) {
   const style = String(asset.style || "").trim();
   const tags = Array.isArray(asset.tags) ? asset.tags.filter(Boolean) : [];
   const objectUrl = assetUrl(asset.download_url || asset.object_url || asset.url || "");
+  // 参考「进度条收藏夹」：标题和分类标签在上，预览在下，卡片贴紧排列；
+  // 分类编辑收进 details，动作只留必要的几个。
   return `<article class="asset-card ${imported ? "asset-card-imported" : ""}" data-asset-id="${escapeHtml(asset.id || asset.sha256 || "")}">
+    <div class="asset-card-body"><div class="asset-card-head"><label class="item-heading">${imported ? "" : selectInput("asset", asset.id, `收藏 ${asset.name || asset.file_name}`, isAssetBusy("asset", asset.id))}<span class="asset-title">${escapeHtml(asset.name || asset.file_name || "未命名收藏")}</span></label><span class="badge">${assetTypeLabel(asset)}</span></div>
+      <div class="asset-classifications">${author ? `<span class="category-chip">${escapeHtml(author)}</span>` : ""}${style ? `<span class="category-chip">${escapeHtml(style)}</span>` : ""}${tags.map(tag => `<span class="category-chip">#${escapeHtml(tag)}</span>`).join("")}${!author && !style && !tags.length ? `<span class="category-chip is-empty">未分类</span>` : ""}</div>
+    </div>
     <div class="asset-card-preview">${assetPreview(asset, imported)}<span class="preview-caption">${assetTypeLabel(asset)} · ${asset.bytes ? formatBytes(asset.bytes) : ""}</span></div>
-    <div class="asset-card-body"><div class="asset-card-head"><label class="item-heading">${imported ? "" : selectInput("asset", asset.id, `收藏 ${asset.name || asset.file_name}`, isAssetBusy("asset", asset.id))}<span class="theme-title">${escapeHtml(asset.name || asset.file_name || "未命名收藏")}</span></label><span class="badge">${assetTypeLabel(asset)}</span></div>
-      <div class="asset-meta">${escapeHtml(asset.file_name || "")} · SHA ${escapeHtml(String(asset.sha256 || "").slice(0, 12))}</div>
-      <div class="asset-classifications">${author ? `<span class="category-chip">作者：${escapeHtml(author)}</span>` : `<span class="category-chip is-empty">未分作者</span>`}${style ? `<span class="category-chip">风格：${escapeHtml(style)}</span>` : `<span class="category-chip is-empty">未分风格</span>`}${tags.map(tag => `<span class="category-chip">#${escapeHtml(tag)}</span>`).join("")}</div>
-      <form class="asset-meta-form" data-record-form="${escapeHtml(asset.id || "")}" data-record-kind="asset"><div class="asset-meta-fields"><label>作者<input name="author" value="${escapeHtml(author)}" placeholder="作者" /></label><label>风格<input name="style" value="${escapeHtml(style)}" placeholder="风格" /></label><label>标签<input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="标签，用逗号分隔" /></label></div><button class="text-button" type="submit">保存分类</button></form>
-    </div><div class="asset-actions"><button class="text-button sync-asset" data-id="${escapeHtml(asset.id || "")}" data-completed="${savedToCloud(asset)}">${savedToCloud(asset) ? "R2 已保存" : "同步到 R2"}</button>${objectUrl ? `<a class="download-link" href="${escapeHtml(objectUrl)}" download="${escapeHtml(asset.file_name || asset.name || "asset")}">下载原文件</a>` : ""}<button class="text-button danger-text delete-record" data-kind="asset" data-id="${escapeHtml(asset.id || "")}">删除</button></div>
+    <div class="asset-actions">${savedToCloud(asset) ? "" : `<button class="text-button sync-asset" data-id="${escapeHtml(asset.id || "")}" data-completed="false">同步到 R2</button>`}${objectUrl ? `<a class="download-link" href="${escapeHtml(objectUrl)}" download="${escapeHtml(asset.file_name || asset.name || "asset")}">下载</a>` : ""}<button class="text-button danger-text delete-record" data-kind="asset" data-id="${escapeHtml(asset.id || "")}">删除</button></div>
+    <details class="asset-edit"><summary>编辑分类</summary><div class="asset-meta">${escapeHtml(asset.file_name || "")} · ${asset.bytes ? formatBytes(asset.bytes) : ""} · SHA ${escapeHtml(String(asset.sha256 || "").slice(0, 12))}</div><form class="asset-meta-form" data-record-form="${escapeHtml(asset.id || "")}" data-record-kind="asset"><div class="asset-meta-fields"><label>作者<input name="author" value="${escapeHtml(author)}" placeholder="作者" /></label><label>风格<input name="style" value="${escapeHtml(style)}" placeholder="风格" /></label><label>标签<input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="标签，用逗号分隔" /></label></div><button class="text-button" type="submit">保存分类</button></form></details>
   </article>`;
 }
 function renderAssets() {
@@ -2837,7 +2908,10 @@ function stopPan123Qr(message = "") {
   operationMessage($("#pan123QrStatus"), message);
 }
 async function startPan123Qr() {
-  if (state.operation || activeJobs().length || document.hidden) return;
+  // 以前这里遇到 document.hidden / 有后台任务就直接 return，手机上点了没反应，
+  // 也没任何提示。现在只拦真正会冲突的操作，并且把原因写出来。
+  if (state.operation) { operationMessage($("#pan123QrStatus"), "当前有操作正在进行，完成后再生成二维码。", true); return; }
+  if (activeJobs().length) { operationMessage($("#pan123QrStatus"), "后台任务正在处理，完成后再扫码登录。", true); return; }
   stopPan123Qr();
   const generation = pan123QrGeneration;
   pan123QrController = new AbortController();
@@ -2848,8 +2922,8 @@ async function startPan123Qr() {
   try {
     const response = await fetch(apiUrl("/api/storage/123/qr/start"), { method: "POST", headers: requestHeaders({ "Content-Type": "application/json" }), body: "{}", signal: pan123QrController.signal });
     const result = await response.json().catch(() => ({}));
-    if (generation !== pan123QrGeneration || state.activeView !== "storage" || document.hidden) return;
-    if (!response.ok || result.ok === false || !result.id || !/^data:image\/png;base64,[a-zA-Z0-9+/=\r\n]+$/.test(result.image || "")) throw new Error("二维码暂时无法生成，请稍后再试。");
+    if (generation !== pan123QrGeneration || state.activeView !== "storage") return;
+    if (!response.ok || result.ok === false || !result.id || !/^data:image\/[a-z+]+;base64,[a-zA-Z0-9+/=\r\n]+$/i.test(result.image || "")) throw new Error("二维码暂时无法生成，请稍后再试。");
     pan123QrSession = { id: result.id, expiresAt: Date.now() + Math.min(120, Math.max(1, Number(result.expiresIn) || 120)) * 1000 };
     $("#pan123QrImage").src = result.image;
     $("#pan123QrCode").hidden = false;
@@ -2862,9 +2936,12 @@ async function startPan123Qr() {
 }
 async function pollPan123Qr(generation) {
   if (generation !== pan123QrGeneration || !pan123QrSession) return;
-  if (state.activeView !== "storage" || document.hidden || activeJobs().length || Date.now() >= pan123QrSession.expiresAt) {
+  if (state.activeView !== "storage" || activeJobs().length || Date.now() >= pan123QrSession.expiresAt) {
     stopPan123Qr("扫码已结束，请重新扫码连接。"); updateStorageControls(); return;
   }
+  // 手机扫码要切到 123 云盘 App，此时 WebView 会短暂隐藏。旧逻辑直接判定
+  // 「已离开网页」并丢弃会话，所以 APK 端永远登不上；现在只是放慢轮询。
+  if (document.hidden) { pan123QrTimer = setTimeout(() => pollPan123Qr(generation), 4000); return; }
   try {
     const response = await fetch(apiUrl("/api/storage/123/qr/poll"), { method: "POST", headers: requestHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ id: pan123QrSession.id }), signal: pan123QrController.signal });
     const result = await response.json().catch(() => ({}));
@@ -2891,7 +2968,9 @@ async function pollPan123Qr(generation) {
 }
 async function savePan123Credentials(event, kind) {
   event.preventDefault();
-  if (state.operation || activeJobs().length || pan123QrSession) return;
+  if (state.operation) { operationMessage($("#pan123Status"), "当前有操作正在进行，完成后再登录。", true); return; }
+  // 之前如果有残留的扫码会话，账号密码登录会被静默忽略；这里先结束扫码再登录。
+  if (pan123QrSession) stopPan123Qr();
   const form = event.currentTarget;
   const payload = kind === "login" ? { username: form.elements.username.value.trim(), password: form.elements.password.value } : { token: form.elements.token.value.trim() };
   form.reset();
@@ -3379,10 +3458,10 @@ $("#selectAllAssets").addEventListener("change", event => toggleAll("asset", eve
 $("#commitSelectedThemes").addEventListener("click", () => commitThemes());
 $("#syncSelectedThemes").addEventListener("click", () => syncSelectedAssets("theme"));
 $("#syncSelectedFonts").addEventListener("click", () => syncSelectedAssets("font"));
-$("#syncSelectedAssets").addEventListener("click", () => syncSelectedAssets("asset"));
+$("#syncSelectedAssets")?.addEventListener("click", () => syncSelectedAssets("asset"));
 $("#deleteSelectedTheme").addEventListener("click", () => deleteSelectedRecords("theme"));
 $("#deleteSelectedFont").addEventListener("click", () => deleteSelectedRecords("font"));
-$("#deleteSelectedAsset").addEventListener("click", () => deleteSelectedRecords("asset"));
+$("#deleteSelectedAsset")?.addEventListener("click", () => deleteSelectedRecords("asset"));
 $("#downloadSelectedTheme").addEventListener("click", () => downloadSelectedRecords("theme"));
 $("#downloadSelectedFont").addEventListener("click", () => downloadSelectedRecords("font"));
 $("#downloadSelectedAsset").addEventListener("click", () => downloadSelectedRecords("asset"));
@@ -3461,6 +3540,7 @@ $$('[data-asset-filter]').forEach(button => button.addEventListener("click", () 
 $("#assetSearchInput").addEventListener("input", event => { state.assetSearch = event.target.value; renderAssets(); });
 $("#addAssetButton").addEventListener("click", () => { setView("import"); });
 $("#closePreviewDialog").addEventListener("click", () => $("#previewDialog").close());
+$("#closeThemeDialog").addEventListener("click", () => $("#themeDialog").close());
 $("#previewDialog").addEventListener("click", event => {
   if (event.target !== event.currentTarget) return;
   const bounds = event.currentTarget.getBoundingClientRect();
@@ -3480,7 +3560,10 @@ $("#pan123SessionForm").addEventListener("submit", event => savePan123Credential
 $("#startPan123Qr").addEventListener("click", startPan123Qr);
 $("#stopPan123Qr").addEventListener("click", () => { stopPan123Qr("扫码已取消。"); updateStorageControls(); });
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden && (pan123QrSession || state.operation === "pan123-qr-start")) { stopPan123Qr("已离开网页，请重新扫码连接。"); updateStorageControls(); }
+  if (!document.hidden && pan123QrSession) {
+    clearTimeout(pan123QrTimer);
+    pan123QrTimer = setTimeout(() => pollPan123Qr(pan123QrGeneration), 600);
+  }
 });
 $("#probePan123").addEventListener("click", probePan123);
 $("#saveApiBase").addEventListener("click", saveApiBaseSetting);
@@ -3519,6 +3602,8 @@ $("#testArchive").addEventListener("click", event => testStorage("archive", even
 $("#pullStorage").addEventListener("click", event => cloudOperation("pull", event.currentTarget));
 $("#syncStorage").addEventListener("click", event => cloudOperation("sync", event.currentTarget));
 $$('.nav-item').forEach(item => item.addEventListener('click', () => { setView(item.dataset.view); $(".sidebar").classList.remove("is-open"); }));
+$$("#themeDensity .density-option").forEach(button => button.addEventListener("click", () => applyThemeDensity(button.dataset.density)));
+restoreThemeDensity();
 const initialView = location.hash.slice(1);
 updateRuntimeMode();
 try {
