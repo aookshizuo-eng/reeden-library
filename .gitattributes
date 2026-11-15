@@ -1,0 +1,12 @@
+# site/ files are copied byte-for-byte into pages/ by scripts/sync-pages.mjs.
+# Force LF in both Git blobs and working trees: with CRLF blobs on Windows and
+# LF blobs on Linux, verify-pages.mjs passes locally but fails in CI.
+site/*.html text eol=lf
+site/*.js text eol=lf
+site/*.css text eol=lf
+site/*.md text eol=lf
+pages/*.html text eol=lf
+pages/*.js text eol=lf
+pages/*.css text eol=lf
+pages/*.md text eol=lf
+scripts/*.mjs text eol=lf
