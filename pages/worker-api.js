@@ -249,21 +249,39 @@ function cloneJson(value) { return JSON.parse(JSON.stringify(value)); }
 function replacePrivateExtension(path, extension) {
   const ext = String(extension || "").replace(/^\./, "").toLowerCase();
   const safe = ["png", "jpg", "jpeg", "webp", "gif"].includes(ext);
-  return safe && /\.(?:png|jpe?g|webp|gif|img)$/i.test(String(path || "")) ? String(path).replace(/\.(?:png|jpe?g|webp|gif|img)$/i, `.${ext}`) : path;
+  // `.img` 是 Reeden 的固定槽位（theme_bg.img / card_bg.img / bg.img /
+  // 000.img），按路径加载，改名会让书架背景、阅读背景和轮播图全部失联。
+  return safe && /\.(?:png|jpe?g|webp|gif)$/i.test(String(path || "")) ? String(path).replace(/\.(?:png|jpe?g|webp|gif)$/i, `.${ext}`) : path;
 }
 
-function mapPrivateRefs(value, replacements, pathReplacements, extensionReplacements = new Map()) {
-  if (Array.isArray(value)) return value.map(item => mapPrivateRefs(item, replacements, pathReplacements, extensionReplacements));
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapPrivateRefs(item, replacements, pathReplacements, extensionReplacements)]));
+function pathExtensionSuffix(path) {
+  const match = String(path || "").match(/\.([A-Za-z0-9]+)$/);
+  return match ? match[1].toLowerCase() : "";
+}
+
+function mapPrivateRefs(value, replacements, pathReplacements, extensionReplacements = new Map(), configPath = "") {
+  if (Array.isArray(value)) return value.map(item => mapPrivateRefs(item, replacements, pathReplacements, extensionReplacements, configPath));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapPrivateRefs(item, replacements, pathReplacements, extensionReplacements, configPath)]));
   if (typeof value !== "string") return value;
   if (pathReplacements.has(value)) return pathReplacements.get(value);
   const exact = replacements.get(value) || replacements.get(value.toLowerCase());
   if (exact) return exact;
   const match = value.match(/^([a-f0-9]{32}|[a-f0-9]{64})(\.[A-Za-z0-9]+)?$/i);
-  if (!match) return value;
-  const mapped = replacements.get(match[1].toLowerCase());
-  const extension = extensionReplacements.get(match[1].toLowerCase());
-  return mapped ? mapped + (extension ? `.${extension}` : (match[2] || "")) : value;
+  if (match) {
+    const mapped = replacements.get(match[1].toLowerCase());
+    const extension = extensionReplacements.get(match[1].toLowerCase());
+    return mapped ? mapped + (extension ? `.${extension}` : (match[2] || "")) : value;
+  }
+  // 相对文件名（轮播 manifest 的 "file": "000.img"）按配置所在目录解析，
+  // 资源改名后这里必须同步，否则 Reeden 找不到轮播图。
+  if (configPath) {
+    const dir = configPath.slice(0, configPath.lastIndexOf("/") + 1);
+    if (dir) {
+      const target = pathReplacements.get(dir + value);
+      if (target && target.startsWith(dir)) return target.slice(dir.length);
+    }
+  }
+  return value;
 }
 
 async function repackPrivateRed(request, env) {
@@ -313,10 +331,13 @@ async function repackPrivateRed(request, env) {
       if (newExtension && !["png", "jpg", "jpeg", "webp", "gif"].includes(newExtension)) throw new Error(`不支持的图片扩展名：${newExtension}`);
       const newPath = typeof item.new_path === "string" && item.new_path ? item.new_path : replacePrivateExtension(oldPath, newExtension);
       if (newPath !== oldPath) pathReplacements.set(oldPath, newPath);
-      if (newExtension) extensionReplacements.set(oldSha.toLowerCase(), newExtension);
+      // 资源没有改名时，引用里的扩展名保持原样（`.img` 依旧写 `.img`），
+      // 否则「哈希.扩展名」形态的引用会指向并不存在的文件名。
+      const effectiveExtension = newPath === oldPath ? pathExtensionSuffix(oldPath) : newExtension;
+      if (effectiveExtension) extensionReplacements.set(oldSha.toLowerCase(), effectiveExtension);
       replacements.set(oldSha, newSha);
       replacements.set(oldSha.toUpperCase(), newSha.toUpperCase());
-      if (item.old_md5 && item.new_md5) { replacements.set(String(item.old_md5).toLowerCase(), String(item.new_md5).toLowerCase()); replacements.set(String(item.old_md5).toUpperCase(), String(item.new_md5).toUpperCase()); if (newExtension) extensionReplacements.set(String(item.old_md5).toLowerCase(), newExtension); }
+      if (item.old_md5 && item.new_md5) { replacements.set(String(item.old_md5).toLowerCase(), String(item.new_md5).toLowerCase()); replacements.set(String(item.old_md5).toUpperCase(), String(item.new_md5).toUpperCase()); if (effectiveExtension) extensionReplacements.set(String(item.old_md5).toLowerCase(), effectiveExtension); }
       changed.set(oldPath, {bytes, newPath, newSha});
     }
     const outputEntries = [];
@@ -834,15 +855,16 @@ async function sealPrivatePrefix(request, env) {
       if (extension && !["png", "jpg", "jpeg", "webp", "gif"].includes(extension)) throw new Error(`不支持的图片扩展名：${item.path}`);
       const newPath = replacePrivateExtension(entry.path, extension);
       if (newPath !== entry.path) pathReplacements.set(entry.path, newPath);
+      const effectiveExtension = newPath === entry.path ? pathExtensionSuffix(entry.path) : extension;
       const newSha = String(item.new_sha256).toLowerCase();
       hashReplacements.set(oldSha, newSha);
       hashReplacements.set(oldSha.toUpperCase(), newSha.toUpperCase());
-      if (extension) extensionReplacements.set(oldSha, extension);
+      if (effectiveExtension) extensionReplacements.set(oldSha, effectiveExtension);
       if (item.old_md5 && item.new_md5) {
         const oldMd5 = String(item.old_md5).toLowerCase(), newMd5 = String(item.new_md5).toLowerCase();
         hashReplacements.set(oldMd5, newMd5);
         hashReplacements.set(oldMd5.toUpperCase(), newMd5.toUpperCase());
-        if (extension) extensionReplacements.set(oldMd5, extension);
+        if (effectiveExtension) extensionReplacements.set(oldMd5, effectiveExtension);
       }
       if (changed.has(entry.path)) throw new Error(`资源重复替换：${item.path}`);
       changed.set(entry.path, {newPath, newSha, newLength: item.new_length});
@@ -870,7 +892,7 @@ async function sealPrivatePrefix(request, env) {
       if (bytes.length > PRIVATE_MAX_CONFIG) throw new Error(`配置资源过大：${item.path}（超过 1 MB 的配置需由客户端先映射引用后上传）`);
       let document;
       try { document = JSON.parse(new TextDecoder().decode(bytes)); } catch { throw new Error(`配置资源无法解析：${item.path}`); }
-      const mapped = mapPrivateRefs(document, hashReplacements, pathReplacements, extensionReplacements);
+      const mapped = mapPrivateRefs(document, hashReplacements, pathReplacements, extensionReplacements, item.path);
       const output = new TextEncoder().encode(JSON.stringify(mapped));
       configByPath.set(item.path, output);
       configShaByPath.set(item.path, await digestHex(output));

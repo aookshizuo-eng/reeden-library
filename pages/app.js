@@ -547,7 +547,13 @@ const PRIVATE_CONFIG_INLINE_LIMIT = 512 * 1024;
 function privateReplaceExtension(path, extension) {
   const ext = String(extension || "").replace(/^\./, "").toLowerCase();
   const safe = ["png", "jpg", "jpeg", "webp", "gif"].includes(ext);
-  return safe && /\.(?:png|jpe?g|webp|gif|img)$/i.test(String(path || "")) ? String(path).replace(/\.(?:png|jpe?g|webp|gif|img)$/i, `.${ext}`) : path;
+  // `.img` 是 Reeden 的固定槽位（theme_bg.img / card_bg.img / bg.img /
+  // 000.img），按路径加载，改名会让书架背景、阅读背景和轮播图全部失联。
+  return safe && /\.(?:png|jpe?g|webp|gif)$/i.test(String(path || "")) ? String(path).replace(/\.(?:png|jpe?g|webp|gif)$/i, `.${ext}`) : path;
+}
+function privatePathExtension(path) {
+  const match = String(path || "").match(/\.([A-Za-z0-9]+)$/);
+  return match ? `.${match[1].toLowerCase()}` : "";
 }
 function privateRefMaps(replacements) {
   const maps = {hashes: new Map(), paths: new Map(), extensions: new Map(), tokens: new Set()};
@@ -561,26 +567,40 @@ function privateRefMaps(replacements) {
     if (!extension || !item.path) continue;
     const newPath = privateReplaceExtension(item.path, extension);
     if (newPath !== item.path) maps.paths.set(item.path, newPath);
-    put(maps.extensions, oldSha, extension);
-    put(maps.extensions, item.old_md5, extension);
+    // 资源没有改名时，引用里的扩展名也要跟着保持原样（`.img` 依旧写 `.img`），
+    // 否则「哈希.扩展名」形态的引用会指向一个并不存在的文件名。
+    const effective = newPath === item.path ? privatePathExtension(item.path).replace(/^\./, "") : extension;
+    put(maps.extensions, oldSha, effective);
+    put(maps.extensions, item.old_md5, effective);
   }
   return maps;
 }
 // 与 pages/worker-api.js 的 mapPrivateRefs 保持一致：路径整串优先，其次是裸哈希
 // 与「哈希.扩展名」，命中就用新哈希替换、扩展名跟随后端给出的新格式。哈希统一
 // 输出小写——包内资源名就是小写，大写引用照抄成大写文件名反而找不到文件。
-function mapPrivateRefsClient(value, maps) {
-  if (Array.isArray(value)) return value.map(item => mapPrivateRefsClient(item, maps));
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapPrivateRefsClient(item, maps)]));
+function mapPrivateRefsClient(value, maps, configPath = "") {
+  if (Array.isArray(value)) return value.map(item => mapPrivateRefsClient(item, maps, configPath));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapPrivateRefsClient(item, maps, configPath)]));
   if (typeof value !== "string") return value;
   if (maps.paths.has(value)) return maps.paths.get(value);
   const exact = maps.hashes.get(value.toLowerCase());
   if (exact) return exact;
   const match = value.match(/^([a-f0-9]{32}|[a-f0-9]{64})(\.[A-Za-z0-9]+)?$/i);
-  if (!match) return value;
-  const mapped = maps.hashes.get(match[1].toLowerCase());
-  const extension = maps.extensions.get(match[1].toLowerCase());
-  return mapped ? mapped + (extension ? `.${extension}` : (match[2] || "")) : value;
+  if (match) {
+    const mapped = maps.hashes.get(match[1].toLowerCase());
+    const extension = maps.extensions.get(match[1].toLowerCase());
+    return mapped ? mapped + (extension ? `.${extension}` : (match[2] || "")) : value;
+  }
+  // 配置目录里的相对文件名（轮播 manifest 的 "file": "000.img"）也要跟着改名，
+  // 否则 Reeden 按 manifest 目录去找文件时找不到已经改名的轮播图。
+  if (configPath) {
+    const dir = configPath.slice(0, configPath.lastIndexOf("/") + 1);
+    if (dir) {
+      const target = maps.paths.get(dir + value);
+      if (target && target.startsWith(dir)) return target.slice(dir.length);
+    }
+  }
+  return value;
 }
 async function mapLargePrivateConfigs(entries, slice, replacements, codec) {
   const result = new Map();
@@ -601,7 +621,7 @@ async function mapLargePrivateConfigs(entries, slice, replacements, codec) {
     // Worker 再去 JSON.parse 就撞上 1 MB 上限与 10 ms CPU，整包重封直接 422。
     // 现在 Worker 对这些大配置只登记字节和 sha256，既不解析也不算大小账。
     const mappedBytes = touched
-      ? new TextEncoder().encode(JSON.stringify(mapPrivateRefsClient(document, maps)))
+      ? new TextEncoder().encode(JSON.stringify(mapPrivateRefsClient(document, maps, entry.path)))
       : bytes.slice();
     result.set(entry.path, {bytes: mappedBytes, sha256: await codec.sha256Hex(mappedBytes)});
   }
@@ -625,10 +645,20 @@ async function compressPrivateRedWithDirectory(raw, codec, options, prefix, dire
   const slice = entry => payload.subarray(entry.offset, entry.offset + entry.length);
   const images = entries.filter(entry => String(codec.mimeFromBytes(slice(entry), entry.path) || "").startsWith("image/"));
   if (!images.length) return privateSkippedResult(raw);
+  // 九宫格资源的切片坐标绑定在原始像素网格上，重编码会丢 npTc、缩放会让坐标
+  // 失效，Reeden 直接画不出来。加密包里配置是加密的，但目录条目仍带路径，
+  // 可以按路径取出明文 JSON 判定。
+  let skipPaths = [];
+  try {
+    if (typeof codec.nineSlicePaths === "function") {
+      skipPaths = codec.nineSlicePaths(entries.map(entry => ({name: entry.path, bytes: slice(entry)})));
+    }
+  } catch { skipPaths = []; }
+  const codecOptions = skipPaths.length ? { ...options, skipPaths } : options;
   const compressed = await runCodecTask("compressImages",
-    {items: images.map(entry => ({name: entry.path, bytes: slice(entry)})), options: {...options, concurrency: Math.min(4, Number(navigator.hardwareConcurrency) || 2)}},
+    {items: images.map(entry => ({name: entry.path, bytes: slice(entry)})), options: {...codecOptions, concurrency: Math.min(4, Number(navigator.hardwareConcurrency) || 2)}},
     async () => ({results: await mapConcurrent(images, 3, async entry => {
-      const result = await codec.compressImage(slice(entry), entry.path, options);
+      const result = await codec.compressImage(slice(entry), entry.path, codecOptions);
       return {ok: true, bytes: result.bytes, mime: result.mime, decision: result.decision};
     })}));
   const changed = [];
@@ -1920,6 +1950,13 @@ function selectableIds(kind) {
 function selectInput(kind, id, name, disabled = false) {
   return `<input class="item-select" type="checkbox" data-selection="${kind}" data-id="${escapeHtml(id)}" aria-label="选择${escapeHtml(name)}" ${selections[kind].has(id) ? "checked" : ""} ${disabled || state.operation ? "disabled" : ""} />`;
 }
+function bulkHint(button) {
+  const toolbar = button?.closest(".bulk-toolbar");
+  if (!toolbar) return null;
+  let hint = toolbar.querySelector(".bulk-hint");
+  if (!hint) { hint = document.createElement("span"); hint.className = "bulk-hint"; hint.setAttribute("role", "status"); button.after(hint); }
+  return hint;
+}
 function updateBulkControls() {
   const toolbars = [
     ["review", "selectAllReview", "reviewSelectedCount", "commitSelectedThemes"],
@@ -1940,8 +1977,22 @@ function updateBulkControls() {
     const syncCount = [...selections[kind]].filter(id => eligibleIds(kind).includes(id)).length;
     const syncButton = $("#" + buttonId);
     if (syncButton) {
-      syncButton.disabled = Boolean(state.operation) || storageDirty || !syncCount || (["theme", "font", "asset"].includes(kind) && !r2Enabled());
-      syncButton.title = storageDirty ? "请先保存存储设置" : "";
+      const blocked = Boolean(state.operation) || storageDirty || !syncCount || (["theme", "font", "asset"].includes(kind) && !r2Enabled());
+      // 禁用态按钮按下去毫无反应，用户只会看到「点不动」。改成「看起来灰着、
+      // 点一下就告诉你为什么」，保证每次点击都有反馈；真正的拦截条件仍在
+      // 处理函数里逐条校验并给出提示。
+      syncButton.disabled = false;
+      syncButton.setAttribute("aria-disabled", blocked ? "true" : "false");
+      syncButton.classList.toggle("is-blocked", blocked);
+      // 按钮不可用时必须把原因摆在明面上。
+      const reason = state.operation ? "正在处理中，请等当前任务结束"
+        : storageDirty ? "存储设置有未保存的修改，先在「存储设置」保存再上传"
+        : !syncCount ? (count ? "所选条目暂时不能上传，请重新勾选" : "先勾选要处理的条目，或点「全选」")
+        : (["theme", "font", "asset"].includes(kind) && !r2Enabled()) ? "未连接共享库，先在「存储设置」填写同步 API 地址"
+        : "";
+      syncButton.title = reason;
+      const hint = bulkHint(syncButton);
+      if (hint) { hint.textContent = reason; hint.hidden = !reason; }
     }
     const deleteButton = $("#deleteSelected" + kind[0].toUpperCase() + kind.slice(1));
     if (deleteButton) deleteButton.disabled = Boolean(state.operation) || !count;
@@ -2446,10 +2497,12 @@ function renderPending() {
   }));
 }
 async function commitSelection() {
-  if (state.operation || storageDirty) return;
+  // 早退必须给出原因：以前这里直接 return，用户只看到按钮「没反应」。
+  if (state.operation) { toast("正在处理中，请等当前任务结束后再试"); return; }
+  if (storageDirty) { toast("存储设置有未保存的修改，请先在「存储设置」保存后再上传"); return; }
   const themeIds = state.review.filter(item => selections.review.has(item.staging_id)).map(item => item.staging_id);
   const chosen = state.pending.filter(item => selections.review.has(item.id));
-  if (!themeIds.length && !chosen.length) return;
+  if (!themeIds.length && !chosen.length) { toast("请先勾选要处理的条目，或点「全选」"); return; }
   deferredCleanup.length = 0;
   try {
     if (themeIds.length) await commitThemes(themeIds);
@@ -2993,13 +3046,18 @@ async function analyzeFiles(files) {
         return { staging_id: `browser-${crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`}`, file, bytes: raw, inspection, info, duplicates: duplicateRecords.map(record => ({ ...record })), preview_urls: { light: previewUrl, dark: "" } };
       });
       state.review.push(...items);
+      // 刚解析出来的主题默认勾上：和字体/收藏一致——用户把文件拖进来就是想上传，
+      // 之前主题不勾选，「确认所选并压缩」按钮一直灰着，看起来就像点不动。
+      for (const item of items) selections.review.add(item.staging_id);
       renderReview();
       operationMessage($("#reviewBatchStatus"), `本批 ${items.length} 个主题已在浏览器完成识别，可全选后确认。`);
       toast(`已解析 ${items.length} 个主题，请统一确认`);
       return;
     }
     const data = await api("/api/themes/analyze", { method: "POST", body });
-    state.review.push(...(data.items || []));
+    const analyzed = data.items || [];
+    state.review.push(...analyzed);
+    for (const item of analyzed) if (item?.staging_id) selections.review.add(item.staging_id);
     renderReview();
     operationMessage($("#reviewBatchStatus"), `本批 ${data.items?.length || 0} 个主题已全部识别，可全选后确认。`);
     toast(`已解析 ${data.items?.length || 0} 个主题，请统一确认`);
@@ -3028,10 +3086,12 @@ async function indexExistingFiles(files) {
 }
 async function commitTheme(stagingId) { return commitThemes([stagingId]); }
 async function commitThemes(ids = [...selections.review]) {
-  if (state.operation || storageDirty || !ids.length) return;
+  if (state.operation) { toast("正在处理中，请等当前任务结束后再试"); return; }
+  if (storageDirty) { toast("存储设置有未保存的修改，请先在「存储设置」保存后再上传"); return; }
+  if (!ids.length) { toast("请先勾选要处理的条目，或点「全选」"); return; }
   const eligible = new Set(eligibleIds("review"));
   const chosen = [...new Set(ids)].filter(id => eligible.has(id));
-  if (!chosen.length) return;
+  if (!chosen.length) { toast("所选条目已失效，请重新勾选后再确认"); return; }
   setOperation("enqueue");
   try {
     const options = compressionOptions();
@@ -3329,7 +3389,11 @@ async function deleteSelectedRecords(kind, ids = [...selections[kind]]) {
   } finally { setOperation(""); }
 }
 async function syncSelectedAssets(kind, ids = [...selections[kind]]) {
-  if (state.operation || !r2Enabled() || storageDirty || !ids.length) return;
+  // 早退都要说明原因，否则按钮看起来就是「按了没反应」。
+  if (state.operation) { toast("正在处理中，请等当前任务结束后再试"); return; }
+  if (!r2Enabled()) { toast("未连接共享库，请先在「存储设置」填写同步 API 地址"); return; }
+  if (storageDirty) { toast("存储设置有未保存的修改，请先在「存储设置」保存后再同步"); return; }
+  if (!ids.length) { toast("请先勾选要处理的条目，或点「全选」"); return; }
   if (browserSyncEnabled()) {
     const output = $(kind === "theme" ? "#themeBatchStatus" : kind === "font" ? "#fontBatchStatus" : "#assetBatchStatus");
     const chosen = [...new Set(ids)].filter(id => eligibleIds(kind).includes(id));
@@ -3340,7 +3404,7 @@ async function syncSelectedAssets(kind, ids = [...selections[kind]]) {
   }
   const eligible = new Set(eligibleIds(kind));
   const chosen = [...new Set(ids)].filter(id => eligible.has(id));
-  if (!chosen.length) return;
+  if (!chosen.length) { toast("所选条目已失效，请重新勾选后再同步"); return; }
   const output = $(kind === "theme" ? "#themeBatchStatus" : kind === "font" ? "#fontBatchStatus" : "#assetBatchStatus");
   setOperation("enqueue");
   try {

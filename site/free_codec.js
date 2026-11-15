@@ -243,7 +243,7 @@
     if (!replacement) return value;
     return (match[1] === match[1].toUpperCase() ? replacement.toUpperCase() : replacement) + (match[2] || "");
   }
-  function mapReferences(value, replacements, extensions = {}, paths = {}) {
+  function mapReferences(value, replacements, extensions = {}, paths = {}, configPath = "") {
     if (typeof value === "string") {
       if (paths[value]) return paths[value];
       const hash = value.match(/^([0-9a-fA-F]{32}|[0-9a-fA-F]{64})(\.[A-Za-z0-9]+)?$/);
@@ -255,14 +255,59 @@
         const extension = hash[2] ? (extensions[hash[1].toLowerCase()] || hash[2]) : "";
         return (hash[1] === hash[1].toUpperCase() ? replacement.toUpperCase() : replacement) + extension;
       }
+      // Relative file names live next to the config that mentions them — the
+      // carousel manifest says "file": "000.img" and Reeden resolves it against
+      // the manifest's own directory.  When the resource gets renamed the
+      // relative name has to follow, otherwise the banner silently disappears.
+      if (configPath) {
+        const dir = configPath.slice(0, configPath.lastIndexOf("/") + 1);
+        if (dir) {
+          const target = paths[dir + value];
+          if (target && target.startsWith(dir)) return target.slice(dir.length);
+        }
+      }
       if (/^\s*[\[{]/.test(value)) {
-        try { const parsed = JSON.parse(value), mapped = mapReferences(parsed, replacements, extensions, paths); return JSON.stringify(mapped); } catch { /* plain string */ }
+        try { const parsed = JSON.parse(value), mapped = mapReferences(parsed, replacements, extensions, paths, configPath); return JSON.stringify(mapped); } catch { /* plain string */ }
       }
       return value;
     }
-    if (Array.isArray(value)) return value.map(item => mapReferences(item, replacements, extensions, paths));
-    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapReferences(item, replacements, extensions, paths)]));
+    if (Array.isArray(value)) return value.map(item => mapReferences(item, replacements, extensions, paths, configPath));
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapReferences(item, replacements, extensions, paths, configPath)]));
     return value;
+  }
+  // Nine-slice resources carry pixel coordinates that only make sense on the
+  // original pixel grid.  Re-encoding them to WebP drops the `npTc` marker and
+  // resizing them invalidates the slice boxes, so Reeden draws nothing.  The
+  // reference converter keeps them byte-for-byte; we do the same.
+  function nineSlicePaths(entries) {
+    const skip = new Set();
+    const parse = name => {
+      const entry = entries.find(item => item.name === name);
+      if (!entry) return null;
+      try { return JSON.parse(text(entry.bytes)); } catch { return null; }
+    };
+    const theme = parse("theme.json");
+    if (theme && typeof theme === "object") {
+      for (const mode of ["light", "dark"]) {
+        const config = theme[mode];
+        if (!config || typeof config !== "object") continue;
+        if (String(config.cardBackgroundImageFit || "").toLowerCase().startsWith("nineslice")) skip.add(`${mode}/card_bg.img`);
+        if (String(config.bookshelfCarouselImageFit || "").toLowerCase().startsWith("nineslice")) {
+          for (const entry of entries) {
+            if (!entry.name.startsWith(`${mode}/bookshelf_carousel/`)) continue;
+            if (entry.name.toLowerCase().endsWith(".json")) continue;
+            skip.add(entry.name);
+          }
+        }
+      }
+    }
+    for (const entry of entries) {
+      if (!/^reader_schema\/.+\/schema\.json$/i.test(entry.name)) continue;
+      const schema = parse(entry.name);
+      if (!schema || typeof schema !== "object") continue;
+      if (String(schema.backgroundImageFit || "").toLowerCase().startsWith("nineslice")) skip.add(entry.name.replace(/schema\.json$/i, "bg.img"));
+    }
+    return [...skip];
   }
   // Compression profiles mirror what users see in the import panel.  The two
   // named profiles pick per-role resolution caps, because a Reeden theme is
@@ -437,16 +482,24 @@
   function extensionForMime(mime) { return mime === "image/webp" ? "webp" : mime === "image/png" ? "png" : mime === "image/jpeg" ? "jpg" : mime === "image/gif" ? "gif" : ""; }
   function replaceImageExtension(name, mime) {
     const extension = extensionForMime(mime);
-    // Some RED variants hide the resource type behind an `.img` suffix. The
-    // bytes are still identified by their image signature, so keep the
-    // package references consistent when the compressed payload changes type.
-    return extension && /\.(?:png|jpe?g|webp|gif|img)$/i.test(String(name || "")) ? String(name).replace(/\.(?:png|jpe?g|webp|gif|img)$/i, `.${extension}`) : String(name || "");
+    // `.img` is Reeden's fixed slot extension: `light/theme_bg.img` (bookshelf
+    // background), `light/card_bg.img` (card background),
+    // `reader_schema/<id>/bg.img` (reading background) and
+    // `light/bookshelf_carousel/000.img` (carousel banner).  Reeden loads
+    // those by path, so the entry name must stay exactly as it is even when
+    // the payload turns into WebP.  Renaming it to `.webp` is what made the
+    // compressed theme lose every background.
+    return extension && /\.(?:png|jpe?g|webp|gif)$/i.test(String(name || "")) ? String(name).replace(/\.(?:png|jpe?g|webp|gif)$/i, `.${extension}`) : String(name || "");
   }
   async function compressImage(bytes, name, options = {}) {
     const original = bytesOf(bytes), mime = mimeFromBytes(original, name);
     const decision = { path: name, mime, used: false, originalBytes: original.length };
     const target = resolveImageTarget(name, options);
     decision.role = target.role; decision.preset = target.preset;
+    if (Array.isArray(options.skipPaths) && options.skipPaths.indexOf(name) >= 0) {
+      decision.reason = "九宫格资源保留坐标，未压缩";
+      return { bytes: original, mime, decision };
+    }
     if (target.skip) { decision.reason = "阅读背景按设置保留原样"; return { bytes: original, mime, decision }; }
     if (mime === "image/gif") {
       if (!target.gifColors) { decision.reason = "GIF 按设置保留原样"; return { bytes: original, mime, decision }; }
@@ -738,11 +791,14 @@
   async function compressRed(value, options = {}) {
     const raw = await readBytes(value);
     if (startsWith(raw, RED_PRIVATE)) throw new FreeCodecError("加密 RED v2 当前浏览器版本只做结构识别，暂不重新封包；请使用电脑后台版本", "private_red_unsupported");
-    const entries = await readZipEntries(raw), replacements = {}, extensions = {}, paths = {}, decisions = [], output = [];
+    const entries = await readZipEntries(raw);
+    const skipPaths = nineSlicePaths(entries);
+    const codecOptions = skipPaths.length ? { ...options, skipPaths } : options;
+    const replacements = Object.create(null), extensions = Object.create(null), paths = Object.create(null), decisions = [], output = [];
     const processed = await mapConcurrent(entries, options.concurrency || defaultConcurrency(3), async entry => {
       const bytes = entry.bytes;
       let result = { bytes, decision: { path: entry.name, mime: mimeFromBytes(bytes, entry.name), used: false, reason: "非图片资源" } };
-      if (result.decision.mime.startsWith("image/")) result = await compressImage(bytes, entry.name, options);
+      if (result.decision.mime.startsWith("image/")) result = await compressImage(bytes, entry.name, codecOptions);
       if (result.decision.used) {
         const [oldSha, newSha] = await Promise.all([sha256Hex(bytes), sha256Hex(result.bytes)]);
         replacements[md5Hex(bytes)] = md5Hex(result.bytes);
@@ -757,7 +813,7 @@
     for (const {entry, result, outputName} of processed) { decisions.push(result.decision); output.push({ ...entry, name: outputName, bytes: result.bytes }); }
     if (Object.keys(replacements).length) {
       for (const entry of output) if (entry.name.toLowerCase().endsWith(".json")) {
-        try { const value = JSON.parse(text(entry.bytes)), mapped = mapReferences(value, replacements, extensions, paths); entry.bytes = textBytes(JSON.stringify(mapped)); }
+        try { const value = JSON.parse(text(entry.bytes)), mapped = mapReferences(value, replacements, extensions, paths, entry.name); entry.bytes = textBytes(JSON.stringify(mapped)); }
         catch { /* Non-JSON resources keep their original bytes. */ }
       }
     }
@@ -814,7 +870,7 @@
     const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new FreeCodecError("字体预览编码失败", "font_preview_encode_failed")), "image/png"));
     return { ...info, family, blob, release() { if (face) root.document.fonts.delete(face); root.URL.revokeObjectURL(url); } };
   }
-  const api = { FreeCodecError, RED_ZIP, RED_PRIVATE, COMPRESSION_PRESETS, imageRole, requantizeGif, sha256Hex, md5Hex, crc32, mimeFromBytes, readZipEntries, writeZipEntries, inspectContainer, extractPrivatePreviewImages, compressImage, compressRed, inspectFont, fontPreview };
+  const api = { FreeCodecError, RED_ZIP, RED_PRIVATE, COMPRESSION_PRESETS, imageRole, requantizeGif, sha256Hex, md5Hex, crc32, mimeFromBytes, readZipEntries, writeZipEntries, inspectContainer, extractPrivatePreviewImages, compressImage, compressRed, inspectFont, fontPreview, nineSlicePaths };
   if (root && typeof root === "object") root.ReedenFreeCodec = api;
   return api;
 });

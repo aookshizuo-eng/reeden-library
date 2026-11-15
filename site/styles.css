@@ -243,6 +243,11 @@ h3 { font-size: 14.5px; line-height: 1.35; margin-bottom: 4px; font-weight: 600;
 .bulk-status { flex-basis: 100%; overflow-wrap: anywhere; }
 .bulk-status:empty { display: none; }
 .bulk-status.is-error { color: var(--danger); }
+/* 禁用原因：按钮灰着又不说话时，用户只能看到「点不动」。 */
+.bulk-hint { flex-basis: 100%; color: var(--clay); font-size: 11.5px; line-height: 1.45; overflow-wrap: anywhere; }
+.bulk-hint[hidden] { display: none; }
+/* 不可提交时仍然可点：点一下会说明原因，比按不动强。 */
+.bulk-toolbar button.is-blocked { opacity: .55; cursor: not-allowed; }
 .bulk-toolbar .bundle-toggle { margin-left: auto; }
 .bulk-toolbar button { min-height: 30px; font-size: 12.5px; }
 .ingest-status { margin: -14px 0 22px; }
