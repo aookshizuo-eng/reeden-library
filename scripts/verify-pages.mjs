@@ -48,6 +48,13 @@ for (const script of ["scripts/remote-import.mjs"]) {
   const result = spawnSync(process.execPath, ["--check", path.join(root, script)], {encoding: "utf8"});
   if (result.status !== 0) errors.push(`${script} 语法检查失败：${(result.stderr || result.stdout).trim()}`);
 }
+// 压缩引用映射的规则必须三处一致（浏览器 codec / 客户端映射 / Worker 映射）。
+// 这套断言曾抓到「压缩后主题丢失书架背景、阅读背景和轮播图」的真凶，所以它
+// 必须跟着每次部署一起跑，不能只躺在仓库里当一次性脚本。
+for (const script of ["scripts/test-compress-references.mjs"]) {
+  const result = spawnSync(process.execPath, [path.join(root, script)], {encoding: "utf8"});
+  if (result.status !== 0) errors.push(`${script} 回归测试失败：\n${(result.stdout || result.stderr || "").trim()}`);
+}
 // The standalone Worker must share the Pages Worker implementation; a second
 // hand-edited copy silently drops routes such as /api/private/repack.
 const [workerEntry, workerApi] = await Promise.all([
@@ -137,6 +144,20 @@ for (const marker of ["customCompressionFactors", "compressionQualityValue", "gi
 if (!html.includes("omggif.js")) errors.push("site/index.html 未加载 omggif.js，GIF 无法重新量化");
 if (!(await readFile(path.join(source, "omggif.js"), "utf8")).includes("function GifWriter")) errors.push("site/omggif.js 缺失或被截断");
 if (/convertToBlob\s*&&\s*type === mime/.test(codecSource)) errors.push("site/free_codec.js 又退回同格式编码，PNG/JPEG 不会转 WebP，压缩率会掉回三成");
+
+// 压缩丢图回归：Reeden 的固定槽位（书架背景 / 阅读背景 / 轮播图）用的是 .img，
+// 改名成 .webp 就会让主题丢掉每一张背景；配置里按目录解析的相对文件名（轮播
+// manifest 的 file）必须跟着改名同步；九宫格资源重编码会让切片坐标失效。
+for (const marker of ["function nineSlicePaths", "options.skipPaths", "九宫格资源保留坐标，未压缩", "is Reeden's fixed slot extension"]) {
+  if (!codecSource.includes(marker)) errors.push(`site/free_codec.js 缺少压缩保名/九宫格实现：${marker}`);
+}
+for (const marker of ["function privatePathExtension", "codec.nineSlicePaths", "function bulkHint", "syncButton.disabled = false", 'setAttribute("aria-disabled"', "先勾选要处理的条目，或点「全选」"]) {
+  if (!app.includes(marker)) errors.push(`site/app.js 缺少压缩保名或批量按钮反馈实现：${marker}`);
+}
+for (const marker of ["function pathExtensionSuffix", "const effectiveExtension = newPath === entry.path ? pathExtensionSuffix(entry.path)"]) {
+  if (!workerApi.includes(marker)) errors.push(`pages/worker-api.js 缺少加密包槽位保名实现：${marker}`);
+}
+if (!css.includes(".bulk-hint")) errors.push("site/styles.css 缺少 .bulk-hint，批量按钮的原因提示没有样式");
 
 const urlArg = process.argv.find(value => value.startsWith("--url="));
 const liveUrl = (urlArg ? urlArg.slice("--url=".length) : process.env.REEDEN_CHECK_URL || "").replace(/\/+$/, "");
