@@ -405,6 +405,16 @@ h3 { font-size: 14.5px; line-height: 1.35; margin-bottom: 4px; font-weight: 600;
 button:disabled { cursor: not-allowed; opacity: .5; }
 .app-footer { margin: 38px var(--pad) 16px; padding-top: 14px; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; gap: 16px; color: var(--faint); font-size: 10.5px; letter-spacing: .02em; }
 
+/* ---------- 手机底部导航 ---------- */
+/* 基础隐藏，只在手机断点打开。桌面保持左侧栏，手机上左上角的抽屉太难按到。 */
+.mobile-tabs, .mobile-more { display: none; }
+.web-login-block {
+  display: grid; gap: 8px; padding: 12px 13px;
+  border: 1px dashed var(--control); border-radius: var(--radius-control); background: var(--surface);
+}
+.web-login-block .field-help { margin: 0; }
+.web-login-block button { justify-self: start; }
+
 /* ---------- 浮层 ---------- */
 .toast { position: fixed; left: 50%; bottom: 26px; transform: translate(-50%, 12px); opacity: 0; pointer-events: none; background: var(--text); color: #fdf9f1; padding: 10px 16px; border-radius: 999px; font-size: 12.5px; transition: opacity .18s ease, transform .18s ease; z-index: 30; max-width: calc(100vw - 32px); }
 .toast.is-visible { opacity: 1; transform: translate(-50%, 0); }
@@ -585,16 +595,44 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 @media (max-width: 680px) {
   body { font-size: 14px; }
   .app-frame { display: block; background: var(--surface); }
-  .sidebar {
-    display: none; position: fixed; inset: 0 22% 0 0; z-index: 25;
-    background: var(--ground); padding: 20px 14px; overflow-y: auto;
-    box-shadow: 0 0 0 100vmax rgba(24, 21, 17, .28);
+  /* 手机上不再用抽屉：主导航换成拇指能够到的底部 tab。 */
+  .sidebar, .sidebar.is-open { display: none; }
+  .mobile-menu { display: none; }
+  .sheet { margin: 0; border: 0; border-radius: 0; min-height: 100svh; padding-top: 54px; padding-bottom: calc(66px + env(safe-area-inset-bottom)); overflow: visible; }
+  .mobile-tabs {
+    display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 18;
+    padding: 4px 4px calc(4px + env(safe-area-inset-bottom));
+    background: var(--surface); border-top: 1px solid var(--border);
   }
-  .sidebar.is-open { display: flex; }
-  .sheet { margin: 0; border: 0; border-radius: 0; min-height: 100svh; padding-top: 54px; overflow: visible; }
-  .topbar { position: fixed; top: 0; left: 0; right: 0; height: 54px; z-index: 15; background: var(--surface); border-bottom: 1px solid var(--rule); padding: 0 14px; gap: 10px; }
-  .mobile-menu { display: block; }
-  .crumbs { margin-right: auto; margin-left: 2px; font-size: 10.5px; gap: 6px; }
+  .tab-item {
+    display: grid; justify-items: center; align-content: center; gap: 2px;
+    min-height: 52px; padding: 5px 2px; border: 0; border-radius: 10px;
+    background: transparent; color: var(--faint); font-size: 10.5px; letter-spacing: .01em;
+  }
+  .tab-item .tab-icon { font-size: 19px; line-height: 1; }
+  .tab-item.is-active { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+  .mobile-more {
+    display: grid; gap: 2px; position: fixed; left: 0; right: 0;
+    bottom: calc(60px + env(safe-area-inset-bottom)); z-index: 17;
+    padding: 8px 10px 10px; background: var(--surface);
+    border-top: 1px solid var(--border); border-radius: 14px 14px 0 0;
+    box-shadow: 0 -14px 34px rgba(29, 21, 17, .14);
+  }
+  .mobile-more[hidden] { display: none; }
+  .mobile-more button {
+    display: flex; align-items: center; justify-content: space-between;
+    min-height: 48px; padding: 0 12px; border: 0; border-radius: 9px;
+    background: transparent; color: var(--text); font-size: 14px; text-align: left;
+  }
+  .mobile-more button:active { background: var(--raised); }
+  .more-hint { margin: 0; padding: 6px 12px 4px; color: var(--faint); font-size: 11.5px; }
+  .toast { bottom: calc(80px + env(safe-area-inset-bottom)); }
+  /* 网页登录是 123 备份的主入口，占满一行并给足触控高度 */
+  .web-login-block button { justify-self: stretch; width: 100%; min-height: 46px; }
+  .topbar { position: fixed; top: 0; left: 0; right: 0; height: 54px; z-index: 15; background: var(--surface); border-bottom: 1px solid var(--rule); padding: 0 12px; gap: 8px; }
+  .crumbs { margin-right: auto; margin-left: 0; }
+  .crumbs > span:first-child, .crumb-sep { display: none; }
   .crumbs strong { font-size: 13px; }
   .top-actions { gap: 6px; }
   .top-actions .text-button { display: none; }
@@ -645,14 +683,46 @@ button:disabled { cursor: not-allowed; opacity: .5; }
   .bulk-toolbar > button:nth-of-type(3) { grid-column: 3 / 4; }
   .bulk-toolbar > .bulk-status { grid-column: 1 / -1; }
 
-  .theme-list { grid-template-columns: 1fr; gap: 12px; }
-  .theme-preview .preview-open, .theme-preview .preview-empty { aspect-ratio: 16 / 9; max-height: 156px; }
-  .theme-info { padding: 10px 12px 8px; }
-  .theme-list.is-list .theme-card { grid-template-columns: 128px minmax(0, 1fr); }
-  .theme-list.is-list .theme-info { padding: 8px 0; }
+  /* 一行两个：单列在手机上要滚很久才看完一屏，双列把图、名、作者、压缩结果
+     压进半屏，资源角色这类次要信息留给点开后的细节弹窗。 */
+  .theme-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 10px; }
+  .theme-preview .preview-open, .theme-preview .preview-empty { aspect-ratio: 4 / 3; max-height: none; border-radius: 10px; }
+  .preview-caption { display: none; }
+  .theme-more { top: 6px; right: 6px; width: 26px; height: 26px; font-size: 13px; opacity: .72; }
+  /* 勾选框浮到图片左上角，标题不必再让出 24px。原生 checkbox 在图片上是一块
+     白方块，这里自绘成半透明小方框，选中时填陶土色并画勾。 */
+  .theme-card { position: relative; }
+  .theme-card .item-select {
+    position: absolute; top: 7px; left: 7px; z-index: 3; width: 18px; height: 18px; margin: 0;
+    appearance: none; -webkit-appearance: none;
+    border: 1.5px solid rgba(255, 255, 255, .92); border-radius: 5px;
+    background: rgba(255, 253, 248, .58) center / 12px 12px no-repeat;
+    box-shadow: 0 0 0 1px rgba(29, 26, 21, .22), 0 1px 3px rgba(24, 21, 17, .3);
+  }
+  .theme-card .item-select:checked {
+    border-color: var(--accent); background-color: var(--accent);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5 6.2 11.7 13 5' fill='none' stroke='%23fffdf8' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  }
+  .theme-info { padding: 7px 1px 0; }
+  .theme-title { font-size: 13px; line-height: 1.3; }
+  .theme-info .theme-meta { margin-top: 2px; font-size: 10.5px; }
+  .theme-meta .theme-roles { display: none; }
+  .theme-info p { margin-top: 3px; font-size: 10.5px; -webkit-line-clamp: 1; }
+  .theme-list.is-list { gap: 12px; }
+  .theme-list.is-list .theme-card { grid-template-columns: 116px minmax(0, 1fr); }
+  .theme-list.is-list .theme-card .item-select { position: static; filter: none; }
+  .theme-list.is-list .theme-info { padding: 4px 0; }
+  .theme-list.is-list .theme-info .theme-meta { font-size: 11px; }
+  .theme-list.is-list .theme-info p { -webkit-line-clamp: 2; font-size: 11px; }
   .theme-list.is-list .theme-preview .preview-open { border-radius: 9px; }
-  .theme-info { padding: 8px 2px 0; }
-  .theme-info p { -webkit-line-clamp: 2; }
+  /* 库页顶部说明在小屏上是重复信息，收掉能多放半行卡片 */
+  #themesView .title-row .lede, #fontsView .title-row .lede, #assetsView .title-row .lede,
+  #themesView .section-heading p, #fontsView .section-heading p, #assetsView .section-heading p { display: none; }
+  /* 没勾选任何项目时，禁用状态的操作按钮只是占位；勾选后工具条才展开。
+     导入页的「确认所选」保持常驻，避免看起来缺了保存入口。 */
+  #themeToolbar:not(.has-selection) > button,
+  #fontToolbar:not(.has-selection) > button,
+  #assetToolbar:not(.has-selection) > button { display: none; }
 
   .font-list { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
   .font-preview-frame { min-height: 104px; margin: 8px 10px 0; }

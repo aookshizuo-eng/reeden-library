@@ -28,15 +28,16 @@ for (const file of staticFiles) {
 }
 
 const appPath = path.join(source, "app.js");
-const [app, html] = await Promise.all([
+const [app, html, css] = await Promise.all([
   readFile(appPath, "utf8"),
   readFile(path.join(source, "index.html"), "utf8"),
+  readFile(path.join(source, "styles.css"), "utf8"),
 ]);
 for (const marker of ["function fontPreviewMarkup", "function loadFontPreviewFace", "function recoverFontPreviewImage", "new FontFace(", "font-preview-frame", "font-preview-fallback", "data-font-preview-id", "data-font-id", "function renderFonts",
   "function analyzeFontGlyphs", "function inkProfile", "window.opentype", "glyph_method", "function downloadSelectedRecords", "function downloadRecordsSeparately", "function fetchDownloadableBytes", "data-bundle", "function renderThemeAuthorFilter", "function compressPrivateRedWithDirectory", "function queueFilesForLater", "function resumeStagedJobs", "function backupOriginalTo123", "function runCodecTask", "function loadLibraryAfterConnection", "function fetchWithReadTimeout", "API_READ_TIMEOUT_MS", "已连接共享库", "function verifyPan123Backup", "/api/backup/123/verify", "已连接 123 云盘", "function refreshPan123BackupList", "function verifyPan123Write", "/api/backup/123/list", "123 已备份", "encodeURIComponent(config.folder)", "encodeURIComponent(fileName)", "已用 ${seconds} 秒", "function autoResumeStagedQueue", "reeden-auto-resume-queue", "auto_commit", 'fetch(apiUrl(key), {method: "DELETE"', "function compressionEstimate", "COMPRESSION_PRESET_LABELS", "compressionCustomFields", "customCompressionFactors", "compressionQualityValue", "function offerLocalCleanup", "function performLocalCleanup", "function cleanupTargets", "function nativeFileBridge", "function pickFolderWithAccess", "pickedFileSources", "RedGardenNative", "showDirectoryPicker", "localCleanupEnabled", "function privatePlainIdentity", "function jsonObjectAt", "function indexOfBytes", "function applyThemeDensity", "function restoreThemeDensity", "themeDensityDefault", "reeden-theme-density"]) {
   if (!app.includes(marker)) errors.push(`前端缺少关键回归标记：${marker}`);
 }
-for (const id of ["fontList", "fontCount", "fontEmpty", "themeAuthorFilter", "downloadSelectedTheme", "downloadSelectedFont", "downloadSelectedAsset", "queueForLater", "resumeStagedJobs", "pan123BackupToken", "verifyPan123Backup", "listPan123Backup", "verifyPan123Write", "pan123BackupList", "autoResumeQueue", "compressionPresetGroup", "compressionCustomFields", "compressionQuality", "compressionMaxEdge", "compressionQualityDown", "compressionQualityUp", "compressionQualityValue", "compressionGifColors", "compressionReader", "compressionIconLossless", "reviewProgress", "reviewProgressTitle", "reviewProgressCount", "reviewProgressBar", "reviewProgressStage", "reviewProgressCurrent", "cleanupDialog", "cleanupList", "cleanupConfirm", "cleanupCancel", "cleanupSelectAll", "cleanupSummary", "localCleanupEnabled", "localCleanupHint", "closeCleanupDialog", "themeDensity", "themeSearchInput", "themeAuthorFilter", "themeDialog", "themeDialogBody", "closeThemeDialog"]) {
+for (const id of ["fontList", "fontCount", "fontEmpty", "themeAuthorFilter", "downloadSelectedTheme", "downloadSelectedFont", "downloadSelectedAsset", "queueForLater", "resumeStagedJobs", "pan123BackupToken", "verifyPan123Backup", "listPan123Backup", "verifyPan123Write", "pan123BackupList", "autoResumeQueue", "compressionPresetGroup", "compressionCustomFields", "compressionQuality", "compressionMaxEdge", "compressionQualityDown", "compressionQualityUp", "compressionQualityValue", "compressionGifColors", "compressionReader", "compressionIconLossless", "reviewProgress", "reviewProgressTitle", "reviewProgressCount", "reviewProgressBar", "reviewProgressStage", "reviewProgressCurrent", "cleanupDialog", "cleanupList", "cleanupConfirm", "cleanupCancel", "cleanupSelectAll", "cleanupSummary", "localCleanupEnabled", "localCleanupHint", "closeCleanupDialog", "themeDensity", "themeSearchInput", "themeAuthorFilter", "themeDialog", "themeDialogBody", "closeThemeDialog", "pan123WebLogin", "pan123WebLoginHint", "mobileMore", "moreRuntimeMode", "moreJobCount"]) {
   if (!html.includes(`id=\"${id}\"`)) errors.push(`页面结构回归检查失败：缺少 #${id}`);
 }
 for (const file of ["app.js", "free_codec.js", "free_codec_worker.js", "omggif.js", "opentype.min.js"]) {
@@ -77,6 +78,17 @@ if (!app.includes("revealTransferProgress")) errors.push("site/app.js 未在确�
 if (!app.includes("if (document.hidden) { pan123QrTimer = setTimeout(() => pollPan123Qr(generation), 4000); return; }")) errors.push("site/app.js 又在 WebView 隐藏时中止 123 扫码");
 if (app.includes("已离开网页，请重新扫码连接")) errors.push("site/app.js 仍在切后台时放弃 123 扫码会话");
 if (!app.includes("themeDialog") || !app.includes("function openThemeDialog")) errors.push("site/app.js 缺少主题细节弹窗");
+// 手机端体验回归：网格必须双列（单列一屏只能看一个主题），导航必须走底部
+// tab（左上角抽屉在拇指范围外），123 云盘必须能用网页登录拿到会话。
+if (!/\.theme-list \{ grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/.test(css)) errors.push("手机端主题网格退回单列，空间利用率不足");
+if (!/\.mobile-tabs \{[^}]*grid-template-columns: repeat\(5/.test(css)) errors.push("site/styles.css 缺少手机底部导航布局");
+if (/\.sidebar\.is-open \{ display: flex; \}/.test(css)) errors.push("手机端又启用了左上角抽屉导航");
+for (const marker of ["function webLoginPan123", "function acceptPan123Tokens", "function nativeAppBridge", "openPan123Login", "onRedGardenPan123Login", "toggleMobileMore", "function ingestSharedFiles", "onRedGardenSharedFiles", "__shared__", "releaseSharedFiles"]) {
+  if (!app.includes(marker)) errors.push(`site/app.js 缺少新交互实现：${marker}`);
+}
+for (const marker of ['class="mobile-tabs"', 'data-tab="themes"', 'id="mobileMore"', 'id="pan123WebLogin"']) {
+  if (!html.includes(marker)) errors.push(`site/index.html 缺少手机导航或 123 登录入口：${marker}`);
+}
 const [codecSource] = await Promise.all([readFile(path.join(source, "free_codec.js"), "utf8")]);
 if (!codecSource.includes("options.store")) errors.push("site/free_codec.js 缺少 Stored ZIP 选项，批量下载会重复压缩字体");
 // Compression quality regression: the OffscreenCanvas encoder must accept every

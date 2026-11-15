@@ -12,11 +12,31 @@
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|keyboardHidden"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- 从文件管理器、微信、浏览器等「分享」到 Red Garden 时直接开始导入：
+                 单个文件和多个文件分别走 SEND / SEND_MULTIPLE。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
         </activity>
+        <!-- 应用内的 123 云盘网页登录页：主 WebView 不允许离开本站，所以登录
+             单独开一个受控 WebView，再由它把会话 Token 交回主页面。 -->
+        <activity
+            android:name=".Pan123LoginActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"
+            android:label="@string/pan123_login_title" />
     </application>
 </manifest>

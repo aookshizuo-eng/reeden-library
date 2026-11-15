@@ -51,7 +51,9 @@ function staticHostedWithoutApi() {
 function assetUrl(path) { return path ? apiUrl(path) : ""; }
 function updateRuntimeMode() {
   const label = $("#runtimeModeLabel");
-  if (label) label.textContent = remoteUnavailable ? "本地浏览器处理模式" : apiBase ? "设备同步模式 · R2 API" : staticHostedWithoutApi() ? "等待连接同步 Worker" : "本地处理模式";
+  const modeText = remoteUnavailable ? "本地浏览器处理模式" : apiBase ? "设备同步模式 · R2 API" : staticHostedWithoutApi() ? "等待连接同步 Worker" : "本地处理模式";
+  if (label) label.textContent = modeText;
+  if ($("#moreRuntimeMode")) $("#moreRuntimeMode").textContent = modeText;
   const note = $("#staticModeNote");
   if (note) {
     note.hidden = !apiBase && !remoteUnavailable && !staticHostedWithoutApi();
@@ -678,6 +680,72 @@ function pan123InputConfig() {
     folder: String($("#pan123BackupFolder")?.value || "").trim() || "Red-Garden-Backup",
   };
 }
+// 网页登录：APK 里由原生 WebView 打开 123 登录页（主 WebView 不允许离开本站），
+// 登录后按 JWT 形状把会话扫出来交回这里；浏览器跨域读不到对方 localStorage，
+// 只能新开窗口让用户自己复制。两条路最后都落到同一个 localStorage key，
+// 备份与验证逻辑不需要知道 Token 从哪来。
+function nativeAppBridge() {
+  const bridge = window.RedGardenNative;
+  if (!bridge || typeof bridge.capability !== "function") return null;
+  try { return { bridge, caps: JSON.parse(String(bridge.capability() || "{}")) }; } catch { return null; }
+}
+function pan123TokenSourceLabel(source) {
+  const text = String(source || "");
+  if (text.startsWith("localStorage:")) return "网页本地存储";
+  if (text.startsWith("sessionStorage:")) return "网页会话存储";
+  return "网页 Cookie";
+}
+function acceptPan123Tokens(payload) {
+  let list = [];
+  try { list = JSON.parse(String(payload || "[]")); } catch { list = []; }
+  const tokens = (Array.isArray(list) ? list : []).filter(item => item && typeof item.token === "string" && item.token);
+  const output = $("#pan123BackupStatus");
+  if (!tokens.length) {
+    operationMessage(output, "登录页里没有找到会话 Token。请确认页面已经显示登录状态，再点一次「取回会话 Token」。", true);
+    return;
+  }
+  const input = $("#pan123BackupToken");
+  if (input) input.value = tokens[0].token;
+  try { localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, tokens[0].token); } catch {}
+  operationMessage(output, `已从${pan123TokenSourceLabel(tokens[0].source)}取回会话（共 ${tokens.length} 个候选），正在验证…`);
+  const tryOne = async index => {
+    if (!apiBase) {
+      operationMessage(output, "已取回会话 Token 并保存。请先在「多设备访问」保存同步 API 地址，再回来点「测试连接」。");
+      return;
+    }
+    if (index >= tokens.length) {
+      operationMessage(output, "取回了会话，但 123 云盘仍未通过校验。请确认登录没有过期，或改用已有会话 Token。", true);
+      return;
+    }
+    if (input) input.value = tokens[index].token;
+    try { localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, tokens[index].token); } catch {}
+    if (await verifyPan123Backup()) return;
+    await tryOne(index + 1);
+  };
+  tryOne(0).catch(() => {});
+}
+async function webLoginPan123() {
+  const output = $("#pan123BackupStatus");
+  const app = nativeAppBridge();
+  if (app?.caps?.pan123Login) {
+    operationMessage(output, "正在打开 123 云盘登录页，登录完成后会自动取回会话…");
+    let result = {};
+    try { result = JSON.parse(String(app.bridge.openPan123Login() || "{}")); } catch {}
+    if (result && result.started === false) operationMessage(output, result.reason || "登录页没有打开，请重试。", true);
+    return;
+  }
+  // 带 noopener 时 window.open 一律返回 null，不能拿返回值判断是否被拦截；
+  // 先正常打开再断开 opener 引用，既保留句柄也不会把本页交给对方。
+  const opened = window.open("https://www.123pan.com/", "_blank");
+  if (opened) {
+    try { opened.opener = null; } catch {}
+    operationMessage(output, "已打开 123 云盘网页：登录后按 F12 → Network，复制任一 /b/api 请求里 Authorization: Bearer 之后的值填到上面。");
+  } else {
+    operationMessage(output, "没打开新窗口（可能被弹窗拦截）。请手动打开 https://www.123pan.com/ 登录后复制会话 Token。", true);
+  }
+}
+// 原生登录页回传：payload 是 [{token, source}] 的 JSON 字符串。
+window.onRedGardenPan123Login = payload => acceptPan123Tokens(payload);
 // "查看备份清单" answers the real question: are original .red packages actually
 // sitting in 123, and does every theme in the shared library have one? It is
 // read-only and auth-gated; the Worker never stores the session token.
@@ -1613,6 +1681,14 @@ function setView(view) {
   if (location.hash !== `#${view}`) history.replaceState(null, "", `#${view}`);
   $$("[data-view-panel]").forEach(panel => { panel.hidden = panel.dataset.viewPanel !== view; });
   $$(".nav-item").forEach(item => item.classList.toggle("is-active", item.dataset.view === view));
+  // 底部 tab 只有五个入口，后台任务与存储设置归到「更多」。
+  const tabFor = ["jobs", "storage"].includes(view) ? "more" : view;
+  $$(".mobile-tabs .tab-item").forEach(item => {
+    const active = item.dataset.tab === tabFor;
+    item.classList.toggle("is-active", active);
+    if (item.dataset.tab === "more") item.setAttribute("aria-expanded", active ? "true" : "false");
+  });
+  closeMobileMore();
   $("#topbarTitle").textContent = viewNames[view];
   // During startup the boot sequence already loads storage and then all
   // libraries. Loading here too would race a second, differently-deduplicated
@@ -1780,12 +1856,15 @@ function openThemeDialog(id) {
   $("#themeDialogDelete")?.addEventListener("click", () => { dialog.close(); deleteSelectedRecords("theme", [theme.id]); });
   if (!dialog.open) dialog.showModal();
 }
-const THEME_DENSITY_KEY = "reeden-theme-density";
+// v2：手机上默认改成双列网格，旧 key 里存的 list 不再沿用，否则老用户
+// 打开 APK 还是一行一个主题。
+const THEME_DENSITY_KEY = "reeden-theme-density-v2";
 // A theme preview is a composite of shelf + splash art, so a square frame at
-// full card width pushed every action below the fold. Grid keeps a 16:9 strip,
-// list drops it to a 96px thumbnail; phones start in list mode.
+// full card width pushed every action below the fold. Grid keeps a 16:10 strip,
+// list drops it to a 116px thumbnail. Phones now start in grid: two columns fit
+// the same information in half the scrolling.
 function themeDensityDefault() {
-  try { return window.matchMedia("(max-width: 680px)").matches ? "list" : "grid"; } catch { return "grid"; }
+  return "grid";
 }
 function applyThemeDensity(mode, persist = true) {
   const density = mode === "list" ? "list" : "grid";
@@ -1825,7 +1904,7 @@ function renderThemes() {
     // 都收进点击后打开的主题细节弹窗，跟参考站的卡片一样安静。
     return `<article class="theme-card" data-theme-id="${escapeHtml(theme.id)}">
       <div class="theme-preview">${previewImage(preview.url, `${theme.name} ${preview.label} · ${previewKind(theme.preview_details)}`, "", theme.preview_details)}<span class="preview-caption">${escapeHtml(previewKind(theme.preview_details))}</span><button class="theme-more" type="button" data-theme-open="${escapeHtml(theme.id)}" aria-label="查看 ${escapeHtml(theme.name || "未命名主题")} 的主题细节">⋯</button></div>
-      <div class="theme-info"><div class="item-heading">${selectInput("theme", theme.id, `主题 ${theme.name || "未命名主题"}`, isAssetBusy("theme", theme.id))}<button class="theme-title theme-open" type="button" data-theme-open="${escapeHtml(theme.id)}">${escapeHtml(theme.name || "未命名主题")}</button></div><div class="theme-meta">${escapeHtml(themeAuthorLabel(theme))}${roleText ? ` · ${escapeHtml(roleText)}` : ""}</div><p>${compressionText}</p>${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === "string" ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join("；"))}</p>` : ""}</div>
+      <div class="theme-info"><div class="item-heading">${selectInput("theme", theme.id, `主题 ${theme.name || "未命名主题"}`, isAssetBusy("theme", theme.id))}<button class="theme-title theme-open" type="button" data-theme-open="${escapeHtml(theme.id)}">${escapeHtml(theme.name || "未命名主题")}</button></div><div class="theme-meta"><span class="theme-author">${escapeHtml(themeAuthorLabel(theme))}</span>${roleText ? `<span class="theme-roles"> · ${escapeHtml(roleText)}</span>` : ""}</div><p>${compressionText}</p>${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === "string" ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join("；"))}</p>` : ""}</div>
     </article>`;
   }).join("");
   $$("[data-theme-open]").forEach(button => button.addEventListener("click", event => { event.stopPropagation(); openThemeDialog(button.dataset.themeOpen); }));
@@ -2058,6 +2137,10 @@ function renderJobs() {
   const active = activeJobs();
   $("#jobNavCount").hidden = !active.length;
   $("#jobNavCount").textContent = String(active.length);
+  if ($("#moreJobCount")) {
+    $("#moreJobCount").hidden = !active.length;
+    $("#moreJobCount").textContent = String(active.length);
+  }
   $("#jobBanner").hidden = !active.length;
   if (active.length) {
     const current = active.find(job => job.status === "running") || active[0];
@@ -2216,9 +2299,17 @@ function renderStorageSummary(data) {
     $("#storageHint").textContent = "浏览器本地处理 · 多设备共享 R2";
     $("#storageState").textContent = "免费浏览器同步已启用";
     $("#credentialState").textContent = syncToken ? "同步写入令牌已填写（仅保存在本机浏览器）。" : "尚未填写同步写入令牌；读取可用，上传会被 Worker 拒绝。";
-    $("#pan123CredentialState").textContent = "免费模式不调用 123 云盘后台。";
+    $("#pan123CredentialState").textContent = "会话只保存在本机浏览器；测试连接、备份清单与上传由同步 Worker 代转，Token 不写入仓库或 R2。";
     $("#storageForm").hidden = true;
-    $("#pan123Label").hidden = true;
+    // 静态模式没有本机后端，扫码与账号密码登录接口不可用，但网页登录、
+    // Token、测试连接和备份清单都还能用，所以保留说明块、只收起后端面板。
+    $("#pan123Label").hidden = false;
+    $("#pan123Label h2").textContent = "连接 123 云盘";
+    const labelNote = $("#pan123Label p:first-of-type");
+    if (labelNote) labelNote.textContent = "可选：123 云盘只备份原始 RED，压缩 RED、字体和预览仍存 R2。会话 Token 只保存在本机浏览器，测试连接、备份清单与上传由同步 Worker 代转。";
+    // 主 WebView 不允许离开本站，这个外链点了也只会被拦下；登录入口在上方面板里。
+    const labelLink = $("#pan123Label .download-link");
+    if (labelLink) labelLink.hidden = true;
     $("#pan123Panel").hidden = true;
     return;
   }
@@ -2242,6 +2333,9 @@ function renderStorageSummary(data) {
   $("#pan123CredentialState").textContent = pan123.configured ? `123 云盘会话：${sources[pan123.source] || "已保存"}。是否有效请运行上传验证。` : "尚未保存 123 云盘会话。可直接登录，或使用已有会话 Token。";
 }
 function updateStorageControls() {
+  // 免费/静态模式没有本机后端表单；123 说明块与网页登录面板由
+  // renderStorageSummary 决定显示，这里再跑一遍会把它重新藏起来。
+  if (state.storage?.mode === "browser-local") return;
   const form = $("#storageForm");
   const locked = Boolean(state.operation) || activeJobs().length > 0;
   $("#storageBusyNote").hidden = !activeJobs().length;
@@ -3412,8 +3506,53 @@ async function importUnifiedFiles(fileList) {
   if (groups.asset.length) await importAssets(groups.asset);
   operationMessage(status, `本批已分流：${groups.theme.length} 个主题、${groups.font.length} 个字体、${groups.asset.length} 个收藏。${unsupported.length ? `已跳过不支持的文件：${unsupported.join("、")}` : ""}`, Boolean(unsupported.length));
 }
-$("#chooseThemes").addEventListener("click", () => $("#themeInput").click());
-$("#chooseThemeFolder").addEventListener("click", () => pickFolderWithAccess("themeFolderInput", analyzeFiles));
+// 从别的应用「分享」到 APK：原生把文件复制进 cache，并用 shouldInterceptRequest
+// 在 /__shared__/<id> 上流式返回，这里读成 File 后走同一个统一导入，所以分享
+// 和手动选文件的结果完全一致（字体、收藏直接上传，主题进入待确认并自动全选）。
+const handledSharedIds = new Set();
+async function ingestSharedFiles(payload) {
+  let list = [];
+  try { list = JSON.parse(String(payload || "[]")); } catch { return; }
+  const fresh = (Array.isArray(list) ? list : [])
+    .filter(item => item && item.id && item.name && !handledSharedIds.has(item.id));
+  if (!fresh.length) return;
+  fresh.forEach(item => handledSharedIds.add(item.id));
+  if (state.activeView !== "import") setView("import");
+  const files = [];
+  for (const item of fresh) {
+    try {
+      const url = new URL(`./__shared__/${encodeURIComponent(item.id)}`, location.href).href;
+      const response = await fetch(url, {cache: "no-store"});
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const bytes = await response.arrayBuffer();
+      if (!bytes.byteLength) throw new Error("空文件");
+      files.push(new File([bytes], item.name, {type: "application/octet-stream"}));
+    } catch (error) {
+      toast(`读取分享文件失败：${item.name}（${error.message}）`);
+    }
+  }
+  try { nativeAppBridge()?.bridge?.releaseSharedFiles(JSON.stringify(fresh.map(item => item.id))); } catch {}
+  if (!files.length) return;
+  toast(`收到 ${files.length} 个分享文件，正在导入`);
+  const before = new Set(state.review.map(item => item.staging_id));
+  await importUnifiedFiles(files);
+  const added = state.review.filter(item => !before.has(item.staging_id));
+  if (added.length) {
+    added.forEach(item => selections.review.add(item.staging_id));
+    updateBulkControls();
+    toast(`${added.length} 个主题已加入待确认并勾选，点「确认所选并压缩保存」即上传`);
+  }
+}
+window.onRedGardenSharedFiles = payload => { ingestSharedFiles(payload).catch(() => {}); };
+// onPageFinished 可能早于 ES module 执行完，这里主动再拉一次，按 id 去重。
+async function pullSharedFiles() {
+  const app = nativeAppBridge();
+  if (!app || typeof app.bridge.sharedFiles !== "function") return;
+  let list = "[]";
+  try { list = String(app.bridge.sharedFiles() || "[]"); } catch { return; }
+  await ingestSharedFiles(list);
+}
+$("#chooseThemes").addEventListener("click", () => $("#themeInput").click());$("#chooseThemeFolder").addEventListener("click", () => pickFolderWithAccess("themeFolderInput", analyzeFiles));
 $("#indexThemeFolder").addEventListener("click", () => $("#existingThemeFolderInput").click());
 $("#addThemeButton").addEventListener("click", () => { setView("import"); });
 $("#themeInput").addEventListener("change", async e => { await analyzeFiles(e.target.files); e.target.value = ""; });
@@ -3474,7 +3613,39 @@ document.addEventListener("change", event => {
 });
 $("#scanButton").addEventListener("click", () => $("#indexInput").click());
 $("#indexInput").addEventListener("change", async event => { const file = event.target.files?.[0]; if (!file) return; try { if (browserSyncEnabled()) throw new Error("免费同步模式通过 R2 records 自动读取清单，无需导入本地索引文件"); const value = JSON.parse(await file.text()); const result = await api("/api/index/import", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(value) }); await loadThemes(); toast(`已导入 ${result.count} 条已有清单`); } catch (error) { toast(`清单导入失败：${error.message}`); } event.target.value = ""; });
-$("#mobileMenu").addEventListener("click", () => $(".sidebar").classList.toggle("is-open"));
+// 手机底部导航：五个拇指能够到的入口，「更多」里放后台任务与存储设置。
+function closeMobileMore() {
+  const panel = $("#mobileMore");
+  if (panel && !panel.hidden) panel.hidden = true;
+  $(".mobile-tabs [data-tab='more']")?.setAttribute("aria-expanded", "false");
+}
+function toggleMobileMore() {
+  const panel = $("#mobileMore");
+  if (!panel) return;
+  panel.hidden = !panel.hidden;
+  $(".mobile-tabs [data-tab='more']")?.setAttribute("aria-expanded", panel.hidden ? "false" : "true");
+}
+$$(".mobile-tabs [data-tab]").forEach(button => button.addEventListener("click", () => {
+  if (button.dataset.tab === "more") { toggleMobileMore(); return; }
+  setView(button.dataset.tab);
+}));
+$$("#mobileMore [data-more-view]").forEach(button => button.addEventListener("click", () => setView(button.dataset.moreView)));
+$("#mobileMore [data-more-action='refresh']")?.addEventListener("click", () => {
+  closeMobileMore();
+  const view = state.activeView;
+  if (view === "themes") loadThemes().catch(error => toast(error.message));
+  else if (view === "fonts") loadFonts().catch(error => toast(error.message));
+  else if (view === "assets") loadAssets().catch(error => toast(error.message));
+  else if (view === "jobs") loadJobs().catch(() => {});
+  else loadStorage().catch(() => {});
+  toast("已刷新");
+});
+document.addEventListener("click", event => {
+  const panel = $("#mobileMore");
+  if (!panel || panel.hidden) return;
+  if (event.target.closest("#mobileMore, .mobile-tabs [data-tab='more']")) return;
+  closeMobileMore();
+});
 $("#closeModal").addEventListener("click", () => $("#modalBackdrop").hidden = true);
 $("#openJobs").addEventListener("click", () => setView("jobs"));
 $("#refreshJobs").addEventListener("click", () => loadJobs().catch(() => {}));
@@ -3590,6 +3761,14 @@ $("#savePan123Backup").addEventListener("click", () => {
   } catch { operationMessage($("#pan123BackupStatus"), "当前浏览器无法保存设置，请检查隐私模式设置。", true); }
 });
 $("#verifyPan123Backup").addEventListener("click", () => { verifyPan123Backup(); });
+$("#pan123WebLogin")?.addEventListener("click", webLoginPan123);
+(() => {
+  const hint = $("#pan123WebLoginHint");
+  if (!hint) return;
+  hint.textContent = nativeAppBridge()?.caps?.pan123Login
+    ? "在应用内打开 123 云盘登录页，用账号密码登录后会自动取回会话 Token 并验证。"
+    : "浏览器会新开 123 云盘网页；登录后从开发者工具复制 Authorization 里的会话 Token 填到下面。";
+})();
 $("#listPan123Backup").addEventListener("click", () => { refreshPan123BackupList(); });
 $("#verifyPan123Write").addEventListener("click", () => { verifyPan123Write(); });
 $("#clearPan123Backup").addEventListener("click", () => {
@@ -3636,6 +3815,8 @@ try {
 } catch {}
 syncCompressionControls();
 setView(viewNames[initialView] ? initialView : "import");
+// 分享进入时原生可能先于 app.js 执行完就回调，这里补一次主动拉取（按 id 去重）。
+setTimeout(() => { pullSharedFiles().catch(() => {}); }, 900);
 window.addEventListener("hashchange", () => {
   const view = location.hash.slice(1);
   if (viewNames[view]) setView(view);

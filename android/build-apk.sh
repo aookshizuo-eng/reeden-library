@@ -26,8 +26,8 @@ echo "2/6 aapt2 link (assets from site/)"
   --java "$OUT/gen" \
   --min-sdk-version 23 \
   --target-sdk-version 35 \
-  --version-code 5 \
-  --version-name 1.1.3 \
+  --version-code 6 \
+  --version-name 1.1.4 \
   "$OUT/res/resources.zip"
 
 echo "3/6 javac"
@@ -56,6 +56,6 @@ echo "6/6 zipalign + sign"
   --ks-pass pass:android --key-pass pass:android \
   --ks-key-alias androiddebugkey \
   --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
-  --out red-garden-1.1.3.apk aligned.apk
-"$BT/apksigner.bat" verify --print-certs red-garden-1.1.3.apk | head -6
-ls -la red-garden-1.1.3.apk
+  --out red-garden-1.1.4.apk aligned.apk
+"$BT/apksigner.bat" verify --print-certs red-garden-1.1.4.apk | head -6
+ls -la red-garden-1.1.4.apk

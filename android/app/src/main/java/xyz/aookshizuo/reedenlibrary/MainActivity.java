@@ -30,8 +30,12 @@ import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -40,9 +44,11 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 public final class MainActivity extends Activity {
     private static final int FILE_CHOOSER_REQUEST = 1001;
+    private static final int PAN123_LOGIN_REQUEST = 1002;
     private static final String HOME_URL = "https://aookshizuo-eng.github.io/reeden-library/";
     private static final String SITE_HOST = "aookshizuo-eng.github.io";
     private static final String SITE_PREFIX = "/reeden-library";
@@ -54,6 +60,12 @@ public final class MainActivity extends Activity {
     // can never reach a file the user never picked here.
     private final List<Uri> pickedUris = new ArrayList<>();
     private volatile String currentPageUrl = HOME_URL;
+    // 从别的应用分享进来的文件：先复制到 cache，再让网页用同源 URL 读走。
+    // 用 URL 而不是 base64 桥，是因为主题动辄 20 MB，base64 字符串会直接
+    // 把 WebView 撑着，而 shouldInterceptRequest 是流式的。
+    private static final String SHARED_PREFIX = SITE_PREFIX + "/__shared__/";
+    private final Map<String, File> sharedFiles = new ConcurrentHashMap<>();
+    private final org.json.JSONArray sharedMeta = new org.json.JSONArray();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -63,7 +75,129 @@ public final class MainActivity extends Activity {
         setContentView(webView);
         configureSafeInsets(webView);
         configureWebView(webView);
+        handleShareIntent(getIntent());
         webView.loadUrl(HOME_URL);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleShareIntent(intent);
+    }
+
+    /** 接收 ACTION_SEND / ACTION_SEND_MULTIPLE，把文件复制进 cache 并通知网页。 */
+    private void handleShareIntent(Intent intent) {
+        if (intent == null) return;
+        String action = intent.getAction();
+        boolean single = Intent.ACTION_SEND.equals(action);
+        boolean multiple = Intent.ACTION_SEND_MULTIPLE.equals(action);
+        if (!single && !multiple) return;
+        final List<Uri> uris = new ArrayList<>();
+        try {
+            if (single) {
+                Uri uri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+                if (uri != null) uris.add(uri);
+            } else {
+                ArrayList<Uri> extra = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+                if (extra != null) uris.addAll(extra);
+            }
+        } catch (Exception ignored) {
+        }
+        // 同一个 Intent 可能被重复投递（旋转屏幕、回到前台），取过的就不再处理。
+        intent.removeExtra(Intent.EXTRA_STREAM);
+        if (uris.isEmpty()) return;
+        new Thread(() -> {
+            for (Uri uri : uris) importSharedUri(uri);
+            runOnUiThread(this::publishSharedFiles);
+        }, "red-garden-share").start();
+    }
+
+    private void importSharedUri(Uri uri) {
+        DocumentInfo info = describe(uri);
+        String name = info != null && info.name != null ? info.name : "分享文件";
+        String extension = "";
+        int dot = name.lastIndexOf('.');
+        if (dot >= 0 && dot + 1 < name.length()) extension = name.substring(dot + 1).toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
+        String id = Long.toHexString(System.nanoTime()) + (extension.isEmpty() ? "" : "." + extension);
+        File dir = new File(getCacheDir(), "shared");
+        if (!dir.isDirectory() && !dir.mkdirs()) return;
+        File target = new File(dir, id);
+        long total = 0;
+        try (InputStream input = getContentResolver().openInputStream(uri);
+             OutputStream output = new FileOutputStream(target)) {
+            if (input == null) throw new IOException("无法读取分享的文件");
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = input.read(buffer)) > 0) {
+                output.write(buffer, 0, read);
+                total += read;
+            }
+        } catch (Exception error) {
+            target.delete();
+            return;
+        }
+        sharedFiles.put(id, target);
+        try {
+            org.json.JSONObject meta = new org.json.JSONObject();
+            meta.put("id", id);
+            meta.put("name", name);
+            meta.put("size", total);
+            synchronized (sharedMeta) {
+                sharedMeta.put(meta);
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private String sharedMetaJson() {
+        synchronized (sharedMeta) {
+            return sharedMeta.toString();
+        }
+    }
+
+    private void publishSharedFiles() {
+        if (webView == null || sharedFiles.isEmpty()) return;
+        String script = "window.onRedGardenSharedFiles && window.onRedGardenSharedFiles("
+                + org.json.JSONObject.quote(sharedMetaJson()) + ");";
+        webView.evaluateJavascript(script, null);
+    }
+
+    private WebResourceResponse openSharedFile(Uri uri, String method) {
+        if (uri == null || method == null || !"GET".equalsIgnoreCase(method) || !isSiteUrl(uri)) return null;
+        String path = uri.getPath() == null ? "" : uri.getPath();
+        if (!path.startsWith(SHARED_PREFIX)) return null;
+        String id = path.substring(SHARED_PREFIX.length());
+        File file = sharedFiles.get(id);
+        if (file == null || !file.isFile()) return null;
+        try {
+            InputStream stream = new FileInputStream(file);
+            Map<String, String> headers = new HashMap<>();
+            headers.put("Cache-Control", "no-store");
+            return new WebResourceResponse("application/octet-stream", null, 200, "OK", headers, stream);
+        } catch (IOException error) {
+            return null;
+        }
+    }
+
+    private void releaseSharedFiles(String idsJson) {
+        List<String> ids = new ArrayList<>();
+        try {
+            org.json.JSONArray array = new org.json.JSONArray(idsJson == null || idsJson.isEmpty() ? "[]" : idsJson);
+            for (int index = 0; index < array.length(); index++) ids.add(array.getString(index));
+        } catch (Exception ignored) {
+        }
+        for (String id : ids) {
+            File file = sharedFiles.remove(id);
+            if (file != null) file.delete();
+        }
+        synchronized (sharedMeta) {
+            for (int index = sharedMeta.length() - 1; index >= 0; index--) {
+                org.json.JSONObject item = sharedMeta.optJSONObject(index);
+                if (item == null || !ids.contains(item.optString("id"))) continue;
+                sharedMeta.remove(index);
+            }
+        }
     }
 
     private void configureSafeInsets(View view) {
@@ -122,7 +256,14 @@ public final class MainActivity extends Activity {
 
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest request) {
+                WebResourceResponse shared = openSharedFile(request.getUrl(), request.getMethod());
+                if (shared != null) return shared;
                 return openBundledSiteAsset(request.getUrl(), request.getMethod());
+            }
+
+            @Override
+            public void onPageFinished(WebView v, String url) {
+                publishSharedFiles();
             }
 
             @Override
@@ -247,6 +388,16 @@ public final class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == PAN123_LOGIN_REQUEST) {
+            if (resultCode != RESULT_OK || data == null) return;
+            String tokens = data.getStringExtra("tokens");
+            if (tokens == null || tokens.isEmpty() || webView == null) return;
+            // 用 JSONObject.quote 生成合法的 JS 字符串字面量，避免 token 里的
+            // 引号或反斜杠把注入的脚本弄坏。
+            String script = "window.onRedGardenPan123Login && window.onRedGardenPan123Login(" + JSONObject.quote(tokens) + ");";
+            webView.evaluateJavascript(script, null);
+            return;
+        }
         if (requestCode != FILE_CHOOSER_REQUEST || fileCallback == null) return;
         Uri[] results = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
         synchronized (pickedUris) {
@@ -336,7 +487,40 @@ public final class MainActivity extends Activity {
     public final class LocalFileBridge {
         @JavascriptInterface
         public String capability() {
-            return isTrustedPage() ? "{\"canDelete\":true}" : "{\"canDelete\":false}";
+            if (!isTrustedPage()) return "{\"canDelete\":false,\"pan123Login\":false,\"shareTarget\":false}";
+            return "{\"canDelete\":true,\"pan123Login\":true,\"shareTarget\":true}";
+        }
+
+        /** 等待导入的分享文件列表：id / name / size。 */
+        @JavascriptInterface
+        public String sharedFiles() {
+            if (!isTrustedPage()) return "[]";
+            return sharedMetaJson();
+        }
+
+        /** 网页把这些文件读完并交给导入流程后，删掉 cache 里的副本。 */
+        @JavascriptInterface
+        public String releaseSharedFiles(String idsJson) {
+            if (!isTrustedPage()) return "{\"released\":0}";
+            releaseSharedFiles(idsJson);
+            return "{\"released\":true}";
+        }
+
+        /**
+         * 打开独立的 123 云盘登录页。结果通过 window.onRedGardenPan123Login
+         * 回调回网页：参数是 [{token, source}] 的 JSON 字符串。
+         */
+        @JavascriptInterface
+        public String openPan123Login() {
+            if (!isTrustedPage()) return "{\"started\":false,\"reason\":\"当前页面不在受信任站点\"}";
+            runOnUiThread(() -> {
+                try {
+                    startActivityForResult(new Intent(MainActivity.this, Pan123LoginActivity.class), PAN123_LOGIN_REQUEST);
+                } catch (Exception error) {
+                    Toast.makeText(MainActivity.this, "无法打开 123 云盘登录页", Toast.LENGTH_SHORT).show();
+                }
+            });
+            return "{\"started\":true}";
         }
 
         @JavascriptInterface
