@@ -41,15 +41,21 @@ public final class Pan123LoginActivity extends Activity {
             "(function(){"
                     + "if (window.__rgCollectInstalled) return;"
                     + "window.__rgCollectInstalled = true;"
-                    + "window.__rgJwt = function(value){"
-                    + "  if (!value) return '';"
-                    + "  var match = String(value).match(/eyJ[A-Za-z0-9_-]{6,}\\.[A-Za-z0-9_-]{6,}\\.[A-Za-z0-9_-]{6,}/);"
-                    + "  return match ? match[0] : '';"
+                    + "window.__rgJwt = function(value, source){"
+                    + "  var text = String(value || '');"
+                    + "  if (!text) return '';"
+                    + "  var jwt = text.match(/eyJ[A-Za-z0-9_-]{6,}\\.[A-Za-z0-9_-]{6,}\\.[A-Za-z0-9_-]{6,}/);"
+                    + "  if (jwt) return jwt[0];"
+                    // 123 的部分会话是长随机串，不是 JWT。只在 key 明确带
+                    // token/session/auth 等字样时才收它，避免把统计 id 当会话。
+                    + "  if (!/token|session|auth|ticket|credential|jwt|secret/i.test(String(source || ''))) return '';"
+                    + "  var plain = text.match(/[A-Za-z0-9._-]{24,}/);"
+                    + "  return (plain && !/^[0-9]+$/.test(plain[0])) ? plain[0] : '';"
                     + "};"
                     + "window.__rgCollect = function(){"
                     + "  var found = []; var seen = {};"
                     + "  function add(source, value){"
-                    + "    var token = window.__rgJwt(value);"
+                    + "    var token = window.__rgJwt(value, source);"
                     + "    if (!token || seen[token]) return;"
                     + "    seen[token] = 1; found.push({token: token, source: source});"
                     + "  }"
@@ -82,10 +88,31 @@ public final class Pan123LoginActivity extends Activity {
                     + "} catch (error) { window.RedGardenPan123 && window.RedGardenPan123.status('error'); }"
                     + "})();";
 
+    // 自动轮询时不弹「未找到会话」——那是手动按钮才需要的反馈。
+    private static final String AUTO_SCAN_SCRIPT =
+            "(function(){"
+                    + "try {"
+                    + "  if (typeof window.__rgCollect !== 'function') return;"
+                    + "  var list = window.__rgCollect();"
+                    + "  if (list.length && window.RedGardenPan123) window.RedGardenPan123.deliver(JSON.stringify(list));"
+                    + "} catch (error) {}"
+                    + "})();";
+
     private WebView webView;
     private TextView statusView;
     private ProgressBar progressBar;
     private boolean delivered;
+    private final Runnable autoScan = new Runnable() {
+        @Override
+        public void run() {
+            if (delivered || webView == null) return;
+            try {
+                webView.evaluateJavascript(COLLECT_SCRIPT, null);
+                webView.evaluateJavascript(AUTO_SCAN_SCRIPT, null);
+            } catch (Exception ignored) { }
+            webView.postDelayed(this, 1500);
+        }
+    };
 
     private int dp(float value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
@@ -159,6 +186,9 @@ public final class Pan123LoginActivity extends Activity {
 
         webView.addJavascriptInterface(new Pan123Bridge(), "RedGardenPan123");
         webView.loadUrl(START_URL);
+        // 页面自己的定时器在 SPA 跳转/登录刷新后不一定还活着，原生这边再
+        // 兜一层轮询：登录成功即可回传并关闭页面，不需要手动点按钮。
+        webView.postDelayed(autoScan, 1500);
     }
 
     private void applyInsets(View root) {
@@ -225,6 +255,7 @@ public final class Pan123LoginActivity extends Activity {
             @Override
             public void onPageFinished(WebView v, String url) {
                 v.evaluateJavascript(COLLECT_SCRIPT, null);
+                v.evaluateJavascript(AUTO_SCAN_SCRIPT, null);
             }
         });
     }
@@ -241,6 +272,7 @@ public final class Pan123LoginActivity extends Activity {
     private void finishWithTokens(String payload) {
         if (delivered) return;
         delivered = true;
+        if (webView != null) webView.removeCallbacks(autoScan);
         Intent result = new Intent();
         result.putExtra("tokens", payload);
         setResult(RESULT_OK, result);

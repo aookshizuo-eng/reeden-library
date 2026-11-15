@@ -143,6 +143,9 @@ function requestHeaders(headers = {}) {
 }
 const state = { themes: [], fonts: [], assets: [], review: [], pending: [], jobs: [], activeView: "import", themeDensity: "grid", importKind: "theme", themeSearch: "", themeAuthor: "all", themeCategory: "all", assetFilter: "all", assetSearch: "", fontSearch: "", fontFilter: "all", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs"), importAssetIds: readSessionIds("reeden-import-assets") };
 const selections = { review: new Set(), theme: new Set(), font: new Set(), asset: new Set() };
+// 本地服务模式下「确认上传」是提交后台任务；记住这批 job id，轮询回来时把
+// 进度写进用户眼前那条进度条，而不是让用户只看见一句「已加入后台」。
+const trackedJobIds = new Set();
 const loadedFontFaces = new Set();
 const BROWSER_TASK_CONCURRENCY = 3;
 const BROWSER_RECORD_CACHE_TTL = 15000;
@@ -853,7 +856,20 @@ async function webLoginPan123() {
   const opened = window.open("https://www.123pan.com/", "_blank");
   if (opened) {
     try { opened.opener = null; } catch {}
-    operationMessage(output, "已打开 123 云盘网页：登录后按 F12 → Network，复制任一 /b/api 请求里 Authorization: Bearer 之后的值填到上面。");
+    // 浏览器不允许本站读另一个域的 localStorage / cookie，所以登录后没法
+    // 像 APK 那样自动取回。把回填位置提前展开，回到本页时自动聚焦；如果
+    // 用户已经把 Token 粘进去了，直接接上校验，不再要求多点一次。
+    const details = $("#pan123TokenDetails");
+    if (details) details.open = true;
+    operationMessage(output, "已打开 123 云盘网页。登录完成后回到本页，会话输入框会自动展开；浏览器不能跨站读取 123 的登录态，需要把 Token 复制进去，或者直接用上面的账号密码登录。");
+    const onBack = () => {
+      const input = $("#pan123BackupToken");
+      if (!input) return;
+      try { input.scrollIntoView({block: "center", behavior: "smooth"}); } catch {}
+      try { input.focus({preventScroll: true}); } catch { input.focus(); }
+      if (String(input.value || "").trim()) verifyPan123Backup();
+    };
+    window.addEventListener("focus", onBack, {once: true});
   } else {
     operationMessage(output, "没打开新窗口（可能被弹窗拦截）。请手动打开 https://www.123pan.com/ 登录后复制会话 Token。", true);
   }
@@ -1168,20 +1184,49 @@ async function composeThemePreviewBlob(entries, codec) {
   canvas.width = 1000; canvas.height = 1000;
   const context = canvas.getContext("2d");
   if (!context) return null;
-  context.fillStyle = "#e9e7df"; context.fillRect(0, 0, canvas.width, canvas.height);
+  // cover 之外的两种模式都是为「不留白」服务的：
+  //   contain —— 只给真正该看见全貌的小元素用（轮播图）；
+  //   blur    —— 横图塞进竖框时的兜底，用图片自己的放大模糊版铺满背景，
+  //              再把完整构图居中叠上去，既不会压成一条横向色带，也没有白边。
   const drawFit = async (item, x, y, width, height, mode = "cover") => {
     if (!item) return;
     let bitmap;
     try { bitmap = await createImageBitmap(new Blob([item.entry.bytes], {type: item.mime})); } catch { return; }
     try {
-      const scale = mode === "contain"
-        ? Math.min(width / bitmap.width, height / bitmap.height)
-        : Math.max(width / bitmap.width, height / bitmap.height);
-      const drawWidth = bitmap.width * scale, drawHeight = bitmap.height * scale;
-      const dx = x + (width - drawWidth) / 2, dy = y + (height - drawHeight) / 2;
+      const scaleX = width / bitmap.width, scaleY = height / bitmap.height;
+      const coverScale = Math.max(scaleX, scaleY);
+      const drawWidth = bitmap.width * coverScale, drawHeight = bitmap.height * coverScale;
       context.save(); context.beginPath(); context.rect(x, y, width, height); context.clip();
-      context.drawImage(bitmap, dx, dy, drawWidth, drawHeight); context.restore();
+      if (mode === "blur") {
+        const bleed = Math.max(drawWidth, drawHeight) * .08 + 24;
+        try { context.filter = "blur(26px) saturate(.92)"; } catch {}
+        context.drawImage(bitmap, x + (width - drawWidth) / 2 - bleed, y + (height - drawHeight) / 2 - bleed, drawWidth + bleed * 2, drawHeight + bleed * 2);
+        try { context.filter = "none"; } catch {}
+        const containScale = Math.min(scaleX, scaleY);
+        const innerWidth = bitmap.width * containScale, innerHeight = bitmap.height * containScale;
+        context.drawImage(bitmap, x + (width - innerWidth) / 2, y + (height - innerHeight) / 2, innerWidth, innerHeight);
+      } else {
+        const scale = mode === "contain" ? Math.min(scaleX, scaleY) : coverScale;
+        const scaledWidth = bitmap.width * scale, scaledHeight = bitmap.height * scale;
+        context.drawImage(bitmap, x + (width - scaledWidth) / 2, y + (height - scaledHeight) / 2, scaledWidth, scaledHeight);
+      }
+      context.restore();
     } finally { bitmap.close?.(); }
+  };
+  // 图片和目标框比例相差太多时才启用模糊兜底，正常竖图直接裁切铺满，
+  // 这样启动图仍然是「整屏」，不会被糊成两层。
+  const fillScene = (item, x, y, width, height) => {
+    const aspect = item?.aspect || 1, target = width / height;
+    return drawFit(item, x, y, width, height, aspect / target > 1.5 || target / aspect > 1.5 ? "blur" : "cover");
+  };
+  const clipRoundRect = (x, y, width, height, radius) => {
+    context.beginPath();
+    if (typeof context.roundRect === "function") { context.roundRect(x, y, width, height, radius); return; }
+    const r = Math.min(radius, width / 2, height / 2);
+    context.moveTo(x + r, y); context.lineTo(x + width - r, y); context.quadraticCurveTo(x + width, y, x + width, y + r);
+    context.lineTo(x + width, y + height - r); context.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+    context.lineTo(x + r, y + height); context.quadraticCurveTo(x, y + height, x, y + height - r);
+    context.lineTo(x, y + r); context.quadraticCurveTo(x, y, x + r, y); context.closePath();
   };
   // 取一次 32x32 缩略统计平均色：亮度、饱和度、冷暖决定自动分类。
   const sampleTone = () => {
@@ -1228,47 +1273,54 @@ async function composeThemePreviewBlob(entries, codec) {
     entries.previewCategory = themeToneCategory(tone, {kind: entries.previewKind});
     return blob;
   }
-  // Keep the thumbnail square, but let the actual theme artwork dominate it:
-  // a real splash goes left when present; otherwise use a real reader page.
-  context.fillStyle = "#e9e7df"; context.fillRect(16, 16, 968, 968);
-  context.fillStyle = "#f8f8f5"; context.fillRect(28, 28, 390, 936);
-  const leftAsset = splash || reader || shelf;
-  if (leftAsset) await drawFit(leftAsset, 40, 58, 366, 876, splash || reader ? "contain" : "cover");
-  else { context.fillStyle = "#cfd9d8"; context.fillRect(40, 58, 366, 876); context.fillStyle = "#253338"; context.font = "600 24px system-ui, sans-serif"; context.fillText("无可用阅读页", 130, 500); }
-  const panelX = 436, panelY = 28, panelW = 548, panelH = 936;
-  context.fillStyle = "#f8f4e9"; context.fillRect(panelX, panelY, panelW, panelH);
-  if (shelf) await drawFit(shelf, panelX, panelY, panelW, panelH, card ? "contain" : "cover");
-  // A light veil keeps the cover row readable without hiding the real theme
-  // background. The previous version used opaque white blocks and labels,
-  // which made encrypted previews look like empty mockups.
-  context.fillStyle = "rgba(255,255,255,.18)"; context.fillRect(panelX + 18, panelY + 18, panelW - 36, 202);
-  if (carousel) await drawFit(carousel, panelX + 30, panelY + 30, panelW - 60, 178, "contain");
+  // 左屏按真实手机比例（9:19.5 ≈ .462）铺满，右栏书架也铺满，两栏之间只留
+  // 12px 缝。旧版有 16+28px 的外衬、并且用 contain 画启动图，缩略图四周会浮出
+  // 一圈白边；书架遇到横图还会被压成一条横向色带，和其他主题看起来不是一套。
+  const SCREEN_W = 462, GAP = 12;
+  const panelX = SCREEN_W + GAP, panelW = 1000 - panelX, panelH = 1000;
+  context.fillStyle = "#e6e2d8"; context.fillRect(0, 0, 1000, 1000);
+  const screenAsset = splash || reader || shelf || covers[0] || null;
+  if (screenAsset) await fillScene(screenAsset, 0, 0, SCREEN_W, panelH);
+  else { context.fillStyle = "#f2ece1"; context.fillRect(0, 0, SCREEN_W, panelH); }
+  if (shelf) await fillScene(shelf, panelX, 0, panelW, panelH);
+  else { context.fillStyle = "#f2ece1"; context.fillRect(panelX, 0, panelW, panelH); }
+  if (carousel) {
+    context.save();
+    clipRoundRect(panelX + 18, 18, panelW - 36, 168, 12); context.clip();
+    await drawFit(carousel, panelX + 18, 18, panelW - 36, 168, "cover");
+    context.restore();
+  }
   if (card) {
-    // card_bg is the actual bookshelf container (a transparent horizontal
-    // card). Repeat it behind the cover thumbnails so the preview reflects
-    // the theme's real shelf layout instead of floating covers on empty space.
-    const cardX = panelX + 28, cardW = panelW - 56, cardH = 158;
-    const firstY = panelY + 300, rowGap = 18;
+    // card_bg 是实际的横版书架卡片，重复几次就能看出主题真实的书架密度。
+    const cardX = panelX + 20, cardW = panelW - 40, cardH = 150;
+    const firstY = carousel ? 210 : 88, rowGap = 16;
     for (let index = 0; index < Math.min(covers.length, 4); index++) {
       const y = firstY + index * (cardH + rowGap);
-      if (y + cardH > panelY + panelH - 24) break;
+      if (y + cardH > panelH - 24) break;
       await drawFit(card, cardX, y, cardW, cardH, "cover");
-      const coverW = 92, coverH = 132;
-      context.fillStyle = "rgba(25,40,42,.16)"; context.fillRect(cardX + 20, y + 14, coverW + 4, coverH + 4);
-      await drawFit(covers[index], cardX + 22, y + 12, coverW, coverH, "cover");
-      context.fillStyle = "rgba(75,44,52,.74)";
+      const coverW = 92, coverH = 128;
+      context.fillStyle = "rgba(20,16,12,.14)"; context.fillRect(cardX + 22, y + 12, coverW + 4, coverH + 4);
+      await drawFit(covers[index], cardX + 24, y + 10, coverW, coverH, "cover");
+      context.fillStyle = "rgba(70,42,32,.74)";
       context.font = "600 16px system-ui, sans-serif";
-      context.fillText(`Reeden 主题 ${index + 1}`, cardX + 132, y + 58);
+      context.fillText(`Reeden 主题 ${index + 1}`, cardX + 136, y + 52);
       context.font = "13px system-ui, sans-serif";
-      context.fillText("书架卡片预览", cardX + 132, y + 84);
+      context.fillText("书架卡片预览", cardX + 136, y + 78);
     }
-  } else {
-    context.fillStyle = "rgba(255,255,255,.48)"; context.fillRect(panelX + 22, panelY + 548, panelW - 44, 330);
-    const cardWidth = 86, cardHeight = 168, gap = 16, startX = panelX + 42, startY = panelY + 590;
+  } else if (covers.length) {
+    // 背景是主题真实的书架图，封面直接浮上去；底部用渐变压暗而不是铺白块，
+    // 既保证看得清，又不会在缩略图上再制造一圈白边。
+    const shade = context.createLinearGradient(0, 520, 0, 1000);
+    shade.addColorStop(0, "rgba(16,13,10,0)"); shade.addColorStop(1, "rgba(16,13,10,.5)");
+    context.fillStyle = shade; context.fillRect(panelX, 520, panelW, 480);
+    const cardWidth = 84, cardHeight = 148, gap = 14, columns = 5;
+    const startX = panelX + (panelW - (columns * cardWidth + (columns - 1) * gap)) / 2;
+    const startY = 620;
     for (let index = 0; index < covers.length; index++) {
-      const column = index % 5, row = Math.floor(index / 5), x = startX + column * (cardWidth + gap), y = startY + row * (cardHeight + 28);
-      if (x + cardWidth > panelX + panelW - 24 || y + cardHeight > panelY + panelH - 34) continue;
-      context.fillStyle = "rgba(25,40,42,.16)"; context.fillRect(x + 3, y + 4, cardWidth, cardHeight);
+      const column = index % columns, row = Math.floor(index / columns);
+      const x = startX + column * (cardWidth + gap), y = startY + row * (cardHeight + 28);
+      if (y + cardHeight > 976) break;
+      context.fillStyle = "rgba(10,8,6,.28)"; context.fillRect(x + 3, y + 4, cardWidth, cardHeight);
       await drawFit(covers[index], x, y, cardWidth, cardHeight, "cover");
     }
   }
@@ -1769,7 +1821,9 @@ function updateTransferProgress(patch = {}) {
   // The reviewed batch sits near the bottom of the import view, so its own
   // panel is painted as well; otherwise the only feedback was in 后台任务.
   paint("transferProgress", true);
-  paint("reviewProgress", transferState.active || (Boolean(transferState.title) && Boolean($("#reviewProgress") && !$("#reviewArea").hidden)));
+  // 进度面板已经移出待确认区：项目上传成功后待确认区会隐藏，但进度条必须
+  // 继续留在页面上，否则用户点完「确认」就再也看不到处理到哪一步了。
+  paint("reviewProgress", transferState.active || Boolean(transferState.title));
   persistJobProgress({status: transferState.active ? "running" : "completed", stage: stageText,
     current: currentText, completed: transferState.completed, failed: transferState.failed, total});
 }
@@ -1843,6 +1897,8 @@ function updateBulkControls() {
     if (deleteButton) deleteButton.disabled = Boolean(state.operation) || !count;
     const downloadButton = $("#downloadSelected" + kind[0].toUpperCase() + kind.slice(1));
     if (downloadButton) downloadButton.disabled = Boolean(state.operation) || !count;
+    const categoryButton = $("#bulkCategoryTheme");
+    if (categoryButton) categoryButton.disabled = Boolean(state.operation) || !count;
     // Phones pin the bulk bar only while something is selected; otherwise it
     // would eat 96px at the top of every scroll for nothing.
     const bar = $("#" + kind + "Toolbar");
@@ -2064,22 +2120,110 @@ function themeCategoryEditorMarkup(theme) {
     <details class="theme-category-manage"><summary>管理类别词表</summary><div class="theme-category-vocabulary">${vocabulary.map(category => `<span class="category-chip is-static">${escapeHtml(category)}<button type="button" data-category-forget="${escapeHtml(category)}" aria-label="从词表删除 ${escapeHtml(category)}">×</button></span>`).join("")}</div><p class="field-help">删除词表条目只会让它不再出现在建议里，已归类主题的标签保留。</p></details>
   </div>`;
 }
+async function patchThemeCategories(theme, categories) {
+  const result = await api(`/api/themes/${encodeURIComponent(theme.id)}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ author: theme.author === "作者未记录" ? "" : theme.author, style: theme.style || "", tags: theme.tags || [], categories }),
+  });
+  Object.assign(theme, result.item || {}, { categories });
+  return theme;
+}
 async function saveThemeCategories(themeId, categories) {
   const theme = state.themes.find(item => String(item.id) === String(themeId));
   if (!theme || state.operation) return;
   setOperation("theme-categories");
   try {
-    const result = await api(`/api/themes/${encodeURIComponent(themeId)}`, {
-      method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ author: theme.author === "作者未记录" ? "" : theme.author, style: theme.style || "", tags: theme.tags || [], categories }),
-    });
-    Object.assign(theme, result.item || {}, { categories });
+    await patchThemeCategories(theme, categories);
     if (browserSyncEnabled()) invalidateBrowserLibraryRecords();
     renderThemes();
     if ($("#themeDialog").open) openThemeDialog(themeId);
     toast("分类已保存");
   } catch (error) { toast(`分类保存失败：${error.message}`); }
   finally { setOperation(""); }
+}
+/* 批量分类：一次给多个主题加/换类别。逐条 PATCH，每条都走和单项编辑
+   完全相同的接口，避免出现「批量能改、单条改不了」的两套路径。 */
+let bulkCategorySelection = new Set();
+function bulkCategoryTargets() {
+  return state.themes.filter(theme => selections.theme.has(theme.id));
+}
+function bulkCategoryMode() {
+  return document.querySelector('input[name="bulkCategoryMode"]:checked')?.value || "add";
+}
+function updateBulkCategoryApply() {
+  const button = $("#bulkCategoryApply");
+  if (!button) return;
+  const targets = bulkCategoryTargets();
+  const count = bulkCategorySelection.size;
+  const label = count ? `${count} 个类别` : "留空";
+  button.textContent = `应用到 ${targets.length} 个主题（${label}）`;
+  button.disabled = Boolean(state.operation) || !targets.length || (!count && bulkCategoryMode() !== "replace");
+}
+function renderBulkCategoryPicks() {
+  const picks = $("#bulkCategoryPicks");
+  if (!picks) return;
+  const targets = bulkCategoryTargets();
+  const vocabulary = [...new Set([...themeCategoryVocabulary(), ...targets.flatMap(theme => themeCategoryList(theme))])];
+  if (!vocabulary.length) { picks.innerHTML = `<p class="field-help">还没有类别，先在下面起一个。</p>`; return; }
+  // 每个类别后面标出「几个主题已经有它」，替换模式下能一眼看出会不会丢标签。
+  picks.innerHTML = vocabulary.map(category => {
+    const owned = targets.filter(theme => themeCategoryList(theme).includes(category)).length;
+    const chosen = bulkCategorySelection.has(category);
+    return `<label class="bulk-category-pick${chosen ? " is-chosen" : ""}"><input type="checkbox" value="${escapeHtml(category)}" ${chosen ? "checked" : ""} /><span>${escapeHtml(category)}</span>${owned ? `<em>${owned}</em>` : ""}</label>`;
+  }).join("");
+  picks.querySelectorAll('input[type="checkbox"]').forEach(input => input.addEventListener("change", () => {
+    if (input.checked) bulkCategorySelection.add(input.value); else bulkCategorySelection.delete(input.value);
+    input.closest(".bulk-category-pick")?.classList.toggle("is-chosen", input.checked);
+    updateBulkCategoryApply();
+  }));
+}
+function openBulkCategoryDialog() {
+  const targets = bulkCategoryTargets();
+  if (!targets.length) { toast("先勾选要修改的主题"); return; }
+  const dialog = $("#bulkCategoryDialog");
+  if (!dialog) return;
+  bulkCategorySelection = new Set();
+  const names = targets.slice(0, 3).map(theme => theme.name || "未命名主题").join("、");
+  $("#bulkCategorySub").textContent = `将修改 ${targets.length} 个主题：${names}${targets.length > 3 ? " 等" : ""}`;
+  const addMode = document.querySelector('input[name="bulkCategoryMode"][value="add"]');
+  if (addMode) addMode.checked = true;
+  renderBulkCategoryPicks();
+  updateBulkCategoryApply();
+  if (!dialog.open) dialog.showModal();
+}
+function addBulkCategoryFromInput() {
+  const input = $("#bulkCategoryInput");
+  const value = String(input?.value || "").trim();
+  if (!value) { toast("先输入类别名"); return; }
+  const vocabulary = themeCategoryVocabulary();
+  if (!vocabulary.includes(value)) saveThemeCategoryVocabulary([...vocabulary, value]);
+  bulkCategorySelection.add(value);
+  if (input) input.value = "";
+  renderBulkCategoryPicks();
+  updateBulkCategoryApply();
+}
+async function applyBulkThemeCategories() {
+  const targets = bulkCategoryTargets();
+  if (!targets.length || state.operation) return;
+  const replace = bulkCategoryMode() === "replace";
+  const picked = [...bulkCategorySelection];
+  if (!replace && !picked.length) { toast("先勾选类别"); return; }
+  const dialog = $("#bulkCategoryDialog");
+  const applyButton = $("#bulkCategoryApply");
+  setOperation("theme-categories");
+  let done = 0, failed = 0;
+  try {
+    for (const theme of targets) {
+      const own = themeCategoryList(theme);
+      const next = replace ? [...picked] : [...own, ...picked.filter(category => !own.includes(category))];
+      if (applyButton) applyButton.textContent = `处理中 ${done + failed + 1}/${targets.length}`;
+      try { await patchThemeCategories(theme, next); done++; } catch { failed++; }
+    }
+    if (browserSyncEnabled()) invalidateBrowserLibraryRecords();
+    renderThemes();
+    dialog?.close();
+    toast(failed ? `已更新 ${done} 个主题，${failed} 个失败` : `已把类别写入 ${done} 个主题`);
+  } finally { setOperation(""); }
 }
 function openThemeDialog(id) {
   const theme = state.themes.find(item => String(item.id) === String(id));
@@ -2513,6 +2657,27 @@ function renderJobs() {
   renderImportedFonts();
   updateBulkControls();
 }
+function syncTrackedJobProgress(items) {
+  if (!trackedJobIds.size) return;
+  const jobs = items.filter(job => trackedJobIds.has(job.id));
+  if (!jobs.length) return;
+  const current = jobs.find(job => job.status === "running") || jobs.find(job => job.status === "queued") || jobs[jobs.length - 1];
+  const active = ["queued", "running"].includes(current.status);
+  if (active) {
+    updateTransferProgress({
+      active: true,
+      title: `主题压缩与上传 · ${jobTitle(current)}`,
+      total: Math.max(1, Number(current.total) || transferState.total || 1),
+      completed: Number(current.completed) || 0,
+      failed: Number(current.failed) || 0,
+      stage: current.stage || "后台处理中",
+      current: current.current || "",
+    });
+  } else {
+    finishTransferProgress(`${jobTitle(current)}：${current.status === "completed" ? "完成" : "已结束"}`, Number(current.failed) || 0);
+    jobs.forEach(job => trackedJobIds.delete(job.id));
+  }
+}
 async function loadJobs() {
   if (jobsLoading) return;
   jobsLoading = true;
@@ -2532,6 +2697,7 @@ async function loadJobs() {
     if (changed) {
       const finished = items.filter(job => previous.has(job.id) && ["queued", "running"].includes(previous.get(job.id)) && !["queued", "running"].includes(job.status));
       if (finished.length) toast(finished.some(job => ["partial", "failed"].includes(job.status)) ? "后台任务有失败项，可在任务页重试" : "后台任务已完成");
+      syncTrackedJobProgress(items);
       renderJobs();
       if (hadActive || activeJobs().length || finished.length) await Promise.allSettled([loadThemes(), loadFonts()]);
     }
@@ -2896,14 +3062,21 @@ async function commitThemes(ids = [...selections.review]) {
       offerLocalCleanup(completedFiles, `本次 ${completedFiles.length} 个主题已压缩并保存到 R2，可以删掉本地原包释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
       return;
     }
+    // 本地服务模式也要有看得见的进度：先把条亮出来，再提交任务，随后由
+    // loadJobs() 用真实 job.completed / total 持续刷新它。
+    const jobNames = state.review.filter(item => chosen.includes(item.staging_id)).map(item => item.info?.source_name || item.info?.name || "主题");
+    beginTransferProgress("主题压缩与上传", chosen.length, jobNames);
+    transferStage("提交到后台队列", "");
     const result = await api("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "commit-themes", ids: chosen, ...options }) });
     rememberJob(result.job);
+    trackedJobIds.add(result.job.id);
     state.importThemeJobIds = [...new Set([...state.importThemeJobIds, result.job.id])];
     saveSessionIds("reeden-import-theme-jobs", state.importThemeJobIds);
     state.review = state.review.filter(item => !chosen.includes(item.staging_id));
     chosen.forEach(id => selections.review.delete(id));
     renderReview();
     renderJobs();
+    transferStage("等待后台压缩", `${chosen.length} 个主题已排队`);
     toast(`${chosen.length} 个主题已加入后台：压缩图片、重新封包并保存`);
     loadJobs().catch(() => {});
   } catch (error) { operationMessage($("#reviewBatchStatus"), `加入后台失败：${error.message}`, true); toast(error.message); }
@@ -3974,6 +4147,13 @@ $("#deleteSelectedTheme").addEventListener("click", () => deleteSelectedRecords(
 $("#deleteSelectedFont").addEventListener("click", () => deleteSelectedRecords("font"));
 $("#deleteSelectedAsset")?.addEventListener("click", () => deleteSelectedRecords("asset"));
 $("#downloadSelectedTheme").addEventListener("click", () => downloadSelectedRecords("theme"));
+$("#bulkCategoryTheme")?.addEventListener("click", openBulkCategoryDialog);
+$("#closeBulkCategory")?.addEventListener("click", () => $("#bulkCategoryDialog")?.close());
+$("#bulkCategoryCancel")?.addEventListener("click", () => $("#bulkCategoryDialog")?.close());
+$("#bulkCategoryApply")?.addEventListener("click", applyBulkThemeCategories);
+$("#bulkCategoryAdd")?.addEventListener("click", addBulkCategoryFromInput);
+$("#bulkCategoryInput")?.addEventListener("keydown", event => { if (event.key === "Enter") { event.preventDefault(); addBulkCategoryFromInput(); } });
+document.querySelectorAll('input[name="bulkCategoryMode"]').forEach(input => input.addEventListener("change", updateBulkCategoryApply));
 $("#downloadSelectedFont").addEventListener("click", () => downloadSelectedRecords("font"));
 $("#downloadSelectedAsset").addEventListener("click", () => downloadSelectedRecords("asset"));
 document.addEventListener("change", event => {
