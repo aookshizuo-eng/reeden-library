@@ -33,7 +33,7 @@ const [app, html] = await Promise.all([
   readFile(path.join(source, "index.html"), "utf8"),
 ]);
 for (const marker of ["function fontPreviewMarkup", "function loadFontPreviewFace", "function recoverFontPreviewImage", "new FontFace(", "font-preview-frame", "font-preview-fallback", "data-font-preview-id", "data-font-id", "function renderFonts",
-  "function analyzeFontGlyphs", "function inkProfile", "window.opentype", "glyph_method", "function downloadSelectedRecords", "function fetchDownloadableBytes", "function renderThemeAuthorFilter", "function compressPrivateRedWithDirectory", "function queueFilesForLater", "function resumeStagedJobs", "function backupOriginalTo123", "function runCodecTask"]) {
+  "function analyzeFontGlyphs", "function inkProfile", "window.opentype", "glyph_method", "function downloadSelectedRecords", "function fetchDownloadableBytes", "function renderThemeAuthorFilter", "function compressPrivateRedWithDirectory", "function queueFilesForLater", "function resumeStagedJobs", "function backupOriginalTo123", "function runCodecTask", "function loadLibraryAfterConnection", "function fetchWithReadTimeout", "API_READ_TIMEOUT_MS", "已连接共享库"]) {
   if (!app.includes(marker)) errors.push(`前端缺少关键回归标记：${marker}`);
 }
 for (const id of ["fontList", "fontCount", "fontEmpty", "themeAuthorFilter", "downloadSelectedTheme", "downloadSelectedFont", "downloadSelectedAsset", "queueForLater", "resumeStagedJobs", "pan123BackupToken"]) {

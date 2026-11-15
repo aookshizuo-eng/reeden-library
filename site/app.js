@@ -90,13 +90,49 @@ function saveApiBaseSetting() {
     else localStorage.removeItem(SYNC_TOKEN_STORAGE_KEY);
   } catch {}
   updateRuntimeMode();
+  // The previous library may belong to another API; never reuse its cached
+  // records after the address changes.
+  invalidateBrowserLibraryRecords();
   operationMessage($("#apiBaseStatus"), apiBase ? "已保存同步地址。正在读取共享库…" : "已清除同步地址，当前使用本机服务。");
-  (async () => {
-    try {
-      await loadStorage();
-      await Promise.all([loadThemes(), loadFonts(), loadAssets(), ...(browserSyncEnabled() ? [] : [loadPendingThemes()]), loadJobs()]);
-    } catch (error) { operationMessage($("#apiBaseStatus"), `连接失败：${error.message}`, true); }
-  })();
+  loadLibraryAfterConnection({fromSave: true});
+}
+let libraryLoadGeneration = 0;
+function librarySummary() {
+  return `${state.themes.length} 个主题、${state.fonts.length} 个字体、${state.assets.length} 个收藏`;
+}
+// One loader for both startup and "保存同步地址". Every stage writes a visible
+// status, including the success case, so the settings panel can never stay on
+// an endless "正在读取共享库…" after the requests have already finished.
+async function loadLibraryAfterConnection({fromSave = false} = {}) {
+  const generation = ++libraryLoadGeneration;
+  const remote = Boolean(apiBase);
+  const started = Date.now();
+  const current = () => generation === libraryLoadGeneration;
+  const status = (text, failed = false) => {
+    if (remote) operationMessage($("#apiBaseStatus"), text, failed);
+  };
+  if (remote) status(fromSave ? "已保存同步地址。正在读取共享库（1/3 存储配置）…" : "正在读取共享库（1/3 存储配置）…");
+  try {
+    await loadStorage();
+    if (!current()) return;
+    status("正在读取共享库（2/3 记录清单）…");
+    await Promise.all([loadThemes(), loadFonts(), loadAssets(), ...(browserSyncEnabled() ? [] : [loadPendingThemes()])]);
+    if (!current()) return;
+    status("正在读取共享库（3/3 任务进度）…");
+    await loadJobs();
+    if (!current()) return;
+    const seconds = ((Date.now() - started) / 1000).toFixed(1);
+    const jobsFailed = Boolean($("#jobsStatus")?.classList.contains("is-error"));
+    if (remote) {
+      status(`已连接共享库：${librarySummary()}（用时 ${seconds} 秒）。${jobsFailed ? "任务进度读取失败，请查看任务页提示。" : ""}`, jobsFailed);
+    } else {
+      toast(`已读取本机库：${librarySummary()}`);
+    }
+  } catch (error) {
+    if (!current()) return;
+    if (remote) status(`连接共享库失败：${error.message}`, true);
+    else toast(`读取本机库失败：${error.message}`);
+  }
 }
 function requestHeaders(headers = {}) {
   const result = new Headers(headers);
@@ -165,20 +201,53 @@ function toast(message) {
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => el.classList.remove("is-visible"), 2600);
 }
+const API_READ_TIMEOUT_MS = 25000;
+// A hung read used to leave the storage page on "正在读取共享库…" forever.
+// Only idempotent reads are time-limited; uploads can legitimately take much
+// longer and must never be aborted halfway through a PUT.
+function fetchWithReadTimeout(url, request, timeoutMs) {
+  if (!(timeoutMs > 0) || typeof AbortController === "undefined") return fetch(url, request);
+  const controller = new AbortController();
+  const outer = request.signal;
+  const relayAbort = () => controller.abort(outer.reason);
+  if (outer) {
+    if (outer.aborted) controller.abort(outer.reason);
+    else outer.addEventListener("abort", relayAbort, {once: true});
+  }
+  const timer = setTimeout(() => controller.abort(new DOMException("read timeout", "TimeoutError")), timeoutMs);
+  return fetch(url, {...request, signal: controller.signal})
+    .catch(error => {
+      if (controller.signal.aborted && !outer?.aborted) {
+        throw new Error(`读取超时（${Math.round(timeoutMs / 1000)} 秒）：${new URL(url, location.href).pathname}`);
+      }
+      throw error;
+    })
+    .finally(() => {
+      clearTimeout(timer);
+      if (outer) outer.removeEventListener("abort", relayAbort);
+    });
+}
 async function api(path, options = {}) {
   if (staticHostedWithoutApi()) {
     throw new Error("当前 APK/静态网页尚未连接同步 Worker；请到“存储设置 → 多设备访问”填写 Worker 地址和同步 Token");
   }
   if (apiBase && remoteUnavailable) throw new Error("同步 API 不可用，未执行远程操作；请检查地址或清除同步地址使用本机服务");
   const request = { ...options, headers: requestHeaders(options.headers || {}) };
+  delete request.readTimeoutMs;
   const method = String(request.method || "GET").toUpperCase();
+  const configuredTimeout = Number(options.readTimeoutMs);
+  const readTimeout = ["GET", "HEAD"].includes(method)
+    ? Math.max(1000, Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : API_READ_TIMEOUT_MS)
+    : 0;
+  const deadline = Date.now() + readTimeout;
   let response;
   try {
     // Pages Functions can briefly return a platform 500/502/503 while a new
     // deployment or R2 binding is warming up. Retry safe reads only; writes
-    // must never be repeated automatically.
+    // must never be repeated automatically. The deadline covers all retries.
     for (let attempt = 0; ; attempt++) {
-      response = await fetch(apiUrl(path), request);
+      const remaining = readTimeout ? Math.max(1000, deadline - Date.now()) : 0;
+      response = await fetchWithReadTimeout(apiUrl(path), request, remaining);
       if (![500, 502, 503].includes(response.status) || !["GET", "HEAD"].includes(method) || attempt >= 2) break;
       await new Promise(resolve => setTimeout(resolve, 450 * (attempt + 1)));
     }
@@ -2711,10 +2780,4 @@ window.addEventListener("hashchange", () => {
   const view = location.hash.slice(1);
   if (viewNames[view]) setView(view);
 });
-(async () => {
-  try {
-    await loadStorage();
-    await Promise.all([loadThemes(), loadFonts(), loadAssets(), ...(browserSyncEnabled() ? [] : [loadPendingThemes()])]);
-  } catch (error) { toast(error.message); }
-})();
-loadJobs().catch(() => {});
+loadLibraryAfterConnection();
