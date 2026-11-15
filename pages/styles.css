@@ -809,7 +809,7 @@ button:disabled { cursor: not-allowed; opacity: .5; }
   .review-top { flex-wrap: wrap; }
   .settings-grid { display: block; }
   .field-pair { grid-template-columns: 1fr; }
-  .credential-form button, .archive-probe button, .qr-login button, .session-fallback summary { min-height: 42px; }
+  .credential-form button, .archive-probe button, .qr-login button, .session-fallback summary, .session-fallback-content button { min-height: 42px; }
   .app-footer { margin: 30px 14px 14px; display: block; }
   .app-footer span { display: block; margin-bottom: 3px; }
   .modal-compare { grid-template-columns: 1fr; }

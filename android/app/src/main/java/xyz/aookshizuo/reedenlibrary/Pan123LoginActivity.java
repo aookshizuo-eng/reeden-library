@@ -1,6 +1,8 @@
 package xyz.aookshizuo.reedenlibrary;
 
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.graphics.Insets;
 import android.net.Uri;
@@ -23,6 +25,8 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.Locale;
+
+import org.json.JSONArray;
 /**
  * 在应用内用账号密码登录 123 云盘，再把会话 Token 交回主页面。
  *
@@ -41,34 +45,61 @@ public final class Pan123LoginActivity extends Activity {
             "(function(){"
                     + "if (window.__rgCollectInstalled) return;"
                     + "window.__rgCollectInstalled = true;"
-                    + "window.__rgJwt = function(value, source){"
-                    + "  var text = String(value || '');"
-                    + "  if (!text) return '';"
-                    + "  var jwt = text.match(/eyJ[A-Za-z0-9_-]{6,}\\.[A-Za-z0-9_-]{6,}\\.[A-Za-z0-9_-]{6,}/);"
-                    + "  if (jwt) return jwt[0];"
-                    // 123 的部分会话是长随机串，不是 JWT。只在 key 明确带
-                    // token/session/auth 等字样时才收它，避免把统计 id 当会话。
-                    + "  if (!/token|session|auth|ticket|credential|jwt|secret/i.test(String(source || ''))) return '';"
-                    + "  var plain = text.match(/[A-Za-z0-9._-]{24,}/);"
-                    + "  return (plain && !/^[0-9]+$/.test(plain[0])) ? plain[0] : '';"
-                    + "};"
                     + "window.__rgCollect = function(){"
+                    // 每次都重新扫一遍：登录前 localStorage 里的旧 token 不能作数。
+                    + "  var KEY = /token|session|auth|ticket|credential|jwt|secret|access|refresh/i;"
+                    + "  var JWT = /eyJ[A-Za-z0-9_-]{6,}[.][A-Za-z0-9_-]{6,}[.][A-Za-z0-9_-]{6,}/;"
+                    + "  var PLAIN = /^[A-Za-z0-9._-]{24,}$/;"
                     + "  var found = []; var seen = {};"
-                    + "  function add(source, value){"
-                    + "    var token = window.__rgJwt(value, source);"
-                    + "    if (!token || seen[token]) return;"
-                    + "    seen[token] = 1; found.push({token: token, source: source});"
+                    + "  function push(token, source){ if(!token || seen[token]) return; seen[token]=1; found.push({token:token, source:source}); }"
+                    + "  function add(value, source){"
+                    + "    var text = value == null ? '' : (typeof value === 'string' ? value : String(value));"
+                    + "    if (!text) return;"
+                    + "    var jwt = text.match(JWT);"
+                    + "    if (jwt) { push(jwt[0], source + ':jwt'); return; }"
+                    + "    if (KEY.test(String(source || '')) && PLAIN.test(text) && !/^[0-9]+$/.test(text)) push(text, source);"
                     + "  }"
-                    + "  try { for (var i = 0; i < localStorage.length; i++) { var key = localStorage.key(i); add('localStorage:' + key, localStorage.getItem(key)); } } catch (error) {}"
-                    + "  try { for (var j = 0; j < sessionStorage.length; j++) { var key2 = sessionStorage.key(j); add('sessionStorage:' + key2, sessionStorage.getItem(key2)); } } catch (error) {}"
-                    + "  try { add('cookie', document.cookie); } catch (error) {}"
+                    + "  function walk(value, source, depth){"
+                    + "    if (value == null || depth > 4) return;"
+                    + "    if (typeof value === 'string') { add(value, source); return; }"
+                    + "    if (Array.isArray(value)) { for (var i=0; i<value.length && i<40; i++) walk(value[i], source+'['+i+']', depth+1); return; }"
+                    + "    if (typeof value !== 'object') { add(value, source); return; }"
+                    + "    var keys = Object.keys(value);"
+                    + "    for (var k=0; k<keys.length && k<80; k++) {"
+                    + "      var key = keys[k]; var label = source + '.' + key;"
+                    + "      if (KEY.test(key)) add(value[key], label);"
+                    + "      walk(value[key], label, depth+1);"
+                    + "    }"
+                    + "  }"
+                    + "  function parse(text, source){"
+                    + "    if (typeof text !== 'string') return;"
+                    + "    add(text, source);"
+                    + "    var head = text.charAt(0);"
+                    + "    if (head === '{' || head === '[') { try { walk(JSON.parse(text), source, 0); } catch (error) {} }"
+                    + "  }"
+                    + "  function scanStore(name, store){"
+                    + "    try { for (var i=0; i<store.length; i++) { var key = store.key(i); parse(store.getItem(key), name + ':' + key); } } catch (error) {}"
+                    + "  }"
+                    + "  scanStore('localStorage', localStorage);"
+                    + "  scanStore('sessionStorage', sessionStorage);"
+                    + "  try { var cookies = document.cookie ? document.cookie.split(';') : [];"
+                    + "    for (var c=0; c<cookies.length; c++) { var pair = cookies[c].split('='); var name = String(pair.shift() || '').trim();"
+                    + "      var value = pair.join('='); try { value = decodeURIComponent(value); } catch (error) {}"
+                    + "      parse(value, 'cookie:' + name); }"
+                    + "  } catch (error) {}"
+                    + "  try { var globals = ['token','accessToken','access_token','session','authToken','userInfo','user','__INITIAL_STATE__'];"
+                    + "    for (var g=0; g<globals.length; g++) { var item = window[globals[g]];"
+                    + "      if (item) parse(typeof item === 'string' ? item : JSON.stringify(item), 'window:' + globals[g]); }"
+                    + "  } catch (error) {}"
                     + "  return found;"
                     + "};"
                     + "if (!window.__rgTimer) {"
                     + "  window.__rgTimer = setInterval(function(){"
                     + "    try {"
                     + "      var list = window.__rgCollect();"
-                    + "      if (list.length && window.RedGardenPan123) {"
+                    + "      var url = String(location.href || '');"
+                    // 登录页本身就带着旧会话时别急着回传；等跳到网盘首页再取。
+                    + "      if (list.length && window.RedGardenPan123 && !/login|signin|sign_in|passport|auth/i.test(url)) {"
                     + "        clearInterval(window.__rgTimer); window.__rgTimer = null;"
                     + "        window.RedGardenPan123.deliver(JSON.stringify(list));"
                     + "      }"
@@ -169,7 +200,7 @@ public final class Pan123LoginActivity extends Activity {
         statusView = new TextView(this);
         statusView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         statusView.setTextColor(0xFF6A6355);
-        statusView.setText("在这里用账号或手机号 + 密码登录。登录成功会自动取回会话，也可以点下面的按钮手动取回。");
+        statusView.setText("在这里用账号或手机号 + 密码登录。登录成功会自动回填并复制会话，也可以点下面的按钮手动取回。");
         footer.addView(statusView);
 
         Button scan = new Button(this);
@@ -273,6 +304,16 @@ public final class Pan123LoginActivity extends Activity {
         if (delivered) return;
         delivered = true;
         if (webView != null) webView.removeCallbacks(autoScan);
+        // 即使页面回填链路出意外，也把首个候选放进剪贴板，用户回到输入框
+        // 长按粘贴就能用，不必再开开发者工具找 Authorization。
+        try {
+            ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            JSONArray candidates = new JSONArray(payload);
+            if (clipboard != null && candidates.length() > 0) {
+                String token = candidates.getJSONObject(0).optString("token", "");
+                if (!token.isEmpty()) clipboard.setPrimaryClip(ClipData.newPlainText("123 会话 Token", token));
+            }
+        } catch (Exception ignored) { }
         Intent result = new Intent();
         result.putExtra("tokens", payload);
         setResult(RESULT_OK, result);

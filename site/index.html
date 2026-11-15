@@ -185,7 +185,7 @@
               </div>
               <p class="operation-status" id="pan123BackupStatus" role="status"></p>
               <div class="backup-inventory" id="pan123BackupList" aria-live="polite"></div>
-              <details class="session-fallback" id="pan123TokenDetails"><summary>已有会话 Token？直接粘贴</summary><div class="session-fallback-content"><label>123 云盘会话 Token<input id="pan123BackupToken" type="password" autocomplete="off" spellcheck="false" placeholder="浏览器开发者工具中复制 Authorization 里 Bearer 之后的值" /></label></div></details>
+              <details class="session-fallback" id="pan123TokenDetails"><summary>已有会话 Token？直接粘贴</summary><div class="session-fallback-content"><label>123 云盘会话 Token<input id="pan123BackupToken" type="password" autocomplete="off" spellcheck="false" placeholder="登录成功后自动填入，也可粘贴会话 Token" /></label><button class="secondary-button" id="pan123PasteToken" type="button">从剪贴板粘贴</button><p class="field-help" id="pan123PasteHint">在 123 网盘登录页复制过 Authorization 的 Bearer 值后，点这里直接填入并验证。</p></div></details>
               <p class="field-help">需要先填写上方同步 API 地址与写入 Token。备份由同一个 Worker 代转，Token 不会写入仓库或 R2；留空时只保留 R2 原包。「测试连接」和「查看备份清单」只读，不创建任何文件或文件夹。「验证备份写入」会在备份目录下新建 <code>_verify/</code> 子目录并上传 1 个约 40 字节的 <code>reeden-backup-check.red</code> 测试文件（会保留在云盘），用来确认写入链路真的可用。</p>
             </div>
             <div class="settings-label"><h2>已有资产与存储地</h2><p>本地文件和已读取的云端清单分别计数。读取 R2 已有库后，新导入主题会与云端记录一起检查重复。</p><p class="settings-note" id="storageDestination">尚未连接云端存储。</p></div>

@@ -78,7 +78,15 @@ assert.equal(labeledPut.status, 201);
 assert.equal((await labeledPut.json()).key, `assets/图标-压缩~${svgSha}.svg`);
 const labeledRead = await handle(new Request(`https://worker.example${labeledPath}`, {headers: {Origin: origin}}), env);
 assert.equal(labeledRead.status, 200);
+assert.equal(labeledRead.headers.get("Content-Disposition"), null);
 assert.deepEqual(new Uint8Array(await labeledRead.arrayBuffer()), svg);
+// Download links add `?download=1`: WebView only invokes DownloadListener for
+// attachment responses, so a plain object GET must stay inline for previews.
+const labeledDownload = await handle(new Request(`https://worker.example${labeledPath}?download=1`, {headers: {Origin: origin}}), env);
+assert.equal(labeledDownload.status, 200);
+assert.match(labeledDownload.headers.get("Content-Disposition") || "", /^attachment; filename="[^"\r\n]+"; filename\*=UTF-8''/);
+assert.ok((labeledDownload.headers.get("Content-Disposition") || "").includes(encodeURIComponent(`图标-压缩~${svgSha}.svg`)));
+assert.deepEqual(new Uint8Array(await labeledDownload.arrayBuffer()), svg);
 const html = encoder.encode("<!doctype html><title>safe</title><script>window.parent.postMessage('bad','*')</script>");
 const htmlSha = await sha256(html);
 const htmlPut = await handle(new Request(`https://worker.example/api/objects/assets/${htmlSha}.html`, {method: "PUT", headers: headers({"Content-Type": "text/html"}), body: html}), env);

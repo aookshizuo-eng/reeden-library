@@ -300,8 +300,11 @@ public final class MainActivity extends Activity {
             public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest request) {
                 Uri uri = request.getUrl();
                 if (isSiteUrl(uri)) return false;
-                // Object links are handled by DownloadManager below. Do not
-                // let arbitrary pages replace the app's controlled origin.
+                // The API lives on another origin. Let attachment responses
+                // through so WebView's DownloadListener can hand them to
+                // DownloadManager; previews stay on the site and everything
+                // else is still blocked from replacing the app's page.
+                if (isDownloadUrl(uri)) return false;
                 Toast.makeText(MainActivity.this, "已阻止离开 Red Garden", Toast.LENGTH_SHORT).show();
                 return true;
             }
@@ -351,6 +354,18 @@ public final class MainActivity extends Activity {
         return path.equals(SITE_PREFIX) || path.startsWith(SITE_PREFIX + "/");
     }
 
+    /** Read-only sync endpoints that are allowed to leave the app origin only
+     * as downloads. The Worker validates ids/keys, and `download=1` objects
+     * carry Content-Disposition, so WebView fires DownloadListener instead of
+     * navigating away. Inline previews (no download flag) still get blocked. */
+    private boolean isDownloadUrl(Uri uri) {
+        if (uri == null || !"https".equalsIgnoreCase(uri.getScheme())) return false;
+        String path = uri.getPath() == null ? "" : uri.getPath();
+        if (path.equals("/api/download")) return true;
+        if (!path.startsWith("/api/objects/")) return false;
+        return "1".equals(uri.getQueryParameter("download"));
+    }
+
     private WebResourceResponse openBundledSiteAsset(Uri uri, String method) {
         if (uri == null || method == null || !"GET".equalsIgnoreCase(method) || !isSiteUrl(uri)) return null;
         String path = uri.getPath() == null ? "/" : uri.getPath();
@@ -396,6 +411,10 @@ public final class MainActivity extends Activity {
     }
 
     private void enqueueDownload(String url, String userAgent, String contentDisposition, String mimeType) {
+        if (url != null && url.startsWith("blob:")) {
+            Toast.makeText(this, "浏览器临时文件无法直接保存，请勾选「打包成 ZIP」重试", Toast.LENGTH_LONG).show();
+            return;
+        }
         if (url == null || !(url.startsWith("https://") || url.startsWith("http://"))) {
             Toast.makeText(this, "此下载链接无法交给系统下载器", Toast.LENGTH_SHORT).show();
             return;
@@ -405,7 +424,17 @@ public final class MainActivity extends Activity {
             if (mimeType != null && !mimeType.isEmpty()) request.setMimeType(mimeType);
             if (userAgent != null && !userAgent.isEmpty()) request.addRequestHeader("User-Agent", userAgent);
             request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-            String filename = android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType);
+            // Android's URLUtil only reads the ASCII half of Content-Disposition,
+            // so a Chinese theme name would land on disk as underscores. The web
+            // layer sends the readable name in `name=` for exactly that reason.
+            String filename = "";
+            try {
+                String hinted = Uri.parse(url).getQueryParameter("name");
+                if (hinted != null) filename = hinted.trim();
+            } catch (Exception ignored) { }
+            if (filename.isEmpty()) filename = android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType);
+            filename = filename.replaceAll("[\\\\/:*?\"<>|\\r\\n]", "_").trim();
+            if (filename.isEmpty()) filename = "redgarden-download";
             request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, filename);
             DownloadManager manager = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
             if (manager == null) throw new IllegalStateException("DownloadManager unavailable");

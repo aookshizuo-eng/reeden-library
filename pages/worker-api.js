@@ -424,6 +424,14 @@ async function getObject(request, env, spec) {
   headers.set("Content-Type", contentType(spec));
   if (object.httpMetadata?.contentType) headers.set("Content-Type", object.httpMetadata.contentType);
   if (spec.kind === "assets" && spec.ext === "html") headers.set("Content-Security-Policy", "sandbox");
+  // `?download=1` turns a previewable object into a real attachment. Android
+  // WebView only calls DownloadListener for attachment responses; a bare
+  // cross-origin href is treated as navigation and then blocked by the app.
+  const download = new URL(request.url).searchParams.get("download");
+  if (download !== null && download !== "0" && download !== "false") {
+    const ascii = spec.filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+    headers.set("Content-Disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(spec.filename)}`);
+  }
   return new Response(object.body, {status: 200, headers});
 }
 

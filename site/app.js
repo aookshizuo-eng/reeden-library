@@ -49,6 +49,31 @@ function staticHostedWithoutApi() {
   return !apiBase && window.location.protocol === "https:" && (host.endsWith(".github.io") || host.endsWith(".pages.dev"));
 }
 function assetUrl(path) { return path ? apiUrl(path) : ""; }
+// A plain object GET is meant for inline previews. Download links need the
+// Worker to send Content-Disposition, otherwise an Android WebView treats the
+// cross-origin href as navigation (and the app blocks it as "leaving" the
+// site). `download=1` keeps one object key but changes the response headers.
+// The readable file name travels in `name=` as well: Android's DownloadManager
+// only understands the ASCII part of Content-Disposition, so a Chinese theme
+// name would otherwise be saved as underscores.
+function downloadUrl(path, name = "") {
+  const source = String(path || "");
+  if (!source) return "";
+  const url = /^(?:https?:|data:|blob:)/i.test(source) ? source : apiUrl(source);
+  if (/^https?:/i.test(url) && /\/api\/objects\//i.test(url) && !/[?&]download=1(?:&|$)/i.test(url)) {
+    let file = "";
+    try {
+      const marker = url.indexOf("/api/objects/");
+      const rest = url.slice(marker + "/api/objects/".length).split(/[?#]/)[0];
+      const parts = rest.split("/");
+      file = decodeURIComponent(parts[parts.length - 1] || "");
+    } catch { file = ""; }
+    if (!file) file = String(name || "");
+    const safe = file.replace(/[\\/:*?"<>|\r\n]/g, "_").slice(0, 120);
+    return `${url}${url.includes("?") ? "&" : "?"}download=1&name=${encodeURIComponent(safe)}`;
+  }
+  return url;
+}
 function updateRuntimeMode() {
   const label = $("#runtimeModeLabel");
   const modeText = remoteUnavailable ? "本地浏览器处理模式" : apiBase ? "设备同步模式 · R2 API" : staticHostedWithoutApi() ? "等待连接同步 Worker" : "本地处理模式";
@@ -783,7 +808,8 @@ function acceptPan123Tokens(payload) {
   const input = $("#pan123BackupToken");
   if (input) input.value = tokens[0].token;
   try { localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, tokens[0].token); } catch {}
-  operationMessage(output, `已从${pan123TokenSourceLabel(tokens[0].source)}取回会话（共 ${tokens.length} 个候选），正在验证…`);
+  try { navigator.clipboard?.writeText(tokens[0].token)?.catch(() => {}); } catch {}
+  operationMessage(output, `已从${pan123TokenSourceLabel(tokens[0].source)}取回会话（共 ${tokens.length} 个候选），已填入并尝试复制，正在验证…`);
   const tryOne = async index => {
     if (!apiBase) {
       operationMessage(output, "已取回会话 Token 并保存。请先在「多设备访问」保存同步 API 地址，再回来点「测试连接」。");
@@ -830,9 +856,10 @@ async function loginPan123Quick(event) {
     try {
       localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, data.token);
       localStorage.setItem(PAN123_FOLDER_STORAGE_KEY, String($("#pan123BackupFolder")?.value || "").trim() || "Red-Garden-Backup");
+      navigator.clipboard?.writeText(data.token)?.catch(() => {});
     } catch {}
     const who = data.nickname ? `（${data.nickname}）` : "";
-    operationMessage(output, `已连接 123 云盘${who}。原包会在确认主题时备份到 123，压缩包和预览仍存 R2。`);
+    operationMessage(output, `已连接 123 云盘${who}。会话已填入输入框并尝试复制到剪贴板；原包会在确认主题时备份到 123，压缩包和预览仍存 R2。`);
     toast("123 云盘已连接");
   } catch (error) {
     const message = error instanceof TypeError ? "暂时无法连接同步 API，请检查网络与地址。" : error.message;
@@ -861,7 +888,7 @@ async function webLoginPan123() {
     // 用户已经把 Token 粘进去了，直接接上校验，不再要求多点一次。
     const details = $("#pan123TokenDetails");
     if (details) details.open = true;
-    operationMessage(output, "已打开 123 云盘网页。登录完成后回到本页，会话输入框会自动展开；浏览器不能跨站读取 123 的登录态，需要把 Token 复制进去，或者直接用上面的账号密码登录。");
+    operationMessage(output, "已打开 123 云盘网页。登录完成后回到本页，会话输入框会自动展开；浏览器不能跨站读取 123 的登录态，请在 123 页面复制会话 Token 后点「从剪贴板粘贴」，或直接用上面的账号密码登录。");
     const onBack = () => {
       const input = $("#pan123BackupToken");
       if (!input) return;
@@ -876,6 +903,25 @@ async function webLoginPan123() {
 }
 // 原生登录页回传：payload 是 [{token, source}] 的 JSON 字符串。
 window.onRedGardenPan123Login = payload => acceptPan123Tokens(payload);
+// 纯浏览器里读不到 123 的登录态，但用户多半已经在 123 页面复制过会话值。
+// 给一个「从剪贴板粘贴」按钮：一次点击就能填入并直接验证，不用手动找输入框。
+async function pastePan123Token() {
+  const output = $("#pan123BackupStatus");
+  const input = $("#pan123BackupToken");
+  let text = "";
+  try {
+    text = String(await navigator.clipboard.readText() || "");
+  } catch {
+    operationMessage(output, "浏览器没有放开剪贴板读取权限，请把 Token 直接粘贴到输入框。", true);
+    return;
+  }
+  const token = text.trim().split(/\s+/).filter(Boolean).pop() || "";
+  if (!token) { operationMessage(output, "剪贴板是空的，请先复制会话 Token。", true); return; }
+  if (input) input.value = token;
+  try { localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, token); } catch {}
+  operationMessage(output, "已从剪贴板填入会话 Token，正在验证…");
+  await verifyPan123Backup();
+}
 // "查看备份清单" answers the real question: are original .red packages actually
 // sitting in 123, and does every theme in the shared library have one? It is
 // read-only and auth-gated; the Worker never stores the session token.
@@ -1647,7 +1693,7 @@ function renderCompressionResults() {
   const batch = new Set(state.jobs.filter(job => state.importThemeJobIds.includes(job.id)).flatMap(job => job.ids || []));
   const themes = state.themes.filter(theme => batch.has(theme.source_staging_id));
   $("#themeCompressionResults").innerHTML = themes.map(theme => {
-    const url = assetUrl(theme.compressed_url || theme.library_url || theme.original_url);
+    const url = downloadUrl(theme.compressed_url || theme.library_url || theme.original_url);
     return `<article class="compression-result"><div><strong>${escapeHtml(theme.name || theme.source_name || "主题")}</strong><p>${escapeHtml(compressionSummary(theme))}</p><p>${escapeHtml(syncLabel(theme))}</p></div>${url ? `<a class="download-link" href="${escapeHtml(url)}">${requiresOriginalPreservation(theme) ? "下载原样主题" : "下载压缩 RED"}</a>` : ""}</article>`;
   }).join("");
 }
@@ -2076,7 +2122,7 @@ function fontCard(font, imported = false) {
   const selection = imported ? "" : selectInput("font", font.id, `字体 ${name}`, isAssetBusy("font", font.id));
   const actions = imported
     ? `<button class="text-button" data-open-view="jobs">查看同步任务</button>`
-    : `${savedToCloud(font) ? "" : `<button class="text-button sync-font" data-id="${escapeHtml(font.id)}" data-completed="false">同步字体到 R2</button>`}${font.url ? `<a class="download-link" href="${escapeHtml(assetUrl(font.url))}">下载原字体</a>` : ""}<button class="text-button danger-text delete-record" data-kind="font" data-id="${escapeHtml(font.id)}">删除</button>`;
+    : `${savedToCloud(font) ? "" : `<button class="text-button sync-font" data-id="${escapeHtml(font.id)}" data-completed="false">同步字体到 R2</button>`}${font.url ? `<a class="download-link" href="${escapeHtml(downloadUrl(font.url, font.file_name || name))}">下载原字体</a>` : ""}<button class="text-button danger-text delete-record" data-kind="font" data-id="${escapeHtml(font.id)}">删除</button>`;
   return `<article class="font-card ${imported ? "import-font-card" : ""}"><div class="font-card-top">${selection}<span class="category-chip">${escapeHtml(category)}</span></div>${fontPreviewMarkup(font)}<div class="font-card-body"><h3 class="font-name">${escapeHtml(name)}</h3><div class="font-meta"><span>${escapeHtml((font.extension || "font").toUpperCase())}</span><span>${formatBytes(font.bytes)}</span><span>${escapeHtml(syncLabel(font))}</span></div>${font.sync_error ? `<p class="inline-error">${escapeHtml(typeof font.sync_error === "string" ? font.sync_error : Object.values(font.sync_error).join("；"))}</p>` : ""}${font.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof font.cleanup_warning === "string" ? font.cleanup_warning : Object.values(font.cleanup_warning).join("；"))}</p>` : ""}${imported ? "" : fontClassificationEditor(font)}</div><div class="font-actions">${actions}</div></article>`;
 }
 function themeMatchesSearch(theme) {
@@ -2250,8 +2296,8 @@ function openThemeDialog(id) {
       ${themeDetailRow("源文件", theme.source_name || theme.file_name || "")}
       ${themeDetailRow("类别", themeCategoryList(theme).join(" · ") || "未分类")}
     </dl>${themeCategoryEditorMarkup(theme)}${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}<div class="theme-dialog-actions">
-      ${themeFile ? `<a class="secondary-button" href="${escapeHtml(assetUrl(themeFile))}">下载主题</a>` : ""}
-      ${theme.original_url ? `<a class="secondary-button" href="${escapeHtml(assetUrl(theme.original_url))}">下载原始包</a>` : ""}
+      ${themeFile ? `<a class="secondary-button" href="${escapeHtml(downloadUrl(themeFile, theme.name || theme.file_name))}">下载主题</a>` : ""}
+      ${theme.original_url ? `<a class="secondary-button" href="${escapeHtml(downloadUrl(theme.original_url, theme.source_name || theme.file_name))}">下载原始包</a>` : ""}
       ${themeFile && !savedToCloud(theme) ? `<button class="primary-button" id="themeDialogSync" type="button">同步到 R2</button>` : ""}
       <button class="text-button" id="themeDialogRebuild" type="button">更新预览</button>
       <button class="text-button danger-text" id="themeDialogDelete" type="button">删除</button>
@@ -2502,7 +2548,7 @@ function assetCard(asset, imported = false) {
   const author = String(asset.author || "").trim();
   const style = String(asset.style || "").trim();
   const tags = Array.isArray(asset.tags) ? asset.tags.filter(Boolean) : [];
-  const objectUrl = assetUrl(asset.download_url || asset.object_url || asset.url || "");
+  const objectUrl = downloadUrl(asset.download_url || asset.object_url || asset.url || "", asset.file_name || asset.name);
   // 参考「进度条收藏夹」：标题和分类标签在上，预览在下，卡片贴紧排列；
   // 分类编辑收进 details，动作只留必要的几个。
   return `<article class="asset-card ${imported ? "asset-card-imported" : ""}" data-asset-id="${escapeHtml(asset.id || asset.sha256 || "")}">
@@ -3141,13 +3187,21 @@ async function downloadRecordsSeparately(kind, chosen, output) {
   let done = 0, failed = 0;
   for (const file of files) {
     try {
-      const bytes = await fetchDownloadableBytes(file.path);
-      const url = URL.createObjectURL(new Blob([bytes]));
+      // Remote mode: hand the object straight to the native downloader. An
+      // Android WebView cannot fetch a `blob:` URL from DownloadManager, and
+      // pulling a 20 MB RED into JS just to re-emit it is wasteful. The Worker
+      // adds Content-Disposition when `download=1` is present.
+      const direct = apiBase && !remoteUnavailable && /^\/api\/objects\//i.test(String(file.path)) ? downloadUrl(file.path, file.name) : "";
+      let url = direct;
+      if (!url) {
+        const bytes = await fetchDownloadableBytes(file.path);
+        url = URL.createObjectURL(new Blob([bytes]));
+      }
       const link = document.createElement("a");
       link.href = url;
       link.download = file.name;
       document.body.append(link); link.click(); link.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      if (!direct) setTimeout(() => URL.revokeObjectURL(url), 60000);
       done++;
     } catch { failed++; }
     operationMessage(output, `正在逐个下载：${done} / ${files.length} 个文件${failed ? `（失败 ${failed}）` : ""}…`);
@@ -4317,6 +4371,7 @@ $("#savePan123Backup").addEventListener("click", () => {
   } catch { operationMessage($("#pan123BackupStatus"), "当前浏览器无法保存设置，请检查隐私模式设置。", true); }
 });
 $("#verifyPan123Backup").addEventListener("click", () => { verifyPan123Backup(); });
+$("#pan123PasteToken")?.addEventListener("click", () => { pastePan123Token(); });
 $("#pan123QuickLogin")?.addEventListener("submit", loginPan123Quick);
 $("#pan123WebLogin")?.addEventListener("click", webLoginPan123);
 (() => {
@@ -4324,7 +4379,7 @@ $("#pan123WebLogin")?.addEventListener("click", webLoginPan123);
   if (!hint) return;
   hint.textContent = nativeAppBridge()?.caps?.pan123Login
     ? "登录请求由同步 Worker 代发，密码不回传、不落盘；遇到验证码时点「改用网页登录」，在应用内登录页完成后再取回会话。"
-    : "登录请求由同步 Worker 代发，密码不回传、不落盘；遇到验证码时点「改用网页登录」，在浏览器登录后用 Token 兜底。";
+    : "登录请求由同步 Worker 代发，密码不回传、不落盘；遇到验证码时点「改用网页登录」，在浏览器登录后复制会话 Token，回到本页点「从剪贴板粘贴」即可。";
 })();
 $("#listPan123Backup").addEventListener("click", () => { refreshPan123BackupList(); });
 $("#verifyPan123Write").addEventListener("click", () => { verifyPan123Write(); });
