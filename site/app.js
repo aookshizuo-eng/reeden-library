@@ -58,7 +58,7 @@ function updateRuntimeMode() {
     note.textContent = staticHostedWithoutApi()
       ? "当前 APK/静态网页没有本机后端。请在“存储设置 → 多设备访问”填写 Cloudflare Worker 地址和同步 Token 后，手机与电脑才会共用 R2。"
       : remoteUnavailable
-      ? (freeCodecReady() ? "同步 API 暂时不可用，已切换为本地浏览器处理模式。处理结果会在 API 恢复后同步；页面关闭会暂停本地任务。" : "同步 API 不可用；本地浏览器处理器尚未加载，未执行压缩或上传。请清除同步地址使用电脑本地服务，或稍后重试。")
+      ? (freeCodecReady() ? "同步 API 暂时不可用，已切换为本地浏览器处理模式。处理结果会在 API 恢复后同步；页面关闭会暂停本地任务。" : "同步 API 不可用；本地浏览器处理器尚未加载，未执行压缩或上传。请检查同步 API 地址与网络后重试；压缩本身在当前设备完成，不需要电脑。")
       : "当前为多设备同步模式：手机和电脑共用同一个 API 与 R2。压缩和重新封包在当前设备浏览器中进行，页面关闭后处理会暂停。";
   }
   const input = $("#apiBaseInput");
@@ -93,7 +93,7 @@ function saveApiBaseSetting() {
   // The previous library may belong to another API; never reuse its cached
   // records after the address changes.
   invalidateBrowserLibraryRecords();
-  operationMessage($("#apiBaseStatus"), apiBase ? "已保存同步地址。正在读取共享库…" : "已清除同步地址，当前使用本机服务。");
+  operationMessage($("#apiBaseStatus"), apiBase ? "已保存同步地址。正在读取共享库…" : "已清除同步地址，当前在本机浏览器内处理。");
   loadLibraryAfterConnection({fromSave: true});
 }
 let libraryLoadGeneration = 0;
@@ -231,7 +231,7 @@ async function api(path, options = {}) {
   if (staticHostedWithoutApi()) {
     throw new Error("当前 APK/静态网页尚未连接同步 Worker；请到“存储设置 → 多设备访问”填写 Worker 地址和同步 Token");
   }
-  if (apiBase && remoteUnavailable) throw new Error("同步 API 不可用，未执行远程操作；请检查地址或清除同步地址使用本机服务");
+  if (apiBase && remoteUnavailable) throw new Error("同步 API 不可用，未执行远程操作；请检查同步地址与网络后重试");
   const request = { ...options, headers: requestHeaders(options.headers || {}) };
   delete request.readTimeoutMs;
   const method = String(request.method || "GET").toUpperCase();
@@ -1274,7 +1274,7 @@ function previewImage(url, alt, className = "", details = {}) {
   const description = details?.encrypted_source
     ? (browserPrivateCompressionEnabled()
       ? "加密 RED 的图片先在当前设备压缩，再交给同步 Worker 认证清单并重新封包。"
-      : "加密 RED 清单保持加密；本机服务会压缩包内图片并重新封包。")
+      : "加密 RED 需要配置同步 API：图片在当前设备压缩后，由 Worker 认证清单并重新封包。")
     : details?.simulation ? "书架使用主题真实素材离线合成，右侧为书架、轮播和封面图集。" + (details.kind === "shelf_and_splash" ? "左侧为启动图。" : "左侧为阅读页或阅读背景。") : "使用主题包内图片生成的轻量预览。";
   return `<button class="preview-open ${className}" type="button" aria-label="${escapeHtml(alt)}，点击放大" data-preview-url="${escapeHtml(url)}" data-preview-title="${escapeHtml(alt)}" data-preview-description="${escapeHtml(description)}"><img src="${escapeHtml(url)}" alt="${escapeHtml(alt)}" loading="lazy" /></button>`;
 }
@@ -1447,7 +1447,7 @@ function updateBulkControls() {
   const onlyPrivate = privateCount > 0 && normalCount === 0;
   const syncSuffix = browserSyncEnabled() ? "、上传 R2" : autoSyncEnabled() ? "、同步" : "";
   $("#commitSelectedThemes").textContent = onlyPrivate ? `确认所选并原样保存${syncSuffix}` : `确认所选并压缩${syncSuffix || "保存"}`;
-  const basePlan = chosenReview.length ? `${chosenReview.length} 个主题将压缩并重新封包${privateCount ? `；${privateCount} 个当前设备无法认证的加密包先保留原包` : ""}。处理完成后显示压缩前后大小。` : "全选或勾选主题后确认，开始处理。加密主题会先压缩包内图片，再由同步 Worker 或电脑本地服务认证清单并重新封包。";
+  const basePlan = chosenReview.length ? `${chosenReview.length} 个主题将压缩并重新封包${privateCount ? `；${privateCount} 个当前设备无法认证的加密包先保留原包` : ""}。处理完成后显示压缩前后大小。` : "全选或勾选主题后确认，开始处理。加密主题会先压缩包内图片，再由同步 Worker 认证清单并重新封包。";
   $("#compressionPlan").textContent = [basePlan, compressionEstimate(chosenReview)].filter(Boolean).join(" ");
   syncCompressionControls();
   $("#themeToolbar").hidden = !state.themes.length;
@@ -1662,9 +1662,9 @@ function renderReview() {
     const privateNote = info.container_format === "red_private_v2"
       ? (browserPrivateCompressionEnabled()
         ? `<p class="review-meta">加密主题：图片会在当前设备压缩，再由同步 Worker 认证清单、更新资源哈希并重新封包。</p>`
-        : `<p class="review-meta">加密主题：清单保持加密；本机服务会压缩包内图片并重新封包，同时保留权限、资源哈希和原始包。</p>`)
+        : `<p class="review-meta">加密主题：先在「存储设置」填好同步 API 地址与 Token，图片就会在当前设备压缩，再由 Worker 认证清单、更新资源哈希并重新封包；未配置时只保存原包。</p>`)
       : "";
-    return `<article class="review-card" data-review-id="${escapeHtml(item.staging_id)}"><div class="review-top"><div><label class="item-heading">${selectInput("review", item.staging_id, `待确认主题 ${info.name || info.source_name}`)}<span class="review-title">${escapeHtml(info.name || info.source_name)}</span></label><div class="review-meta">${escapeHtml(info.author || "作者未记录")} · ${formatBytes(info.bytes)} · ${escapeHtml(info.source_name)}</div></div><span class="badge ${duplicate ? "" : "is-good"}">${duplicate ? `疑似重复 ${item.duplicates.length}` : "未发现同名作者"}</span></div>${privateNote}${duplicate ? `<div class="duplicate-note">已有库中存在同名作者主题。下面只展示缩略图，是否重复由你确认。</div><div class="duplicate-thumbs">${duplicateThumbs}</div>` : ""}<div class="duplicate-thumbs"><div class="thumb-label">${previewImage(preview.url, `待审核主题${preview.label} · ${previewKind(info.preview_details)}`, "thumb", info.preview_details)}<span>新主题 · ${preview.label}</span><span>${escapeHtml(previewKind(info.preview_details))} · 点击放大</span></div></div>${item.commitError ? `<p class="inline-error">${escapeHtml(item.commitError)}</p>` : ""}<div class="review-actions"><button class="primary-button commit-theme" data-id="${escapeHtml(item.staging_id)}">${privateTheme ? "确认并保存原包（电脑后台压缩）" : "确认并压缩保存"}${autoSyncEnabled() ? "并后台同步" : "（后台处理）"}</button><button class="secondary-button discard-review" data-id="${escapeHtml(item.staging_id)}">暂不处理</button></div></article>`;
+    return `<article class="review-card" data-review-id="${escapeHtml(item.staging_id)}"><div class="review-top"><div><label class="item-heading">${selectInput("review", item.staging_id, `待确认主题 ${info.name || info.source_name}`)}<span class="review-title">${escapeHtml(info.name || info.source_name)}</span></label><div class="review-meta">${escapeHtml(info.author || "作者未记录")} · ${formatBytes(info.bytes)} · ${escapeHtml(info.source_name)}</div></div><span class="badge ${duplicate ? "" : "is-good"}">${duplicate ? `疑似重复 ${item.duplicates.length}` : "未发现同名作者"}</span></div>${privateNote}${duplicate ? `<div class="duplicate-note">已有库中存在同名作者主题。下面只展示缩略图，是否重复由你确认。</div><div class="duplicate-thumbs">${duplicateThumbs}</div>` : ""}<div class="duplicate-thumbs"><div class="thumb-label">${previewImage(preview.url, `待审核主题${preview.label} · ${previewKind(info.preview_details)}`, "thumb", info.preview_details)}<span>新主题 · ${preview.label}</span><span>${escapeHtml(previewKind(info.preview_details))} · 点击放大</span></div></div>${item.commitError ? `<p class="inline-error">${escapeHtml(item.commitError)}</p>` : ""}<div class="review-actions"><button class="primary-button commit-theme" data-id="${escapeHtml(item.staging_id)}">${privateTheme ? "确认并保存原包（配好同步后可压缩）" : "确认并压缩保存"}${autoSyncEnabled() ? "并后台同步" : "（后台处理）"}</button><button class="secondary-button discard-review" data-id="${escapeHtml(item.staging_id)}">暂不处理</button></div></article>`;
   }).join("");
   $$(".commit-theme").forEach(button => button.addEventListener("click", () => commitTheme(button.dataset.id)));
   $$(".discard-review").forEach(button => button.addEventListener("click", () => discardReview(button.dataset.id)));
@@ -2640,7 +2640,7 @@ async function startPan123Qr() {
     pan123QrExpiryTimer = setTimeout(() => { stopPan123Qr("二维码已过期，请重新扫码连接。"); updateStorageControls(); }, pan123QrSession.expiresAt - Date.now());
     pan123QrTimer = setTimeout(() => pollPan123Qr(generation), 2000);
   } catch {
-    if (generation === pan123QrGeneration) { stopPan123Qr(); operationMessage($("#pan123QrStatus"), "二维码暂时无法生成，请确认本机服务运行后再试。", true); }
+    if (generation === pan123QrGeneration) { stopPan123Qr(); operationMessage($("#pan123QrStatus"), "二维码暂时无法生成，请稍后重试。", true); }
   } finally { clearTimeout(requestTimeout); setOperation(""); }
 }
 async function pollPan123Qr(generation) {
@@ -2691,7 +2691,7 @@ async function savePan123Credentials(event, kind) {
     operationMessage(output, kind === "login" ? "登录成功，会话已加密保存，账号与密码输入已清空。保存备份配置后，可运行上传验证。" : "会话已加密保存，Token 输入已清空。保存备份配置后，请运行上传验证确认会话有效。");
     if (kind === "session") $("#pan123SessionDetails").open = false;
   } catch (error) {
-    const message = error instanceof TypeError ? "暂时无法连接本机服务。输入已清空，请确认服务运行后再提交。" : error.message;
+    const message = error instanceof TypeError ? "暂时无法连接同步 API。输入已清空，请检查地址与网络后重新提交。" : error.message;
     operationMessage(output, message, true);
   } finally {
     for (const key of Object.keys(payload)) payload[key] = "";
@@ -2708,7 +2708,7 @@ async function probePan123() {
     if (result.ok === false) throw new Error(result.error || "123 云盘上传验证未能加入队列");
     rememberJob(result.job);
     renderJobs();
-    operationMessage(output, "上传验证已加入后台队列。将在备份目录的 probes/ 上传随机小文件并回读核验，结果见后台任务。关闭网页后仍会执行，请保持电脑与本机服务运行。");
+    operationMessage(output, "上传验证已加入后台队列。将在备份目录的 probes/ 上传随机小文件并回读核验，结果见后台任务。关闭网页后仍由 Worker 继续执行，不需要保持电脑开机。");
     loadJobs().catch(() => {});
   } catch (error) { operationMessage(output, error.message, true); }
   finally { setOperation(""); }
