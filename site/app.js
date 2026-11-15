@@ -541,8 +541,10 @@ async function backupOriginalTo123(raw, name, codec) {
       headers: requestHeaders({
         "Content-Type": "application/octet-stream",
         "X-Pan123-Token": config.token,
-        "X-Pan123-Folder": config.folder,
-        "X-Pan123-Filename": fileName,
+        // HTTP header values only allow ISO-8859-1; Chinese theme names must be
+        // percent-encoded or fetch throws before the request is ever sent.
+        "X-Pan123-Folder": encodeURIComponent(config.folder),
+        "X-Pan123-Filename": encodeURIComponent(fileName),
         "X-Pan123-Etag": md5,
       }),
       body: raw,
@@ -573,7 +575,7 @@ async function verifyPan123Backup() {
   operationMessage(output, "正在验证 123 云盘会话（只读校验）…");
   try {
     const response = await fetch(apiUrl("/api/backup/123/verify"), {
-      method: "POST", headers: requestHeaders({"X-Pan123-Token": token, "X-Pan123-Folder": folder}),
+      method: "POST", headers: requestHeaders({"X-Pan123-Token": token, "X-Pan123-Folder": encodeURIComponent(folder)}),
     });
     const text = await response.text();
     let data = {}; try { data = text ? JSON.parse(text) : {}; } catch {}
@@ -603,15 +605,27 @@ async function refreshPan123BackupList({quiet = false} = {}) {
   const config = pan123InputConfig();
   if (!config.token) { if (!quiet) operationMessage(output, "请先填写并保存 123 云盘会话 Token，再查看备份清单。", true); return null; }
   if (!apiBase) { if (!quiet) operationMessage(output, "请先在「多设备访问」保存同步 API 地址与写入 Token。", true); return null; }
-  if (!quiet) operationMessage(output, "正在读取 123 云盘备份清单…");
+  // 123's list API takes several seconds; a frozen label looks like a hang, so
+  // show elapsed seconds until the response lands.
+  let ticker = null;
+  const stopTicker = () => { if (ticker) { clearInterval(ticker); ticker = null; } };
+  if (!quiet) {
+    const startedAt = Date.now();
+    operationMessage(output, "正在读取 123 云盘备份清单…");
+    ticker = setInterval(() => {
+      const seconds = Math.round((Date.now() - startedAt) / 1000);
+      operationMessage(output, `正在读取 123 云盘备份清单…（已用 ${seconds} 秒）`);
+    }, 1000);
+  }
   try {
     const response = await fetch(apiUrl("/api/backup/123/list"), {
-      method: "POST", headers: requestHeaders({"X-Pan123-Token": config.token, "X-Pan123-Folder": config.folder}),
+      method: "POST", headers: requestHeaders({"X-Pan123-Token": config.token, "X-Pan123-Folder": encodeURIComponent(config.folder)}),
     });
     const text = await response.text();
     let data = {}; try { data = text ? JSON.parse(text) : {}; } catch {}
     if (response.status === 401) throw new Error("同步写入 Token 无效或未保存，请先在「多设备访问」重新保存");
     if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    stopTicker();
     const items = Array.isArray(data.items) ? data.items : [];
     const files = items.filter(item => item.type === "file");
     const folders = items.filter(item => item.type === "folder");
@@ -637,8 +651,11 @@ async function refreshPan123BackupList({quiet = false} = {}) {
     if (!quiet) operationMessage(output, `备份清单已更新：${redFiles.length} 个 .red 原包，库内 ${backed.length} / ${themes.length} 个主题已备份。只读检查，未写入文件。`);
     return data;
   } catch (error) {
+    stopTicker();
     if (!quiet) operationMessage(output, `123 备份清单读取失败：${error.message}`, true);
     return null;
+  } finally {
+    stopTicker();
   }
 }
 // "测试连接" only proves the account can be read. This one actually exercises
@@ -660,8 +677,8 @@ async function verifyPan123Write() {
       headers: requestHeaders({
         "Content-Type": "application/octet-stream",
         "X-Pan123-Token": config.token,
-        "X-Pan123-Folder": folder,
-        "X-Pan123-Filename": "reeden-backup-check.red",
+        "X-Pan123-Folder": encodeURIComponent(folder),
+        "X-Pan123-Filename": encodeURIComponent("reeden-backup-check.red"),
         "X-Pan123-Etag": etag,
       }),
       body: bytes,
@@ -1205,8 +1222,10 @@ let stagedResumeBusy = false;
 async function sendCloudJobPatch(patch, id = activeCloudJob) {
   if (!id || !patch) return;
   try {
+    // keepalive lets the final "completed" patch survive a tab that closes
+    // right as compression ends, which otherwise leaves the job stuck running.
     await fetch(apiUrl(`/api/jobs/${encodeURIComponent(id)}`), {
-      method: "PATCH", headers: requestHeaders({"Content-Type": "application/json"}), body: JSON.stringify(patch),
+      method: "PATCH", headers: requestHeaders({"Content-Type": "application/json"}), body: JSON.stringify(patch), keepalive: true,
     });
   } catch {}
 }
@@ -1214,8 +1233,9 @@ async function createCloudJob(title, total) {
   if (suppressCloudJob || !browserSyncEnabled() || !syncToken) return;
   try {
     const response = await fetch(apiUrl("/api/jobs"), {
-      method: "POST", headers: requestHeaders({"Content-Type": "application/json"}),
+      method: "POST", headers: requestHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({kind: "upload", title, total, device: /Android|iPhone|iPad/i.test(navigator.userAgent) ? "mobile" : "desktop"}),
+      keepalive: true,
     });
     if (!response.ok) return;
     const data = await response.json();
@@ -1704,7 +1724,11 @@ function jobCard(job) {
   const failed = Array.isArray(job.failed) ? job.failed : [];
   const active = ["queued", "running"].includes(job.status);
   const retrying = activeJobs().some(item => (item.parent_id || item.retry_of) === job.id);
-  const detail = active && job.current ? `正在处理：${typeof job.current === "string" ? job.current : job.current.name || "当前文件"}` : `${Number(job.succeeded) || 0} 项成功 · ${Number(job.skipped) || 0} 项跳过 · ${failed.length} 项失败`;
+  // A finished job's own result is more informative than a raw counter, e.g.
+  // "1 个主题已自动压缩并入库" instead of "0 项成功 · 0 项跳过".
+  const detail = active && job.current
+    ? `正在处理：${typeof job.current === "string" ? job.current : job.current.name || "当前文件"}`
+    : (job.result ? String(job.result).slice(0, 180) : `${Number(job.succeeded) || 0} 项成功 · ${Number(job.skipped) || 0} 项跳过 · ${failed.length} 项失败`);
   return `<article class="job-card" data-job-id="${escapeHtml(job.id)}"><div class="job-card-head"><div><h3>${jobTitle(job)}</h3><span class="job-meta">${escapeHtml(jobStatus(job))} · 已处理 ${completed} / ${total} 项</span></div>${failed.length && !active ? `<button class="secondary-button retry-job" data-retry-job="${escapeHtml(job.id)}" ${state.operation || retrying ? "disabled" : ""}>${retrying ? "已加入重试" : "重试失败项"}</button>` : ""}</div><progress class="job-progress" max="${Math.max(1,total)}" value="${completed}" aria-label="${jobTitle(job)}进度"></progress><p class="job-detail ${failed.length && !active ? "is-error" : ""}">${escapeHtml(detail)}</p>${failed.length ? `<details class="job-errors"><summary>${failed.length} 项失败详情</summary><ul>${failed.map(item => `<li><strong>${escapeHtml(item.name || item.id || "文件")}</strong><span>${escapeHtml(item.error || "处理失败")}</span></li>`).join("")}</ul></details>` : ""}</article>`;
 }
 function renderJobs() {
@@ -1740,7 +1764,7 @@ async function loadJobs() {
     state.jobs = items;
     jobsRevision = revision;
     operationMessage($("#jobsStatus"), browserSyncEnabled()
-      ? "免费同步模式：压缩与上传由当前设备浏览器执行；进度保存在共享 R2，刷新页面或换一台设备都能看到，暂存的原始文件可由任意设备继续处理。"
+      ? "免费同步模式：批次队列存在共享 R2，关掉页面不会丢，换一台设备或重开页面会自动继续；图片压缩需要浏览器画布，所以由设备执行。"
       : "任务由本地服务执行。完成记录与失败原因会保留，失败项可单独重试。");
     if (changed) {
       const finished = items.filter(job => previous.has(job.id) && ["queued", "running"].includes(previous.get(job.id)) && !["queued", "running"].includes(job.status));
@@ -2666,7 +2690,8 @@ async function queueFilesForLater(fileList) {
     const response = await fetch(apiUrl("/api/jobs"), {
       method: "POST", headers: requestHeaders({"Content-Type": "application/json"}),
       body: JSON.stringify({kind: "staged-import", title: `暂存 ${valid.length} 个文件，等待处理`, total: valid.length,
-        items: names, source_keys: keys, device: /Android|iPhone|iPad/i.test(navigator.userAgent) ? "mobile" : "desktop"}),
+        items: names, source_keys: keys, auto_commit: true,
+        device: /Android|iPhone|iPad/i.test(navigator.userAgent) ? "mobile" : "desktop"}),
     });
     if (!response.ok) throw new Error(`暂存任务创建失败（${response.status}）`);
     suppressCloudJob = false;
@@ -2679,13 +2704,25 @@ async function queueFilesForLater(fileList) {
     toast(`后台暂存失败：${error.message}`);
   } finally { suppressCloudJob = false; setOperation(""); }
 }
+// A tab that closes mid-run leaves the job "running", so takeover waits out an
+// idle window first: that avoids two devices compressing the same batch while
+// still letting a genuinely abandoned batch resume on its own.
+const STAGED_TAKEOVER_IDLE_MS = 120000;
+function isStagedResumable(job, now = Date.now()) {
+  if (!job || job.kind !== "staged-import") return false;
+  if (!Array.isArray(job.source_keys) || !job.source_keys.length) return false;
+  if (job.status === "queued") return true;
+  if (job.status !== "running") return false;
+  const idle = now - Date.parse(job.updated_at || "");
+  return !Number.isFinite(idle) || idle > STAGED_TAKEOVER_IDLE_MS;
+}
 async function resumeStagedJobs() {
   if (stagedResumeBusy || state.operation) { toast("请等待当前批次处理完成"); return; }
   stagedResumeBusy = true;
   const status = $("#jobsStatus");
   try {
     const data = await api("/api/jobs");
-    const queued = (data.items || []).filter(job => job.kind === "staged-import" && job.status === "queued" && Array.isArray(job.source_keys) && job.source_keys.length);
+    const queued = (data.items || []).filter(job => isStagedResumable(job));
     if (!queued.length) { operationMessage(status, "当前没有待处理的暂存文件。"); toast("没有待处理的暂存文件"); return; }
     for (const job of queued) {
       await sendCloudJobPatch({status: "running", stage: "正在读取暂存原文件"}, job.id);
@@ -2700,15 +2737,57 @@ async function resumeStagedJobs() {
       resumingStaged = true;
       try { await importUnifiedFiles(files); }
       finally { resumingStaged = false; }
-      await sendCloudJobPatch({status: "completed", completed: job.total, stage: "已在本设备完成导入", result: files.length ? `${files.length} 个文件已导入；主题仍需在导入页确认` : "无文件"}, job.id);
+      // A staged batch carries the intent to process later, so finish the job
+      // here instead of parking it in the review list for another click.
+      let autoCommitted = 0;
+      if (job.auto_commit) {
+        // Parsed themes land in state.review without being ticked, so use the
+        // same "everything eligible" set the 全选 button would produce.
+        const pending = eligibleIds("review");
+        if (pending.length) {
+          operationMessage(status, `「${job.title}」已解析 ${pending.length} 个主题，正在自动压缩入库…`);
+          await sendCloudJobPatch({stage: "自动确认并压缩", total: pending.length}, job.id);
+          const before = state.themes.length;
+          try { await commitThemes(pending); autoCommitted = Math.max(0, state.themes.length - before); }
+          catch (error) { operationMessage(status, `自动压缩失败：${error.message}`, true); }
+        }
+      }
+      await sendCloudJobPatch({status: "completed", completed: job.total,
+        stage: autoCommitted ? "已自动完成压缩入库" : "已在本设备完成导入",
+        result: autoCommitted ? `${autoCommitted} 个主题已自动压缩并入库`
+          : files.length ? `${files.length} 个文件已导入；主题仍需在导入页确认` : "无文件"}, job.id);
+      // The staged raw copies served their purpose; leaving them would keep a
+      // second full copy of every theme in R2 forever.
+      for (const key of job.source_keys) {
+        fetch(apiUrl(key), {method: "DELETE", headers: requestHeaders()}).catch(() => {});
+      }
     }
-    operationMessage(status, "暂存文件已处理完成；主题请在导入页确认所选并压缩。");
+    operationMessage(status, "暂存文件已处理完成；未自动提交的主题已在导入页列出，可手动确认。");
     toast("暂存任务已处理完成");
     await loadJobs();
   } catch (error) {
     operationMessage(status, `继续处理失败：${error.message}`, true);
     toast(`继续处理失败：${error.message}`);
   } finally { resumingStaged = false; stagedResumeBusy = false; }
+}
+// The queue lives in shared R2, but image recompression needs a real canvas,
+// so the work still runs in a browser. Landing on any device finishes a batch
+// staged elsewhere instead of waiting for someone to press a button.
+const AUTO_RESUME_STORAGE_KEY = "reeden-auto-resume-queue";
+function autoResumeQueueEnabled() {
+  try { return localStorage.getItem(AUTO_RESUME_STORAGE_KEY) !== "off"; } catch { return true; }
+}
+function setAutoResumeQueue(enabled) {
+  try { localStorage.setItem(AUTO_RESUME_STORAGE_KEY, enabled ? "on" : "off"); } catch {}
+}
+async function autoResumeStagedQueue() {
+  if (!autoResumeQueueEnabled() || !browserSyncEnabled() || !syncToken) return;
+  if (stagedResumeBusy || state.operation) return;
+  const queued = (state.jobs || []).filter(job => isStagedResumable(job));
+  if (!queued.length) return;
+  operationMessage($("#jobsStatus"), `检测到 ${queued.length} 个云端排队批次，正在自动继续处理…`);
+  toast(`云端有 ${queued.length} 个排队批次，已自动继续`);
+  await resumeStagedJobs();
 }
 async function clearFinishedJobs() {
   if (state.operation) return;
@@ -2807,6 +2886,14 @@ $("#closeModal").addEventListener("click", () => $("#modalBackdrop").hidden = tr
 $("#openJobs").addEventListener("click", () => setView("jobs"));
 $("#refreshJobs").addEventListener("click", () => loadJobs().catch(() => {}));
 $("#resumeStagedJobs").addEventListener("click", () => resumeStagedJobs());
+const autoResumeBox = $("#autoResumeQueue");
+if (autoResumeBox) {
+  autoResumeBox.checked = autoResumeQueueEnabled();
+  autoResumeBox.addEventListener("change", () => {
+    setAutoResumeQueue(autoResumeBox.checked);
+    toast(autoResumeBox.checked ? "已开启：打开页面时自动继续排队批次" : "已关闭：只在你点按钮时继续排队批次");
+  });
+}
 $("#clearFinishedJobs").addEventListener("click", () => clearFinishedJobs());
 $$("[data-import-kind]").forEach(button => {
   button.addEventListener("click", () => setImportKind(button.dataset.importKind));
@@ -2910,4 +2997,4 @@ window.addEventListener("hashchange", () => {
   const view = location.hash.slice(1);
   if (viewNames[view]) setView(view);
 });
-loadLibraryAfterConnection();
+loadLibraryAfterConnection().then(() => autoResumeStagedQueue().catch(() => {})).catch(() => {});

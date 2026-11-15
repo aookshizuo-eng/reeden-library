@@ -47,7 +47,7 @@
             <div class="drop-zone unified-drop-zone" id="unifiedDropZone" tabindex="0" role="button" aria-label="拖入主题、字体或 SVG、HTML 文件">
               <span class="drop-icon">↓</span><strong id="unifiedDropTitle">把主题、字体或收藏文件拖到这里</strong><span>自动按后缀识别并分流</span><small>.red · .ttf · .otf · .woff · .woff2 · .svg · .html · .htm</small>
             </div>
-            <div class="ingest-actions unified-actions"><button class="primary-button" id="chooseUnifiedFiles" type="button">选择文件</button><button class="secondary-button" id="chooseUnifiedFolder" type="button">选择文件夹</button><label class="check-label queue-later-label"><input id="queueForLater" type="checkbox" /><span>后台暂存：先把原文件上传到共享库，稍后或换一台设备再处理</span></label></div>
+            <div class="ingest-actions unified-actions"><button class="primary-button" id="chooseUnifiedFiles" type="button">选择文件</button><button class="secondary-button" id="chooseUnifiedFolder" type="button">选择文件夹</button><label class="check-label queue-later-label"><input id="queueForLater" type="checkbox" /><span>后台暂存：先上传原文件到共享库，之后在任意设备打开会自动继续并完成压缩入库</span></label></div>
             <input id="unifiedInput" type="file" accept=".red,.ttf,.otf,.woff,.woff2,.svg,.html,.htm" multiple hidden /><input id="unifiedFolderInput" type="file" accept=".red,.ttf,.otf,.woff,.woff2,.svg,.html,.htm" webkitdirectory multiple hidden />
             <p class="operation-status unified-import-status" id="unifiedImportStatus" role="status" hidden></p>
           </div>
@@ -126,8 +126,8 @@
 
 
         <section class="view" id="jobsView" data-view-panel="jobs" hidden>
-          <div class="title-row"><div><h1>后台任务</h1><p class="lede">本地服务模式可在后台继续处理；免费浏览器模式会在当前页面完成处理，关闭页面或切到后台可能暂停。</p></div><button class="text-button" id="refreshJobs">刷新任务</button></div>
-          <div class="form-actions"><button class="secondary-button" id="resumeStagedJobs" type="button">继续处理暂存文件</button><button class="text-button" id="clearFinishedJobs" type="button">清除已完成任务</button></div>
+          <div class="title-row"><div><h1>后台任务</h1><p class="lede">批次队列存在共享 R2 里：关掉页面不会丢，换一台设备打开也会自动接着处理。免费模式的图片压缩需要浏览器画布，所以由设备执行。</p></div><button class="text-button" id="refreshJobs">刷新任务</button></div>
+          <div class="form-actions"><button class="secondary-button" id="resumeStagedJobs" type="button">继续处理暂存文件</button><button class="text-button" id="clearFinishedJobs" type="button">清除已完成任务</button><label class="check-label queue-later-label"><input id="autoResumeQueue" type="checkbox" /><span>打开页面时自动继续云端排队的批次</span></label></div>
           <p class="operation-status" id="jobsStatus" role="status"></p><div id="jobList" class="job-list"></div><div class="empty-state" id="jobsEmpty"><h2>暂时没有后台任务</h2><p>确认主题或同步资产后，这里会显示进度和结果。</p></div>
         </section>
 

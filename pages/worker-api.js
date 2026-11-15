@@ -340,6 +340,17 @@ function contentType(spec) {
   return "application/json; charset=utf-8";
 }
 
+// Staging objects are raw copies parked for later processing. Once a device has
+// finished the batch they are dead weight, so the same device may delete them.
+// Only the staging prefix is deletable; library objects go through the record
+// delete route, which also drops references.
+async function deleteStagingObject(request, env, spec) {
+  if (!originAllowed(request, env, {write: true})) return json({error: "Origin 不在允许列表中"}, 403, request, env);
+  if (!checkWriteToken(request, env)) return json({error: "删除暂存文件需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
+  if (typeof env.ASSETS.delete !== "function") return json({error: "R2 不支持删除"}, 405, request, env);
+  await env.ASSETS.delete(spec.key);
+  return json({ok: true, deleted: spec.key}, 200, request, env);
+}
 async function putObject(request, env, spec) {
   if (!originAllowed(request, env, {write: true})) return json({error: "Origin 不在允许列表中"}, 403, request, env);
   if (!checkWriteToken(request, env)) return json({error: "上传接口需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
@@ -856,6 +867,9 @@ async function createJob(request, env) {
     status: "queued", stage: "等待处理", completed: 0, failed: 0, total,
     items: Array.isArray(payload?.items) ? payload.items.slice(0, 100).map(item => String(item).slice(0, 200)) : [],
     source_keys: Array.isArray(payload?.source_keys) ? payload.source_keys.slice(0, 100).map(item => String(item).slice(0, 200)) : [],
+    // The device that staged the batch already accepted "process this later",
+    // so the next page load may finish compression without asking again.
+    auto_commit: payload?.auto_commit === true,
     device: String(payload?.device || "").slice(0, 80),
     created_at: now, updated_at: now,
   };
@@ -900,6 +914,14 @@ function pan123Token(value) {
   const token = String(value || "").trim().replace(/^Bearer\s+/i, "");
   if (!token || token.length > 16384 || /\s/.test(token)) throw new Error("123 会话 Token 无效");
   return token;
+}
+/** Header values are ISO-8859-1 only, so Chinese theme names and folder names
+ * travel percent-encoded. Plain ASCII (and legacy clients that never encoded)
+ * decode to themselves; malformed escapes fall back to the raw value. */
+function headerText(value, fallback = "") {
+  if (value === null || value === undefined) return fallback;
+  const raw = String(value);
+  try { return decodeURIComponent(raw); } catch { return raw; }
 }
 function safeTransferUrl(value) {
   let url;
@@ -976,7 +998,7 @@ async function verifyPan123(request, env, fetchImpl = fetch) {
   try {
     token = pan123Token(request.headers.get("X-Pan123-Token"));
     const rawFolder = request.headers.get("X-Pan123-Folder");
-    folder = rawFolder === null ? "Red-Garden-Backup" : String(rawFolder).trim().replace(/^\/+|\/+$/g, "");
+    folder = rawFolder === null ? "Red-Garden-Backup" : headerText(rawFolder).trim().replace(/^\/+|\/+$/g, "");
   } catch (error) { return json({error: error.message}, 400, request, env); }
   try {
     const data = await pan123Request(token, "/file/list/new", {method: "GET", fetchImpl, params: {
@@ -1005,7 +1027,7 @@ async function listPan123Backups(request, env, fetchImpl = fetch) {
   try {
     token = pan123Token(request.headers.get("X-Pan123-Token"));
     const rawFolder = request.headers.get("X-Pan123-Folder");
-    folder = rawFolder === null ? "Red-Garden-Backup" : String(rawFolder).trim().replace(/^\/+|\/+$/g, "");
+    folder = rawFolder === null ? "Red-Garden-Backup" : headerText(rawFolder).trim().replace(/^\/+|\/+$/g, "");
   } catch (error) { return json({error: error.message}, 400, request, env); }
   try {
     const {exists, parent} = await findPan123Folder(token, folder, fetchImpl);
@@ -1044,7 +1066,7 @@ async function backupOriginalTo123(request, env, fetchImpl = fetch) {
   let token, name, folder, etag;
   try {
     token = pan123Token(request.headers.get("X-Pan123-Token"));
-    name = String(request.headers.get("X-Pan123-Filename") || "").trim();
+    name = headerText(request.headers.get("X-Pan123-Filename")).trim();
     const rawFolder = request.headers.get("X-Pan123-Folder");
     // An explicitly empty folder means the 123 root; an absent header uses
     // the conventional backup directory.
@@ -1090,9 +1112,15 @@ async function backupOriginalTo123(request, env, fetchImpl = fetch) {
 
 const LOCAL_PROCESSING_NOTICE = {
   mode: "browser-local",
+  // Staged batches survive a closed tab because the queue lives in R2, and the
+  // next page load on any device resumes them automatically. Image
+  // recompression still needs a real canvas, which the free Workers runtime
+  // does not provide, so it stays on the device.
   backgroundJobs: false,
   persistentJobs: true,
-  message: "免费模式由当前浏览器本地处理；关闭页面或设备休眠后不会继续。上传进度会写入 R2，可在任意设备查看与续跑。",
+  autoResume: true,
+  cloudCompression: false,
+  message: "批次队列存在共享 R2：关掉页面不会丢，换一台设备或重开页面会自动继续。免费模式没有云端画布，图片压缩由设备浏览器执行。",
 };
 const LOCAL_JOB_NOTICE = {...LOCAL_PROCESSING_NOTICE};
 
@@ -1131,11 +1159,12 @@ export async function handle(request, env) {
   if (jobRoute && request.method === "PATCH") return updateJob(request, env, decodeURIComponent(jobRoute[1]));
   if (jobRoute && request.method === "DELETE") return deleteJob(request, env, decodeURIComponent(jobRoute[1]));
   const spec = objectSpec(url.pathname);
-  if (!spec || !["GET", "HEAD", "PUT", "POST"].includes(request.method)) return json({error: "Not found"}, 404, request, env);
+  if (!spec || !["GET", "HEAD", "PUT", "POST", "DELETE"].includes(request.method)) return json({error: "Not found"}, 404, request, env);
+  if (spec.kind === "staging" && request.method === "DELETE") return deleteStagingObject(request, env, spec);
   if (request.method === "PUT" || request.method === "POST") return putObject(request, env, spec);
   return getObject(request, env, spec);
 }
 
 export default {fetch: handle};
 
-export const __test = {configuredOrigins, corsHeaders, originAllowed, objectSpec, maxUpload, digestHex, base64Bytes, base64String, decryptPrivateManifest, repackPrivateRed, privateDirectory, sealPrivatePrefix, listJobs, createJob, updateJob, deleteJob, backupOriginalTo123, verifyPan123, listPan123Backups, downloadSelected, downloadEntries, crc32Bytes};
+export const __test = {configuredOrigins, corsHeaders, originAllowed, objectSpec, maxUpload, digestHex, base64Bytes, base64String, decryptPrivateManifest, repackPrivateRed, privateDirectory, sealPrivatePrefix, listJobs, createJob, updateJob, deleteJob, backupOriginalTo123, verifyPan123, listPan123Backups, downloadSelected, downloadEntries, crc32Bytes, headerText, deleteStagingObject};

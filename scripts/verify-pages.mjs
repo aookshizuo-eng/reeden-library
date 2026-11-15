@@ -33,10 +33,10 @@ const [app, html] = await Promise.all([
   readFile(path.join(source, "index.html"), "utf8"),
 ]);
 for (const marker of ["function fontPreviewMarkup", "function loadFontPreviewFace", "function recoverFontPreviewImage", "new FontFace(", "font-preview-frame", "font-preview-fallback", "data-font-preview-id", "data-font-id", "function renderFonts",
-  "function analyzeFontGlyphs", "function inkProfile", "window.opentype", "glyph_method", "function downloadSelectedRecords", "function fetchDownloadableBytes", "function renderThemeAuthorFilter", "function compressPrivateRedWithDirectory", "function queueFilesForLater", "function resumeStagedJobs", "function backupOriginalTo123", "function runCodecTask", "function loadLibraryAfterConnection", "function fetchWithReadTimeout", "API_READ_TIMEOUT_MS", "已连接共享库", "function verifyPan123Backup", "/api/backup/123/verify", "已连接 123 云盘", "function refreshPan123BackupList", "function verifyPan123Write", "/api/backup/123/list", "123 已备份"]) {
+  "function analyzeFontGlyphs", "function inkProfile", "window.opentype", "glyph_method", "function downloadSelectedRecords", "function fetchDownloadableBytes", "function renderThemeAuthorFilter", "function compressPrivateRedWithDirectory", "function queueFilesForLater", "function resumeStagedJobs", "function backupOriginalTo123", "function runCodecTask", "function loadLibraryAfterConnection", "function fetchWithReadTimeout", "API_READ_TIMEOUT_MS", "已连接共享库", "function verifyPan123Backup", "/api/backup/123/verify", "已连接 123 云盘", "function refreshPan123BackupList", "function verifyPan123Write", "/api/backup/123/list", "123 已备份", "encodeURIComponent(config.folder)", "encodeURIComponent(fileName)", "已用 ${seconds} 秒", "function autoResumeStagedQueue", "reeden-auto-resume-queue", "auto_commit", 'fetch(apiUrl(key), {method: "DELETE"']) {
   if (!app.includes(marker)) errors.push(`前端缺少关键回归标记：${marker}`);
 }
-for (const id of ["fontList", "fontCount", "fontEmpty", "themeAuthorFilter", "downloadSelectedTheme", "downloadSelectedFont", "downloadSelectedAsset", "queueForLater", "resumeStagedJobs", "pan123BackupToken", "verifyPan123Backup", "listPan123Backup", "verifyPan123Write", "pan123BackupList"]) {
+for (const id of ["fontList", "fontCount", "fontEmpty", "themeAuthorFilter", "downloadSelectedTheme", "downloadSelectedFont", "downloadSelectedAsset", "queueForLater", "resumeStagedJobs", "pan123BackupToken", "verifyPan123Backup", "listPan123Backup", "verifyPan123Write", "pan123BackupList", "autoResumeQueue"]) {
   if (!html.includes(`id=\"${id}\"`)) errors.push(`页面结构回归检查失败：缺少 #${id}`);
 }
 for (const file of ["app.js", "free_codec.js", "free_codec_worker.js", "opentype.min.js"]) {
@@ -58,6 +58,10 @@ for (const route of ['"/api/library" && request.method === "DELETE"', '"/api/pri
   if (!workerApi.includes(route)) errors.push(`pages/worker-api.js 缺少关键路由：${route}`);
 }
 if (!workerApi.includes("function streamZip") || !workerApi.includes("zipEndOfCentralDirectory")) errors.push("pages/worker-api.js 缺少流式 ZIP 打包实现");
+// Chinese theme names must be percent-decoded server-side, otherwise every
+// non-ASCII filename is rejected before the upload starts.
+if (!workerApi.includes("function headerText") || !workerApi.includes('headerText(request.headers.get("X-Pan123-Filename"))')) errors.push("pages/worker-api.js 未解码百分号编码的 123 文件名，中文主题会备份失败");
+if (!workerApi.includes("function deleteStagingObject") || !workerApi.includes('spec.kind === "staging" && request.method === "DELETE"')) errors.push("pages/worker-api.js 缺少暂存文件删除，处理完的原始副本会永久占用 R2");
 const [codecSource] = await Promise.all([readFile(path.join(source, "free_codec.js"), "utf8")]);
 if (!codecSource.includes("options.store")) errors.push("site/free_codec.js 缺少 Stored ZIP 选项，批量下载会重复压缩字体");
 

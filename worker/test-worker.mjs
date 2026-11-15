@@ -98,10 +98,16 @@ const job = (await created.json()).job;
 assert.equal(job.status, "queued");
 const jobsList = await handle(new Request(jobsUrl, {headers: {Origin: origin}}), env);
 assert.equal((await jobsList.json()).items.some(item => item.id === job.id), true);
-const patched = await handle(new Request(`${jobsUrl}/${job.id}`, {method: "PATCH", headers: headers({"Content-Type": "application/json"}), body: JSON.stringify({status: "running", stage: "上传压缩包", completed: 2, total: 3})}), env);
-assert.equal((await patched.json()).job.stage, "上传压缩包");
+const patches = await (await handle(new Request(`${jobsUrl}/${job.id}`, {method: "PATCH", headers: headers({"Content-Type": "application/json"}), body: JSON.stringify({status: "running", stage: "上传压缩包", completed: 2, total: 3})}), env)).json();
+assert.equal(patches.job.stage, "上传压缩包");
 const jobsAfter = await (await handle(new Request(jobsUrl, {headers: {Origin: origin}}), env)).json();
 assert.equal(jobsAfter.items.find(item => item.id === job.id).completed, 2);
+// A staged batch remembers that the user accepted "process later", so the next
+// page load may finish compression without a second confirmation.
+const stagedJob = (await (await handle(new Request(jobsUrl, {method: "POST", headers: headers({"Content-Type": "application/json"}), body: JSON.stringify({kind: "staged-import", title: "暂存 1 个文件", total: 1, items: ["a.red"], source_keys: ["staging/x.red"], auto_commit: true})}), env)).json()).job;
+assert.equal(stagedJob.auto_commit, true);
+const plainJob = (await (await handle(new Request(jobsUrl, {method: "POST", headers: headers({"Content-Type": "application/json"}), body: JSON.stringify({kind: "upload", title: "普通上传"})}), env)).json()).job;
+assert.equal(plainJob.auto_commit, false);
 const jobUnauthorized = await handle(new Request(jobsUrl, {method: "POST", headers: {Origin: origin, "Content-Type": "application/json"}, body: "{}"}), env);
 assert.equal(jobUnauthorized.status, 401);
 const removed = await handle(new Request(`${jobsUrl}/${job.id}`, {method: "DELETE", headers: headers()}), env);
@@ -114,6 +120,16 @@ assert.equal(__test.objectSpec(`/api/objects/staging/${stagedSha}.red`).kind, "s
 const stagedPut = await handle(new Request(`https://worker.example/api/objects/staging/${stagedSha}.red`, {method: "PUT", headers: headers(), body: staged}), env);
 assert.equal(stagedPut.status, 201);
 assert.equal((await handle(new Request(`https://worker.example/api/objects/staging/${stagedSha}.red`, {headers: {Origin: origin}}), env)).status, 200);
+// Finished batches must be able to drop their staged raw copies again.
+const stagedDeleteDenied = await handle(new Request(`https://worker.example/api/objects/staging/${stagedSha}.red`, {method: "DELETE", headers: {Origin: origin}}), env);
+assert.equal(stagedDeleteDenied.status, 401);
+const stagedDeleted = await handle(new Request(`https://worker.example/api/objects/staging/${stagedSha}.red`, {method: "DELETE", headers: headers()}), env);
+assert.equal(stagedDeleted.status, 200);
+assert.equal((await stagedDeleted.json()).deleted, `staging/${stagedSha}.red`);
+assert.equal((await handle(new Request(`https://worker.example/api/objects/staging/${stagedSha}.red`, {headers: {Origin: origin}}), env)).status, 404);
+// Library objects are only removable through the record delete route.
+const compressedDelete = await handle(new Request(`https://worker.example/api/objects/compressed/${stagedSha}.red`, {method: "DELETE", headers: headers()}), env);
+assert.equal(compressedDelete.status, 404);
 
 // New private endpoints must be authentication-gated in the shared Worker.
 for (const path of ["/api/private/directory", "/api/private/seal"]) {
@@ -160,6 +176,39 @@ const backupUnauthorized = await __test.backupOriginalTo123(new Request("https:/
 assert.equal(backupUnauthorized.status, 401);
 const cors = __test.corsHeaders(new Request("https://worker.example/api/backup/123", {headers: {Origin: origin}}), env);
 assert.match(cors["Access-Control-Allow-Headers"] || "", /X-Pan123-Token/);
+// Chinese theme names must travel percent-encoded: header values are
+// ISO-8859-1 only, so the browser would throw while constructing Headers.
+assert.equal(__test.headerText(encodeURIComponent("Muiii - 雪一片一片.red")), "Muiii - 雪一片一片.red");
+assert.equal(__test.headerText(encodeURIComponent("备份目录")), "备份目录");
+assert.equal(__test.headerText("probe.red"), "probe.red");
+assert.equal(__test.headerText("%%%"), "%%%");
+assert.equal(__test.headerText(null, "fallback"), "fallback");
+const cnBytes = encoder.encode("chinese theme package bytes");
+const cnEtag = createHash("md5").update(cnBytes).digest("hex");
+const cnName = "Muiii - 雪一片一片.red";
+const cnFolder = "Red-Garden-Backup";
+const cnFetch = async (url, init = {}) => {
+  const path = new URL(String(url)).pathname;
+  if (String(url).includes("upload.example.com")) return new Response(null, {status: 200});
+  let data = {};
+  if (path === "/b/api/file/list/new") {
+    data = {InfoList: [
+      {FileName: cnFolder, Type: 1, FileId: "9"},
+      {FileName: cnName, Type: 0, Size: cnBytes.length, Etag: cnEtag, FileId: "77"},
+    ]};
+  }
+  return new Response(JSON.stringify({code: 0, data}), {status: 200, headers: {"Content-Type": "application/json"}});
+};
+const cnBackup = await __test.backupOriginalTo123(new Request("https://worker.example/api/backup/123", {
+  method: "POST",
+  headers: headers({"Content-Type": "application/octet-stream", "X-Pan123-Token": "device-session-token",
+    "X-Pan123-Folder": encodeURIComponent(cnFolder), "X-Pan123-Filename": encodeURIComponent(cnName), "X-Pan123-Etag": cnEtag}),
+  body: cnBytes,
+}), env, cnFetch);
+assert.equal(cnBackup.status, 200);
+const cnResult = await cnBackup.json();
+assert.equal(cnResult.key, `${cnFolder}/${cnName}`);
+assert.equal(cnResult.reused, true);
 // "测试连接" is strictly read-only: no upload_request, no probe file, no new folder.
 const verifyCalls = [];
 const verifyFetch = async (url, init = {}) => {
