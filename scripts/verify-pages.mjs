@@ -17,6 +17,11 @@ for (const file of staticFiles) {
   try {
     const [sourceBytes, targetBytes] = await Promise.all([readFile(sourcePath), readFile(targetPath)]);
     if (hash(sourceBytes) !== hash(targetBytes)) errors.push(`site/${file} 与 pages/${file} 不一致`);
+    // Deploying straight from a Windows working tree used to publish CRLF
+    // bytes while GitHub Pages published LF from the Git blob. Both builds
+    // worked, but the two production front ends were not byte-identical.
+    if (/\.[a-z]+$/i.test(file) && sourceBytes.includes(13)) errors.push(`site/${file} 含 CRLF 行尾；请先统一为 LF 再部署`);
+    if (/\.[a-z]+$/i.test(file) && targetBytes.includes(13)) errors.push(`pages/${file} 含 CRLF 行尾；请先统一为 LF 再部署`);
   } catch (error) {
     errors.push(`${file} 无法读取：${error.message}`);
   }
