@@ -27,15 +27,20 @@ const [app, html] = await Promise.all([
   readFile(appPath, "utf8"),
   readFile(path.join(source, "index.html"), "utf8"),
 ]);
-for (const marker of ["function fontPreviewMarkup", "function loadFontPreviewFace", "function recoverFontPreviewImage", "new FontFace(", "font-preview-frame", "font-preview-fallback", "data-font-preview-id", "data-font-id", "function renderFonts"]) {
+for (const marker of ["function fontPreviewMarkup", "function loadFontPreviewFace", "function recoverFontPreviewImage", "new FontFace(", "font-preview-frame", "font-preview-fallback", "data-font-preview-id", "data-font-id", "function renderFonts",
+  "function analyzeFontGlyphs", "function inkProfile", "window.opentype", "glyph_method", "function downloadSelectedRecords", "function fetchDownloadableBytes", "function renderThemeAuthorFilter", "function compressPrivateRedWithDirectory", "function queueFilesForLater", "function resumeStagedJobs", "function backupOriginalTo123", "function runCodecTask"]) {
   if (!app.includes(marker)) errors.push(`前端缺少关键回归标记：${marker}`);
 }
-for (const id of ["fontList", "fontCount", "fontEmpty"]) {
-  if (!html.includes(`id=\"${id}\"`)) errors.push(`字体页面结构回归检查失败：缺少 #${id}`);
+for (const id of ["fontList", "fontCount", "fontEmpty", "themeAuthorFilter", "downloadSelectedTheme", "downloadSelectedFont", "downloadSelectedAsset", "queueForLater", "resumeStagedJobs", "pan123BackupToken"]) {
+  if (!html.includes(`id=\"${id}\"`)) errors.push(`页面结构回归检查失败：缺少 #${id}`);
 }
 for (const file of ["app.js", "free_codec.js", "free_codec_worker.js", "opentype.min.js"]) {
   const result = spawnSync(process.execPath, ["--check", path.join(source, file)], {encoding: "utf8"});
   if (result.status !== 0) errors.push(`${file} 语法检查失败：${(result.stderr || result.stdout).trim()}`);
+}
+for (const script of ["scripts/remote-import.mjs"]) {
+  const result = spawnSync(process.execPath, ["--check", path.join(root, script)], {encoding: "utf8"});
+  if (result.status !== 0) errors.push(`${script} 语法检查失败：${(result.stderr || result.stdout).trim()}`);
 }
 // The standalone Worker must share the Pages Worker implementation; a second
 // hand-edited copy silently drops routes such as /api/private/repack.
@@ -44,9 +49,12 @@ const [workerEntry, workerApi] = await Promise.all([
   readFile(path.join(root, "pages", "worker-api.js"), "utf8"),
 ]);
 if (!workerEntry.includes('from "../pages/worker-api.js"') || !workerEntry.includes("export {default}")) errors.push("worker/worker.js 未复用 pages/worker-api.js，独立 Worker 接口会分叉");
-for (const route of ['"/api/library" && request.method === "DELETE"', '"/api/private/repack"']) {
+for (const route of ['"/api/library" && request.method === "DELETE"', '"/api/private/repack"', '"/api/private/directory"', '"/api/private/seal"', '"/api/backup/123"', '"/api/jobs"', '"/api/download" && request.method === "GET"']) {
   if (!workerApi.includes(route)) errors.push(`pages/worker-api.js 缺少关键路由：${route}`);
 }
+if (!workerApi.includes("function streamZip") || !workerApi.includes("zipEndOfCentralDirectory")) errors.push("pages/worker-api.js 缺少流式 ZIP 打包实现");
+const [codecSource] = await Promise.all([readFile(path.join(source, "free_codec.js"), "utf8")]);
+if (!codecSource.includes("options.store")) errors.push("site/free_codec.js 缺少 Stored ZIP 选项，批量下载会重复压缩字体");
 
 const urlArg = process.argv.find(value => value.startsWith("--url="));
 const liveUrl = (urlArg ? urlArg.slice("--url=".length) : process.env.REEDEN_CHECK_URL || "").replace(/\/+$/, "");
@@ -84,6 +92,14 @@ if (liveUrl) {
       }));
       errors.push(...previewChecks.filter(Boolean));
       console.log(`live check: ${records.length} records, ${fonts.length} fonts, ${fonts.filter(item => item.preview_url).length} preview images`);
+      // Check the streamed ZIP endpoint without pulling any object bytes.
+      const target = fonts[0] || records.find(item => ["theme", "font", "asset"].includes(item?.kind));
+      if (target) {
+        const probe = await fetch(`${liveUrl}/api/download?kind=${encodeURIComponent(target.kind)}&ids=${encodeURIComponent(String(target.id))}&probe=1`);
+        const result = probe.ok ? await probe.json() : null;
+        if (!result?.ok) errors.push(`线上 /api/download 流式打包探测失败：HTTP ${probe.status}`);
+        else console.log(`live check: /api/download probe ok (${target.kind}, ${result.count} files)`);
+      }
     }
   } catch (error) {
     errors.push(`线上检查失败：${error.message}`);

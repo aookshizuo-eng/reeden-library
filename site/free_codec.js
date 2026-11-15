@@ -208,7 +208,10 @@
       const data = bytesOf(source.bytes), name = textBytes(source.name);
       if (name.length > 65535 || data.length > 0xffffffff) throw new FreeCodecError("资源超过普通 ZIP 上限", "zip_size_limit");
       let compressed = data, method = 0;
-      if (data.length && typeof root.CompressionStream === "function") {
+      // `store` skips DEFLATE for payloads that are already compressed (fonts,
+      // RED/ZIP packages, JPEGs). Batch downloads use it to avoid re-compressing
+      // tens of megabytes on the device for no size gain.
+      if (!options.store && data.length && typeof root.CompressionStream === "function") {
         const candidate = await deflateRaw(data);
         if (candidate.length < data.length) { compressed = candidate; method = 8; }
       }

@@ -70,4 +70,48 @@ assert.deepEqual(Array.from(outputPayload.subarray(outputManifest.entries[1].off
 const outputTheme = JSON.parse(decoder.decode(outputPayload.subarray(outputManifest.entries[0].offset, outputManifest.entries[0].offset + outputManifest.entries[0].length)));
 assert.equal(outputTheme.light.backgroundImage, "assets/image.webp");
 assert.equal(outputTheme.light.backgroundHash, `${newSha}.webp`);
+
+// Prefix-only flow: only the authenticated header + encrypted manifest are
+// sent. The browser reassembles the payload from local resource bytes.
+const prefix = raw.subarray(0, manifestEnd);
+const directoryResponse = await handle(new Request("https://worker.example/api/private/directory", {
+  method: "POST", headers: headers(), body: JSON.stringify({prefix_base64: toBase64(prefix)}),
+}), env);
+assert.equal(directoryResponse.status, 200);
+const directory = await directoryResponse.json();
+assert.equal(directory.entries.length, 2);
+assert.equal(directory.entries[1].path, "assets/image.img");
+assert.equal(directory.entries[1].sha256, oldSha);
+
+const sealResponse = await handle(new Request("https://worker.example/api/private/seal", {
+  method: "POST", headers: headers(), body: JSON.stringify({
+    prefix_base64: toBase64(prefix),
+    replacements: [{path: "assets/image.img", old_sha256: oldSha, new_sha256: newSha, new_length: replacement.length, new_extension: "webp"}],
+    configs: [{path: "theme.json", bytes_base64: toBase64(theme)}],
+  }),
+}), env);
+assert.equal(sealResponse.status, 200);
+const seal = await sealResponse.json();
+assert.equal(seal.entries.length, 2);
+assert.equal(seal.entries[1].path, "assets/image.webp");
+assert.equal(seal.entries[1].source_path, "assets/image.img");
+const sealedPrefix = Buffer.from(seal.prefix_base64, "base64");
+const mappedTheme = Buffer.from(seal.configs[0].bytes_base64, "base64");
+const assembled = Buffer.concat([sealedPrefix, mappedTheme, Buffer.from(replacement)]);
+assert.equal(assembled.length, seal.total_length);
+const sealedHeaderLength = new DataView(assembled.buffer, assembled.byteOffset, assembled.byteLength).getUint32(4, false);
+const sealedHeader = JSON.parse(decoder.decode(assembled.subarray(8, 8 + sealedHeaderLength)));
+const sealedNonce = Buffer.from(sealedHeader.manifestNonce, "base64");
+const sealedManifestEnd = 8 + sealedHeaderLength + sealedHeader.manifestLength;
+const sealedManifest = JSON.parse(decoder.decode(await crypto.subtle.decrypt({name: "AES-GCM", iv: sealedNonce}, key, assembled.subarray(8 + sealedHeaderLength, sealedManifestEnd))));
+assert.equal(sealedManifest.entries[1].sha256, newSha);
+assert.equal(sealedManifest.entries[1].length, replacement.length);
+assert.equal(sealedManifest.entries[0].sha256, await imageSha(mappedTheme));
+assert.deepEqual(Array.from(assembled.subarray(sealedManifestEnd + sealedManifest.entries[1].offset, sealedManifestEnd + sealedManifest.entries[1].offset + replacement.length)), Array.from(replacement));
+const assembledTheme = JSON.parse(decoder.decode(mappedTheme));
+assert.equal(assembledTheme.light.backgroundImage, "assets/image.webp");
+assert.equal(assembledTheme.light.backgroundHash, `${newSha}.webp`);
+
+const directoryUnauthorized = await handle(new Request("https://worker.example/api/private/directory", {method: "POST", headers: {Origin: origin, "Content-Type": "application/json"}, body: JSON.stringify({prefix_base64: toBase64(prefix)})}), env);
+assert.equal(directoryUnauthorized.status, 401);
 console.log("private repack worker tests passed");

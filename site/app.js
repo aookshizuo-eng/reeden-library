@@ -24,9 +24,9 @@ let apiBase = normalizeApiBase(window.REEDEN_API_BASE || (() => {
 let syncToken = (() => { try { return localStorage.getItem(SYNC_TOKEN_STORAGE_KEY) || ""; } catch { return ""; } })();
 let remoteUnavailable = false;
 let freeCodecModule;
-// Reserved browser-processing hook. A future free_codec.js can expose the
-// actual ZIP/AES-GCM/Web Worker implementation without changing this UI. Until
-// it reports ready=true, this app never claims that a local browser job ran.
+// Device-local codec. free_codec.js implements ZIP parsing, image re-encoding
+// and font inspection; free_codec_worker.js runs the CPU-heavy work in a Web
+// Worker pool. Encrypted RED manifests are re-sealed by the sync Worker.
 async function loadFreeCodec() {
   if (window.ReedenFreeCodec || window.REEDEN_FREE_CODEC) return window.ReedenFreeCodec || window.REEDEN_FREE_CODEC;
   if (freeCodecModule !== undefined) return freeCodecModule;
@@ -103,7 +103,7 @@ function requestHeaders(headers = {}) {
   if (apiBase && syncToken) result.set("Authorization", `Bearer ${syncToken}`);
   return result;
 }
-const state = { themes: [], fonts: [], assets: [], review: [], jobs: [], activeView: "import", importKind: "theme", themeSearch: "", assetFilter: "all", assetSearch: "", fontSearch: "", fontFilter: "all", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs"), importAssetIds: readSessionIds("reeden-import-assets") };
+const state = { themes: [], fonts: [], assets: [], review: [], jobs: [], activeView: "import", importKind: "theme", themeSearch: "", themeAuthor: "all", assetFilter: "all", assetSearch: "", fontSearch: "", fontFilter: "all", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs"), importAssetIds: readSessionIds("reeden-import-assets") };
 const selections = { review: new Set(), theme: new Set(), font: new Set(), asset: new Set() };
 const loadedFontFaces = new Set();
 const BROWSER_TASK_CONCURRENCY = 3;
@@ -232,39 +232,260 @@ function base64Bytes(value) {
 function imageExtensionForMime(mime) {
   return mime === "image/webp" ? "webp" : mime === "image/png" ? "png" : mime === "image/jpeg" ? "jpg" : mime === "image/gif" ? "gif" : "";
 }
+function bytesFromBase64(value) {
+  const encoded = atob(String(value || "")), output = new Uint8Array(encoded.length);
+  for (let index = 0; index < encoded.length; index++) output[index] = encoded.charCodeAt(index);
+  return output;
+}
+function concatBytes(chunks) {
+  const total = chunks.reduce((sum, part) => sum + part.length, 0), result = new Uint8Array(total);
+  let offset = 0;
+  for (const part of chunks) { result.set(part, offset); offset += part.length; }
+  return result;
+}
+function privateSkippedResult(raw, decisions = []) {
+  return { bytes: raw, originalBytes: raw.length, compressedBytes: raw.length, savedBytes: 0, packageSelected: false, decisions, format: "red_private_v2", privateWorker: true };
+}
+
+// A small pool of codec workers keeps RED parsing, image decoding and WebP
+// encoding off the UI thread. Every buffer is copied before transfer so the
+// caller keeps its original bytes for the R2 upload and preview generation.
+const codecWorkers = [];
+let codecWorkerCursor = 0;
+let codecWorkerSequence = 0;
+function acquireCodecWorker() {
+  if (typeof Worker === "undefined" || codecWorkerDisabled) return null;
+  const wanted = Math.min(2, Math.max(1, Math.min(4, Number(navigator.hardwareConcurrency) || 2)));
+  for (let index = codecWorkers.length; index < wanted; index++) {
+    try { codecWorkers.push(new Worker("./free_codec_worker.js")); }
+    catch { codecWorkerDisabled = true; break; }
+  }
+  if (!codecWorkers.length) { codecWorkerDisabled = true; return null; }
+  const worker = codecWorkers[codecWorkerCursor++ % codecWorkers.length];
+  return worker;
+}
+let codecWorkerDisabled = false;
+function detachedCopy(bytes) {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+  return view.slice().buffer;
+}
+function normalizeCodecResult(result) {
+  if (result?.bytes instanceof ArrayBuffer) result.bytes = new Uint8Array(result.bytes);
+  const list = Array.isArray(result) ? result : result?.results;
+  if (Array.isArray(list)) for (const item of list) if (item?.bytes instanceof ArrayBuffer) item.bytes = new Uint8Array(item.bytes);
+  return result;
+}
+async function callCodecWorker(command, payload) {
+  const worker = acquireCodecWorker();
+  if (!worker) return null;
+  const id = ++codecWorkerSequence;
+  const message = {id, command, options: payload.options || {}};
+  const transfer = [];
+  if (payload.bytes) { const buffer = detachedCopy(payload.bytes); message.bytes = buffer; transfer.push(buffer); }
+  if (payload.items) {
+    message.items = payload.items.map(item => {
+      const buffer = detachedCopy(item.bytes);
+      transfer.push(buffer);
+      return {...item, bytes: buffer};
+    });
+  }
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      worker.removeEventListener("message", onMessage);
+      worker.removeEventListener("error", onError);
+    };
+    const onMessage = event => {
+      if (event.data?.id !== id) return;
+      cleanup();
+      if (!event.data.ok) { reject(new Error(event.data.error?.message || "本地处理线程失败")); return; }
+      resolve(normalizeCodecResult(event.data.result));
+    };
+    const onError = event => {
+      cleanup();
+      codecWorkers.splice(codecWorkers.indexOf(worker), 1);
+      reject(new Error(event.message || "本地处理线程异常"));
+    };
+    const timer = setTimeout(() => { cleanup(); reject(new Error("本地处理超时")); }, 300000);
+    worker.addEventListener("message", onMessage);
+    worker.addEventListener("error", onError);
+    try { worker.postMessage(message, transfer); } catch (error) { cleanup(); reject(error); }
+  });
+}
+async function runCodecTask(command, payload, fallback) {
+  if (!codecWorkerDisabled) {
+    try { const result = await callCodecWorker(command, payload); if (result !== null) return result; }
+    catch (error) { console.warn("codec worker 回退到主线程：", error.message); }
+  }
+  return await fallback();
+}
+function privatePrefix(raw) {
+  if (raw.length < 12 || raw[0] !== 82 || raw[1] !== 69 || raw[2] !== 68 || raw[3] !== 16) throw new Error("不是 RED v2 加密主题");
+  const headerLength = new DataView(raw.buffer, raw.byteOffset, raw.byteLength).getUint32(4, false);
+  if (headerLength < 2 || headerLength > 65536 || 8 + headerLength > raw.length) throw new Error("RED v2 文件头无效");
+  const header = JSON.parse(new TextDecoder().decode(raw.subarray(8, 8 + headerLength)));
+  const prefixLength = 8 + headerLength + Number(header.manifestLength);
+  if (!Number.isSafeInteger(prefixLength) || prefixLength > raw.length) throw new Error("RED v2 加密目录长度无效");
+  return raw.subarray(0, prefixLength);
+}
+async function privateDirectory(prefix) {
+  const response = await fetch(apiUrl("/api/private/directory"), {
+    method: "POST", headers: requestHeaders({"Content-Type": "application/json"}),
+    body: JSON.stringify({prefix_base64: base64Bytes(prefix)}),
+  });
+  if (response.status === 404) return null; // older Worker: use the whole-package fallback
+  const text = await response.text();
+  let data = {}; try { data = text ? JSON.parse(text) : {}; } catch {}
+  if (!response.ok) throw new Error(`加密目录解析失败（${response.status}）：${data.error || text.slice(0, 160)}`);
+  return data;
+}
+async function privateSeal(prefix, replacements, configs) {
+  const response = await fetch(apiUrl("/api/private/seal"), {
+    method: "POST", headers: requestHeaders({"Content-Type": "application/json"}),
+    body: JSON.stringify({prefix_base64: base64Bytes(prefix), replacements, configs}),
+  });
+  const text = await response.text();
+  let data = {}; try { data = text ? JSON.parse(text) : {}; } catch {}
+  if (!response.ok) throw new Error(`加密主题重封失败（${response.status}）：${data.error || text.slice(0, 160)}`);
+  if (!data.prefix_base64 || !Array.isArray(data.entries)) throw new Error("加密主题重封接口返回不完整");
+  return data;
+}
+function privateResult(raw, output, decisions) {
+  if (!output || output.length >= raw.length) {
+    return privateSkippedResult(raw, decisions.map(item => ({...item, used: false, reason: "重封后未变小，保留原包"})));
+  }
+  return {bytes: output, originalBytes: raw.length, compressedBytes: output.length, savedBytes: raw.length - output.length,
+    packageSelected: true, decisions, format: "red_private_v2", privateWorker: true};
+}
 async function compressPrivateRedViaWorker(raw, codec, options = {}) {
-  const previewEntries = await codec.extractPrivatePreviewImages(raw, { limit: 2000, maxBytes: 80 * 1024 * 1024 });
-  const replacements = [];
-  for (const entry of previewEntries) {
-    const result = await codec.compressImage(entry.bytes, entry.name, options);
-    if (!result?.decision?.used || result.bytes.length >= entry.bytes.length) continue;
-    const [oldSha256, newSha256, oldMd5, newMd5] = await Promise.all([
-      codec.sha256Hex(entry.bytes), codec.sha256Hex(result.bytes), codec.md5Hex(entry.bytes), codec.md5Hex(result.bytes),
-    ]);
-    replacements.push({ offset: entry.offset, end: entry.end, oldSha256, newSha256, oldMd5, newMd5, newExtension: imageExtensionForMime(result.mime), bytes: base64Bytes(result.bytes) });
+  const prefix = privatePrefix(raw);
+  const directory = await privateDirectory(prefix);
+  if (directory?.entries?.length) return await compressPrivateRedWithDirectory(raw, codec, options, prefix, directory);
+  return await compressPrivateRedLegacy(raw, codec, options);
+}
+async function compressPrivateRedWithDirectory(raw, codec, options, prefix, directory) {
+  const payload = raw.subarray(prefix.length);
+  const entries = directory.entries;
+  let cursor = 0;
+  for (const entry of entries) {
+    if (entry.offset !== cursor || entry.length < 0 || entry.offset + entry.length > payload.length) throw new Error("加密目录资源区不连续或越界");
+    cursor = entry.offset + entry.length;
   }
-  if (!replacements.length) {
-    return { bytes: raw, originalBytes: raw.length, compressedBytes: raw.length, savedBytes: 0, packageSelected: false, decisions: [], format: "red_private_v2", privateWorker: true };
+  if (cursor !== payload.length) throw new Error("加密目录资源区末尾存在未登记数据");
+  const slice = entry => payload.subarray(entry.offset, entry.offset + entry.length);
+  const images = entries.filter(entry => String(codec.mimeFromBytes(slice(entry), entry.path) || "").startsWith("image/"));
+  if (!images.length) return privateSkippedResult(raw);
+  const compressed = await runCodecTask("compressImages",
+    {items: images.map(entry => ({name: entry.path, bytes: slice(entry)})), options: {...options, concurrency: Math.min(4, Number(navigator.hardwareConcurrency) || 2)}},
+    async () => ({results: await mapConcurrent(images, 3, async entry => {
+      const result = await codec.compressImage(slice(entry), entry.path, options);
+      return {ok: true, bytes: result.bytes, mime: result.mime, decision: result.decision};
+    })}));
+  const changed = [];
+  compressed.results.forEach((result, index) => {
+    const entry = images[index], original = slice(entry);
+    if (!result?.ok || !result.decision?.used || result.bytes.length >= original.length) return;
+    changed.push({entry, original, bytes: result.bytes, mime: result.mime});
+  });
+  if (!changed.length) return privateSkippedResult(raw);
+  const hashItems = changed.flatMap(item => [{bytes: item.original}, {bytes: item.bytes}]);
+  const hashes = await runCodecTask("hashes", {items: hashItems, options: {concurrency: 4}},
+    async () => ({results: await mapConcurrent(hashItems, 3, async item => ({sha256: await codec.sha256Hex(item.bytes), md5: await codec.md5Hex(item.bytes), length: item.bytes.length}))}));
+  const replacements = changed.map((item, index) => {
+    const oldHash = hashes.results[index * 2], newHash = hashes.results[index * 2 + 1];
+    if (oldHash.sha256.toLowerCase() !== String(item.entry.sha256).toLowerCase()) throw new Error(`加密目录资源校验失败：${item.entry.path}`);
+    return {path: item.entry.path, old_sha256: oldHash.sha256, new_sha256: newHash.sha256,
+      old_md5: oldHash.md5, new_md5: newHash.md5, new_length: item.bytes.length,
+      new_extension: imageExtensionForMime(item.mime)};
+  });
+  const configs = entries.filter(entry => /\.json$/i.test(entry.path)).map(entry => ({path: entry.path, bytes_base64: base64Bytes(slice(entry))}));
+  const seal = await privateSeal(prefix, replacements, configs);
+  const configMap = new Map((seal.configs || []).map(item => [item.path, bytesFromBase64(item.bytes_base64)]));
+  const changedMap = new Map(changed.map(item => [item.entry.path, item.bytes]));
+  const sourceByPath = new Map(entries.map(entry => [entry.path, entry]));
+  const chunks = [bytesFromBase64(seal.prefix_base64)];
+  for (const entry of seal.entries) {
+    if (entry.config && configMap.has(entry.source_path)) chunks.push(configMap.get(entry.source_path));
+    else if (entry.replaced && changedMap.has(entry.source_path)) chunks.push(changedMap.get(entry.source_path));
+    else {
+      const source = sourceByPath.get(entry.source_path);
+      if (!source) throw new Error(`重封资源缺少原始数据：${entry.source_path}`);
+      chunks.push(slice(source));
+    }
   }
+  const output = concatBytes(chunks);
+  if (output.length !== Number(seal.total_length)) throw new Error("加密主题重封长度校验失败");
+  const decisions = changed.map((item, index) => ({path: item.entry.path, used: true, reason: "浏览器压缩图片后由同步 Worker 只重封文件头", original_bytes: item.original.length, compressed_bytes: replacements[index].new_length}));
+  return privateResult(raw, output, decisions);
+}
+async function compressPrivateRedLegacy(raw, codec, options = {}) {
+  const previewEntries = await runCodecTask("extractPrivatePreviewImages",
+    {bytes: raw, options: {limit: 2000, maxBytes: 80 * 1024 * 1024}},
+    () => codec.extractPrivatePreviewImages(raw, {limit: 2000, maxBytes: 80 * 1024 * 1024}));
+  const compressed = await runCodecTask("compressImages",
+    {items: previewEntries.map(entry => ({name: entry.name, bytes: entry.bytes})), options: {...options, concurrency: 4}},
+    async () => ({results: await mapConcurrent(previewEntries, 3, async entry => {
+      const result = await codec.compressImage(entry.bytes, entry.name, options);
+      return {ok: true, bytes: result.bytes, mime: result.mime, decision: result.decision};
+    })}));
+  const changed = [];
+  compressed.results.forEach((result, index) => {
+    const entry = previewEntries[index];
+    if (!result?.ok || !result.decision?.used || result.bytes.length >= entry.bytes.length) return;
+    changed.push({entry, bytes: result.bytes, mime: result.mime});
+  });
+  if (!changed.length) return privateSkippedResult(raw);
+  const hashItems = changed.flatMap(item => [{bytes: item.entry.bytes}, {bytes: item.bytes}]);
+  const hashes = await runCodecTask("hashes", {items: hashItems, options: {concurrency: 4}},
+    async () => ({results: await mapConcurrent(hashItems, 3, async item => ({sha256: await codec.sha256Hex(item.bytes), md5: await codec.md5Hex(item.bytes), length: item.bytes.length}))}));
+  const replacements = changed.map((item, index) => ({
+    offset: item.entry.offset, end: item.entry.end,
+    old_sha256: hashes.results[index * 2].sha256, old_md5: hashes.results[index * 2].md5,
+    new_md5: hashes.results[index * 2 + 1].md5, new_extension: imageExtensionForMime(item.mime),
+    bytes_base64: base64Bytes(item.bytes),
+  }));
   const response = await fetch(apiUrl("/api/private/repack"), {
-    method: "POST",
-    headers: requestHeaders({ "Content-Type": "application/json" }),
-  body: JSON.stringify({ red_base64: base64Bytes(raw), replacements: replacements.map(item => ({ offset: item.offset, end: item.end, old_sha256: item.oldSha256, old_md5: item.oldMd5, new_md5: item.newMd5, new_extension: item.newExtension, bytes_base64: item.bytes })) }),
+    method: "POST", headers: requestHeaders({"Content-Type": "application/json"}),
+    body: JSON.stringify({red_base64: base64Bytes(raw), replacements}),
   });
   const responseText = await response.text();
-  let data = {};
-  try { data = responseText ? JSON.parse(responseText) : {}; } catch {}
-  if (!response.ok) {
-    const detail = data.error || data.message || responseText.trim().slice(0, 240);
-    throw new Error(`加密主题重封失败（${response.status}）${detail ? `：${detail}` : ""}`);
-  }
+  let data = {}; try { data = responseText ? JSON.parse(responseText) : {}; } catch {}
+  if (!response.ok) throw new Error(`加密主题重封失败（${response.status}）：${data.error || responseText.slice(0, 200)}`);
   if (!data.bytes) throw new Error("加密主题重封接口没有返回压缩包");
-  const encoded = atob(data.bytes), output = new Uint8Array(encoded.length);
-  for (let index = 0; index < encoded.length; index++) output[index] = encoded.charCodeAt(index);
-  if (output.length >= raw.length) {
-    return { bytes: raw, originalBytes: raw.length, compressedBytes: raw.length, savedBytes: 0, packageSelected: false, decisions: replacements.map(item => ({ path: `private@${item.offset}`, used: false, reason: "重封后未变小，保留原包", original_bytes: item.end - item.offset, compressed_bytes: atob(item.bytes).length })), format: "red_private_v2", privateWorker: true };
+  const decisions = changed.map((item, index) => ({path: `private@${item.entry.offset}`, used: true, reason: "压缩后由同步 Worker 认证重封", original_bytes: item.entry.bytes.length, compressed_bytes: item.bytes.length}));
+  return privateResult(raw, bytesFromBase64(data.bytes), decisions);
+}
+const PAN123_TOKEN_STORAGE_KEY = "reeden-pan123-token";
+const PAN123_FOLDER_STORAGE_KEY = "reeden-pan123-folder";
+function pan123BackupConfig() {
+  try { return {token: localStorage.getItem(PAN123_TOKEN_STORAGE_KEY) || "", folder: localStorage.getItem(PAN123_FOLDER_STORAGE_KEY) || "Red-Garden-Backup"}; }
+  catch { return {token: "", folder: "Red-Garden-Backup"}; }
+}
+async function backupOriginalTo123(raw, name, codec) {
+  const config = pan123BackupConfig();
+  if (!config.token || !browserSyncEnabled()) return null;
+  try {
+    const md5 = await codec.md5Hex(raw);
+    const fileName = (String(name || "theme").replace(/\.red$/i, "").replace(/[\\/:*?"<>|]/g, "_").slice(0, 200) || "theme") + ".red";
+    const response = await fetch(apiUrl("/api/backup/123"), {
+      method: "POST",
+      headers: requestHeaders({
+        "Content-Type": "application/octet-stream",
+        "X-Pan123-Token": config.token,
+        "X-Pan123-Folder": config.folder,
+        "X-Pan123-Filename": fileName,
+        "X-Pan123-Etag": md5,
+      }),
+      body: raw,
+    });
+    const text = await response.text();
+    let data = {}; try { data = text ? JSON.parse(text) : {}; } catch {}
+    if (!response.ok) throw new Error(data.error || text.slice(0, 160));
+    return data;
+  } catch (error) {
+    toast(`123 云盘备份未完成：${error.message}（R2 原包不受影响）`);
+    return {error: error.message};
   }
-  return { bytes: output, originalBytes: raw.length, compressedBytes: output.length, savedBytes: Math.max(0, raw.length - output.length), packageSelected: output.length < raw.length, decisions: replacements.map(item => ({ path: `private@${item.offset}`, used: true, reason: "压缩后由同步 Worker 认证重封", original_bytes: item.end - item.offset, compressed_bytes: atob(item.bytes).length })), format: "red_private_v2", privateWorker: true };
 }
 async function browserCodec() {
   const codec = await loadFreeCodec();
@@ -510,6 +731,175 @@ async function composeThemePreviewBlob(entries, codec) {
   try { entries.previewKind = splash ? "shelf_and_splash" : "shelf_and_reader"; } catch {}
   return blob;
 }
+/**
+ * Classify a font from its rendered glyph shapes instead of its file name.
+ * One FontFace load also produces the specimen image stored in R2, so font
+ * cards never need to download the multi-megabyte original again.
+ */
+function inkProfile(context, width, height) {
+  const data = context.getImageData(0, 0, width, height).data;
+  const rows = new Array(height).fill(0), cols = new Array(width).fill(0);
+  let minX = width, maxX = -1, minY = height, maxY = -1, total = 0;
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const index = (y * width + x) * 4;
+    if (data[index + 3] <= 100 || data[index] + data[index + 1] + data[index + 2] >= 420) continue;
+    rows[y]++; cols[x]++; total++;
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+  }
+  if (maxX < minX) return null;
+  const box = {minX, maxX, minY, maxY, width: maxX - minX + 1, height: maxY - minY + 1};
+  const band = (array, from, to) => {
+    const start = Math.floor(from * box.height), end = Math.max(start + 1, Math.ceil(to * box.height));
+    let sum = 0; for (let y = minY + start; y < minY + end && y < height; y++) sum += rows[y];
+    return sum / (end - start);
+  };
+  const rowWidth = fraction => {
+    const y = Math.min(height - 1, minY + Math.floor(fraction * box.height));
+    return rows[y];
+  };
+  const widths = cols.slice(minX, maxX + 1).filter(value => value > 0).sort((a, b) => a - b);
+  const percentile = p => widths.length ? widths[Math.min(widths.length - 1, Math.floor(p * widths.length))] : 0;
+  const slantTop = (() => {
+    let sum = 0, count = 0;
+    for (let y = minY; y < minY + Math.max(1, Math.floor(box.height * 0.2)); y++) for (let x = minX; x <= maxX; x++) {
+      const index = (y * width + x) * 4;
+      if (data[index + 3] > 100 && data[index] + data[index + 1] + data[index + 2] < 420) { sum += x; count++; }
+    }
+    return count ? sum / count : minX + box.width / 2;
+  })();
+  const slantBottom = (() => {
+    let sum = 0, count = 0;
+    for (let y = Math.max(0, maxY - Math.max(1, Math.floor(box.height * 0.2))); y <= maxY; y++) for (let x = minX; x <= maxX; x++) {
+      const index = (y * width + x) * 4;
+      if (data[index + 3] > 100 && data[index] + data[index + 1] + data[index + 2] < 420) { sum += x; count++; }
+    }
+    return count ? sum / count : minX + box.width / 2;
+  })();
+  const cornerInk = (() => {
+    const corner = Math.max(2, Math.floor(Math.min(box.width, box.height) * 0.16));
+    let sum = 0;
+    for (const [cx, cy] of [[minX, minY], [maxX - corner + 1, minY], [minX, maxY - corner + 1], [maxX - corner + 1, maxY - corner + 1]]) {
+      for (let y = cy; y < cy + corner; y++) for (let x = cx; x < cx + corner; x++) {
+        if (y < 0 || y >= height || x < 0 || x >= width) continue;
+        const index = (y * width + x) * 4;
+        if (data[index + 3] > 100 && data[index] + data[index + 1] + data[index + 2] < 420) sum++;
+      }
+    }
+    return sum;
+  })();
+  return {
+    serifScore: (band(rows, 0, 0.12) + band(rows, 0.88, 1)) / (2 * Math.max(1, band(rows, 0.44, 0.56))),
+    strokeContrast: percentile(0.9) / Math.max(1, percentile(0.1)),
+    roundScore: 1 - rowWidth(0.03) / Math.max(1, Math.max(rowWidth(0.4), rowWidth(0.6))),
+    slant: slantBottom - slantTop,
+    density: total / Math.max(1, box.width * box.height),
+    cornerInkRatio: cornerInk / Math.max(1, total),
+    box,
+  };
+}
+async function analyzeFontGlyphs(bytes, fileName, fallbackStyle) {
+  const fallback = {style: fallbackStyle || inferFontCategory({family: fileName}), source: "filename", method: "none", error: "", features: null, specimen: null};
+  if (typeof document === "undefined") return fallback;
+  const family = `rg-glyph-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const createCanvas = (width, height) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = width; canvas.height = height;
+    const context = canvas.getContext("2d", {willReadFrequently: true});
+    if (!context) throw new Error("浏览器不支持 Canvas 2D");
+    context.fillStyle = "#ffffff"; context.fillRect(0, 0, width, height);
+    context.fillStyle = "#101418"; context.textAlign = "center"; context.textBaseline = "middle";
+    return {canvas, context};
+  };
+  let face, advanceOf, renderer;
+  // Chromium's OTS sanitizer rejects some third-party Chinese TTFs that are
+  // otherwise perfectly parseable. opentype.min.js is already loaded, so fall
+  // back to drawing its glyph outlines directly instead of giving up on the
+  // whole classification and specimen.
+  try {
+    if (typeof FontFace === "undefined") throw new Error("当前浏览器不支持 FontFace");
+    face = new FontFace(family, bytes);
+    await face.load();
+    document.fonts.add(face);
+    fallback.method = "FontFace";
+    advanceOf = (text, size) => {
+      const {context} = createCanvas(8, 8);
+      context.font = `${size}px "${family}"`;
+      return context.measureText(text).width;
+    };
+    renderer = (text, size, width, height) => {
+      const {canvas, context} = createCanvas(width, height);
+      context.font = `${size}px "${family}"`;
+      context.fillText(text, width / 2, height / 2);
+      return canvas;
+    };
+  } catch (error) {
+    fallback.error = error?.message || String(error);
+    try {
+      const parser = window.opentype;
+      if (typeof parser?.parse !== "function") throw new Error("opentype.js 未加载");
+      const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      const parsed = parser.parse(buffer);
+      fallback.method = "opentype";
+      advanceOf = (text, size) => parsed.getAdvanceWidth(text, size);
+      renderer = (text, size, width, height) => {
+        const {canvas, context} = createCanvas(width, height);
+        const path = parsed.getPath(text, 0, 0, size);
+        const box = path.getBoundingBox();
+        const scale = Math.min(1, width * 0.82 / Math.max(1, box.x2 - box.x1), height * 0.82 / Math.max(1, box.y2 - box.y1));
+        context.save();
+        context.translate(width / 2, height / 2);
+        context.scale(scale, scale);
+        context.translate(-(box.x1 + box.x2) / 2, -(box.y1 + box.y2) / 2);
+        context.fillStyle = "#101418";
+        context.fill(new Path2D(path.toPathData(2)));
+        context.restore();
+        return canvas;
+      };
+    } catch (second) {
+      fallback.error = `${fallback.error}；opentype 回退失败：${second?.message || String(second)}`;
+      return fallback;
+    }
+  }
+  try {
+    const width = 420, height = 240;
+    const profileFor = (text, size) => inkProfile(renderer(text, size, width, height).getContext("2d", {willReadFrequently: true}), width, height);
+    const advances = ["i", "W", "中", "A"].map(text => advanceOf(text, 120)).filter(value => value > 0);
+    const mono = advances.length === 4 && Math.min(...advances) / Math.max(...advances) > 0.88;
+    const capitalI = profileFor("I", 170);
+    const letterH = profileFor("H", 170);
+    const square = profileFor("口", 170);
+    const features = {
+      mono, serifScore: Number((capitalI?.serifScore || 0).toFixed(2)),
+      strokeContrast: Number((letterH?.strokeContrast || 0).toFixed(2)),
+      roundScore: Number((square?.roundScore || 0).toFixed(2)),
+      slant: Number((letterH?.slant || 0).toFixed(1)),
+      density: Number((letterH?.density || 0).toFixed(3)),
+    };
+    let style;
+    if (mono) style = "等宽";
+    else if (Math.abs(features.slant) > 10 || features.density > 0.42) style = "手写体";
+    else if (features.roundScore > 0.42 || (square?.cornerInkRatio || 0) < 0.012) style = "圆体";
+    else if (features.serifScore > 1.5 || features.strokeContrast > 2.8) style = "宋体";
+    else if (features.density > 0.3) style = "艺术体";
+    else style = "黑体";
+    // A visible specimen is generated from the same parsed font, so opening
+    // the card later never needs to fetch the original font file again.
+    const specimen = renderer("Aa 中文 你好 123", 64, 900, 300);
+    const context = specimen.getContext("2d");
+    context.fillStyle = "#8a94a3"; context.font = "20px sans-serif";
+    context.textAlign = "center"; context.textBaseline = "middle";
+    context.fillText(String(fileName || "").slice(0, 60), 450, 252);
+    const blob = await new Promise(resolve => specimen.toBlob(resolve, "image/jpeg", 0.9));
+    fallback.specimen = blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+    return {style, source: "glyph", method: fallback.method, error: fallback.error, features, specimen: fallback.specimen};
+  } catch (error) {
+    fallback.error = `字形绘制失败：${error?.message || String(error)}`;
+    return fallback;
+  } finally {
+    if (face) { try { document.fonts.delete(face); } catch {} }
+  }
+}
 async function jpegBytesFromBlob(blob) {
   if (!blob || typeof createImageBitmap !== "function") return null;
   try {
@@ -614,6 +1004,47 @@ function operationMessage(element, message, failed = false) {
 // render their own progress cards; this state covers the device-side stages
 // before an object reaches R2 (hashing, compression, preview and upload).
 const transferState = { active: false, title: "", total: 0, completed: 0, failed: 0, stage: "", current: "" };
+// Upload progress lives in R2 so a phone can watch a desktop batch (and vice
+// versa) even after a refresh. Failures to write progress never block uploads.
+let activeCloudJob = null;
+let cloudJobPatch = null;
+let cloudJobTimer;
+let suppressCloudJob = false;
+let resumingStaged = false;
+let stagedResumeBusy = false;
+async function sendCloudJobPatch(patch, id = activeCloudJob) {
+  if (!id || !patch) return;
+  try {
+    await fetch(apiUrl(`/api/jobs/${encodeURIComponent(id)}`), {
+      method: "PATCH", headers: requestHeaders({"Content-Type": "application/json"}), body: JSON.stringify(patch),
+    });
+  } catch {}
+}
+async function createCloudJob(title, total) {
+  if (suppressCloudJob || !browserSyncEnabled() || !syncToken) return;
+  try {
+    const response = await fetch(apiUrl("/api/jobs"), {
+      method: "POST", headers: requestHeaders({"Content-Type": "application/json"}),
+      body: JSON.stringify({kind: "upload", title, total, device: /Android|iPhone|iPad/i.test(navigator.userAgent) ? "mobile" : "desktop"}),
+    });
+    if (!response.ok) return;
+    const data = await response.json();
+    activeCloudJob = data.job?.id || null;
+    if (activeCloudJob && cloudJobPatch) {
+      const pending = cloudJobPatch; cloudJobPatch = null;
+      await sendCloudJobPatch(pending);
+    }
+  } catch {}
+}
+function persistJobProgress(patch) {
+  cloudJobPatch = {...(cloudJobPatch || {}), ...patch};
+  if (!activeCloudJob) return;
+  clearTimeout(cloudJobTimer);
+  cloudJobTimer = setTimeout(() => {
+    const pending = cloudJobPatch; cloudJobPatch = null;
+    sendCloudJobPatch(pending);
+  }, 500);
+}
 function updateTransferProgress(patch = {}) {
   Object.assign(transferState, patch);
   const panel = $("#transferProgress");
@@ -634,10 +1065,14 @@ function updateTransferProgress(patch = {}) {
   panel.hidden = false;
   panel.classList.toggle("is-error", transferState.failed > 0);
   panel.classList.toggle("is-complete", !transferState.active && total > 0);
+  persistJobProgress({status: transferState.active ? "running" : "completed", stage: transferState.stage || "等待处理",
+    current: transferState.current, completed: transferState.completed, failed: transferState.failed, total});
 }
 function beginTransferProgress(title, total) {
+  activeCloudJob = null; cloudJobPatch = null; clearTimeout(cloudJobTimer);
   Object.assign(transferState, { active: true, title, total: Math.max(0, Number(total) || 0), completed: 0, failed: 0, stage: "准备处理", current: "" });
   updateTransferProgress();
+  createCloudJob(title, total).catch(() => {});
 }
 function transferStage(stage, current = "") {
   updateTransferProgress({ active: true, stage, current });
@@ -647,6 +1082,11 @@ function transferDone(current = "", failed = false) {
 }
 function finishTransferProgress(message, failed = transferState.failed) {
   updateTransferProgress({ active: false, title: message, stage: failed ? "处理完成，但有项目失败" : "全部完成", current: failed ? `失败 ${failed} 项，可查看错误后重试` : "已写入共享 R2" });
+  const finalPatch = {...(cloudJobPatch || {}), status: failed ? "partial" : "completed", stage: message,
+    completed: transferState.completed, failed, total: transferState.total, result: message};
+  cloudJobPatch = null; clearTimeout(cloudJobTimer);
+  const id = activeCloudJob; activeCloudJob = null;
+  if (id) sendCloudJobPatch(finalPatch, id);
 }
 function r2Enabled() { return browserSyncEnabled() || state.storage?.library?.provider === "cloudflare_r2"; }
 function autoSyncEnabled() { return browserSyncEnabled() || (r2Enabled() && state.storage?.library?.autoSync); }
@@ -686,6 +1126,8 @@ function updateBulkControls() {
     $("#" + buttonId).title = storageDirty ? "请先保存存储设置" : "";
     const deleteButton = $("#deleteSelected" + kind[0].toUpperCase() + kind.slice(1));
     if (deleteButton) deleteButton.disabled = Boolean(state.operation) || !count;
+    const downloadButton = $("#downloadSelected" + kind[0].toUpperCase() + kind.slice(1));
+    if (downloadButton) downloadButton.disabled = Boolean(state.operation) || !count;
   });
   const chosenReview = state.review.filter(item => selections.review.has(item.staging_id));
   const privateCount = chosenReview.filter(item => !browserPrivateCompressionEnabled() && requiresOriginalPreservation(item.info)).length;
@@ -775,7 +1217,7 @@ function inferFontCategory(font) {
   if (/(?:艺术|装饰|display|decorative)/i.test(text)) return "艺术体";
   return "其他";
 }
-const DEFAULT_FONT_CATEGORIES = ["宋体", "黑体", "圆体", "手写体", "可爱字形", "像素体", "楷体", "仿宋", "艺术体", "其他"];
+const DEFAULT_FONT_CATEGORIES = ["宋体", "黑体", "圆体", "手写体", "等宽", "可爱字形", "像素体", "楷体", "仿宋", "艺术体", "其他"];
 function fontCategory(font) {
   return String(font?.style || "").trim() || inferFontCategory(font);
 }
@@ -802,7 +1244,8 @@ function renderFontFilters() {
 function fontClassificationEditor(font) {
   const style = fontCategory(font);
   const tags = recordTags(font);
-  return `<div class="record-classifications"><span class="category-chip">分类：${escapeHtml(style)}</span>${tags.map(tag => `<span class="category-chip">#${escapeHtml(tag)}</span>`).join("")}</div><details class="font-edit-details"><summary>编辑分类与标签</summary><form class="asset-meta-form record-classification-form" data-record-form="${escapeHtml(font?.id || "")}" data-record-kind="font"><div class="asset-meta-fields"><label>分类<input name="style" value="${escapeHtml(style === "其他" && !font?.style ? "" : style)}" placeholder="宋体、黑体、圆体、手写体" /></label><label>标签<input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="标签，用逗号分隔" /></label></div><button class="text-button" type="submit">保存分类</button></form></details>`;
+  const source = font?.style_source === "glyph" ? (font?.glyph_method === "opentype" ? "字形判定 · 轮廓回退" : "字形判定") : "名称规则";
+  return `<div class="record-classifications"><span class="category-chip">分类：${escapeHtml(style)} · ${source}</span>${tags.map(tag => `<span class="category-chip">#${escapeHtml(tag)}</span>`).join("")}</div><details class="font-edit-details"><summary>编辑分类与标签</summary><form class="asset-meta-form record-classification-form" data-record-form="${escapeHtml(font?.id || "")}" data-record-kind="font"><div class="asset-meta-fields"><label>分类<input name="style" value="${escapeHtml(style === "其他" && !font?.style ? "" : style)}" placeholder="宋体、黑体、圆体、手写体" /></label><label>标签<input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="标签，用逗号分隔" /></label></div><button class="text-button" type="submit">保存分类</button></form></details>`;
 }
 function fontPreviewMarkup(font) {
   const name = font.family || font.file_name || "字体";
@@ -846,9 +1289,24 @@ function themeMatchesSearch(theme) {
   if (!needle) return true;
   return [theme.name, theme.author, theme.file_name, theme.source_name, theme.compression_supported === false ? "加密" : "压缩"].some(value => String(value || "").toLocaleLowerCase("zh-CN").includes(needle));
 }
+function themeAuthorLabel(theme) { return String(theme?.author || "").trim() || "作者未记录"; }
+function renderThemeAuthorFilter() {
+  const select = $("#themeAuthorFilter");
+  if (!select) return;
+  const counts = new Map();
+  state.themes.forEach(theme => {
+    const author = themeAuthorLabel(theme);
+    counts.set(author, (counts.get(author) || 0) + 1);
+  });
+  const authors = [...counts.keys()].sort((a, b) => a.localeCompare(b, "zh-CN"));
+  if (state.themeAuthor !== "all" && !counts.has(state.themeAuthor)) state.themeAuthor = "all";
+  select.innerHTML = `<option value="all">全部作者 (${state.themes.length})</option>` + authors.map(author => `<option value="${escapeHtml(author)}">${escapeHtml(author)} (${counts.get(author)})</option>`).join("");
+  select.value = state.themeAuthor;
+}
 function renderThemes() {
   const list = $("#themeList");
-  const visible = state.themes.filter(themeMatchesSearch);
+  renderThemeAuthorFilter();
+  const visible = state.themes.filter(theme => themeMatchesSearch(theme) && (state.themeAuthor === "all" || themeAuthorLabel(theme) === state.themeAuthor));
   $("#themeCount").textContent = visible.length === state.themes.length ? `${state.themes.length} 个主题` : `${visible.length} / ${state.themes.length} 个主题`;
   $("#themeEmpty").hidden = visible.length > 0;
   $("#themeEmpty h3").textContent = state.themes.length && !visible.length ? "没有匹配的主题" : "还没有已收录主题";
@@ -1091,7 +1549,9 @@ async function loadJobs() {
     const hadActive = activeJobs().length > 0;
     state.jobs = items;
     jobsRevision = revision;
-    operationMessage($("#jobsStatus"), browserSyncEnabled() ? "免费同步模式：压缩、预览和上传在当前设备浏览器执行，没有云端后台队列。" : "任务由本地服务执行。完成记录与失败原因会保留，失败项可单独重试。");
+    operationMessage($("#jobsStatus"), browserSyncEnabled()
+      ? "免费同步模式：压缩与上传由当前设备浏览器执行；进度保存在共享 R2，刷新页面或换一台设备都能看到，暂存的原始文件可由任意设备继续处理。"
+      : "任务由本地服务执行。完成记录与失败原因会保留，失败项可单独重试。");
     if (changed) {
       const finished = items.filter(job => previous.has(job.id) && ["queued", "running"].includes(previous.get(job.id)) && !["queued", "running"].includes(job.status));
       if (finished.length) toast(finished.some(job => ["partial", "failed"].includes(job.status)) ? "后台任务有失败项，可在任务页重试" : "后台任务已完成");
@@ -1374,13 +1834,15 @@ async function commitThemes(ids = [...selections.review]) {
           const raw = item.bytes || new Uint8Array(await item.file.arrayBuffer());
           const encrypted = item.info?.compression_supported === false || item.inspection?.format === "red_private_v2";
           transferStage(encrypted ? "压缩图片并重新封包" : "压缩图片", name);
+          const compressionOptions = { quality: options.quality, maxEdge: options.max_edge, concurrency: Math.min(4, Number(navigator.hardwareConcurrency) || 2) };
           const result = encrypted
-            ? await compressPrivateRedViaWorker(raw, codec, { quality: options.quality, maxEdge: options.max_edge })
-            : await codec.compressRed(raw, { quality: options.quality, maxEdge: options.max_edge });
+            ? await compressPrivateRedViaWorker(raw, codec, compressionOptions)
+            : await runCodecTask("compressRed", { bytes: raw, options: compressionOptions }, () => codec.compressRed(raw, compressionOptions));
           const compressedBytes = result.bytes;
           const originalSha = await codec.sha256Hex(raw);
           transferStage("上传原始主题", name);
           const originalPath = await uploadBrowserObject("originals", originalSha, "red", raw, "application/octet-stream");
+          const backup = pan123BackupConfig().token ? await backupOriginalTo123(raw, item.info?.source_name || name, codec) : null;
           const assetSha = await codec.sha256Hex(compressedBytes);
           transferStage("上传压缩主题", name);
           const compressedPath = await uploadBrowserObject("compressed", assetSha, "red", compressedBytes, "application/octet-stream");
@@ -1403,7 +1865,8 @@ async function commitThemes(ids = [...selections.review]) {
             sha256: assetSha, original_sha256: originalSha, original_size: raw.length, compressed_size: compressedBytes.length,
             compression_supported: true, status: "browser_compressed", source_name: item.info.source_name,
             compressed_url: compressedPath, library_url: compressedPath, preview_light_url: previewPath, preview_dark_url: "", preview_details: previewDetails,
-            saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: "", original_url: originalPath
+            saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: "", original_url: originalPath,
+            original_123: backup && !backup.error ? backup : null, original_123_error: backup?.error || ""
           }, codec);
           transferDone(name);
           operationMessage($("#reviewBatchStatus"), `已完成主题 ${++finished} / ${selected.length}…`);
@@ -1439,6 +1902,109 @@ async function commitThemes(ids = [...selections.review]) {
     loadJobs().catch(() => {});
   } catch (error) { operationMessage($("#reviewBatchStatus"), `加入后台失败：${error.message}`, true); toast(error.message); }
   finally { setOperation(""); }
+}
+function downloadableFiles(kind, record) {
+  const raw = String(record?.file_name || record?.name || record?.family || record?.id || "item");
+  const label = raw.replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|\0]/g, "_").slice(0, 90) || "item";
+  const files = [];
+  const add = (path, suffix) => { if (path && !files.some(item => item.path === path)) files.push({path, name: label + suffix}); };
+  if (kind === "theme") {
+    const compressed = record.compressed_url || record.library_url;
+    add(compressed, ".red");
+    if (record.original_url && record.original_url !== compressed) add(record.original_url, ".original.red");
+    if (record.preview_light_url) add(record.preview_light_url, ".preview.jpg");
+    if (record.preview_dark_url) add(record.preview_dark_url, ".night.jpg");
+  } else if (kind === "font") {
+    add(record.url || record.view_url, "." + String(record.extension || "ttf").replace(/^\./, ""));
+    if (record.preview_url) add(record.preview_url, ".preview.jpg");
+  } else {
+    add(record.url || record.object_url, "." + String(record.extension || "svg").replace(/^\./, ""));
+    if (record.preview_url) add(record.preview_url, ".preview.jpg");
+  }
+  return files;
+}
+async function fetchDownloadableBytes(path, timeoutMs = 90000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(assetUrl(path), {signal: controller.signal});
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return new Uint8Array(await response.arrayBuffer());
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("读取超时，请检查网络后重试");
+    throw error;
+  } finally { clearTimeout(timer); }
+}
+async function downloadSelectedRecords(kind, ids = [...selections[kind]]) {
+  if (state.operation) return;
+  const collection = kind === "theme" ? state.themes : kind === "font" ? state.fonts : state.assets;
+  const chosen = [...new Set(ids)].map(id => collection.find(item => String(item.id) === String(id))).filter(Boolean);
+  if (!chosen.length) { toast("请先勾选要下载的项目"); return; }
+  const output = $(`#${kind}BatchStatus`);
+  const query = new URLSearchParams({kind, ids: chosen.map(item => String(item.id)).join(",")}).toString();
+  setOperation(`download-${kind}`);
+  // Remote mode: the shared Worker streams a Stored ZIP directly from R2.
+  // Nothing is pulled into JS memory and already-compressed fonts/RED files
+  // are not deflated a second time, so a 50 MB selection starts downloading
+  // immediately with the browser's own progress indicator.
+  if (apiBase && !remoteUnavailable) {
+    operationMessage(output, `正在准备 ${chosen.length} 项批量下载…`);
+    try {
+      const probe = await fetch(apiUrl(`/api/download?${query}&probe=1`), {headers: requestHeaders()});
+      let info = null;
+      try { info = await probe.json(); } catch {}
+      if (!probe.ok || !info?.ok) throw new Error(info?.error || `HTTP ${probe.status}`);
+      const link = document.createElement("a");
+      link.href = apiUrl(`/api/download?${query}`);
+      link.download = `reeden-${kind}-${new Date().toISOString().slice(0, 10)}.zip`;
+      document.body.append(link); link.click(); link.remove();
+      operationMessage(output, `已发起批量下载：${info.count} 个文件由共享库直接打包，可在浏览器下载列表查看进度。`);
+      toast(`已发起 ${chosen.length} 项批量下载`);
+    } catch (error) {
+      operationMessage(output, `批量下载失败：${error.message}`, true);
+      toast(`批量下载失败：${error.message}`);
+    } finally { setOperation(""); }
+    return;
+  }
+  // Browser-only mode keeps a local ZIP fallback for devices without the API.
+  operationMessage(output, "正在读取所选文件并打包 ZIP…");
+  try {
+    const codec = await loadFreeCodec();
+    if (!codec?.writeZipEntries) throw new Error("本地打包器未加载，请刷新页面后重试");
+    const entries = [], manifest = [], failures = [];
+    let done = 0;
+    await mapConcurrent(chosen, 2, async record => {
+      for (const file of downloadableFiles(kind, record)) {
+        try {
+          const bytes = await fetchDownloadableBytes(file.path);
+          const name = `${kind}/${file.name.replace(/[\\/:*?"<>|]/g, "_")}`;
+          entries.push({name, bytes});
+          manifest.push({kind, id: record.id, name: file.name, path: name, bytes: bytes.length});
+        } catch (error) {
+          failures.push({name: file.name, path: file.path, error: error.message});
+        }
+      }
+      operationMessage(output, `已读取 ${++done} / ${chosen.length} 项（${entries.length} 个文件）…`);
+    });
+    if (!manifest.length) throw new Error(`所有文件都读取失败：${failures[0]?.error || "未知错误"}`);
+    entries.push({name: "manifest.json", bytes: new TextEncoder().encode(JSON.stringify({created_at: new Date().toISOString(), files: manifest, failures}, null, 2))});
+    operationMessage(output, `正在生成 ZIP（${manifest.length} 个文件）…`);
+    // Fonts and RED packages are already compressed: use Stored entries so the
+    // fallback does not waste minutes on a second DEFLATE pass.
+    const packageBytes = await codec.writeZipEntries(entries, {concurrency: 4, store: true});
+    const zip = packageBytes.subarray(codec.RED_ZIP?.length || 4);
+    const url = URL.createObjectURL(new Blob([zip], {type: "application/zip"}));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `reeden-${kind}-${new Date().toISOString().slice(0, 10)}.zip`;
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 120000);
+    operationMessage(output, `已打包 ${manifest.length} 个文件，下载已开始。${failures.length ? ` ${failures.length} 个文件读取失败，详见包内 manifest.json。` : ""}`, false);
+    toast(`已发起 ${chosen.length} 项批量下载`);
+  } catch (error) {
+    operationMessage(output, `批量下载失败：${error.message}`, true);
+    toast(`批量下载失败：${error.message}`);
+  } finally { setOperation(""); }
 }
 async function syncTheme(themeId) { return syncSelectedAssets("theme", [themeId]); }
 async function syncFont(fontId) { return syncSelectedAssets("font", [fontId]); }
@@ -1554,11 +2120,19 @@ async function importFonts(files) {
           const bytes = new Uint8Array(await file.arrayBuffer());
           transferStage("上传字体文件", file.name);
           const fontPath = await uploadBrowserObject("fonts", info.sha256, info.extension, bytes, `font/${info.extension}`);
+          transferStage("分析字形并生成预览", file.name);
+          const analysis = await analyzeFontGlyphs(bytes, file.name, inferFontCategory({family: file.name}));
+          let previewPath = "";
+          if (analysis.specimen?.length) {
+            const previewSha = await codec.sha256Hex(analysis.specimen);
+            previewPath = await uploadBrowserObject("previews", previewSha, "jpg", analysis.specimen, "image/jpeg");
+          }
           transferStage("写入字体清单", file.name);
           const record = await uploadBrowserRecord({
             kind: "font", id: `font-${info.sha256.slice(0, 16)}`, sha256: info.sha256, file_name: file.name,
-            family: file.name.replace(/\.[^.]+$/, ""), subfamily: "Regular", extension: info.extension, bytes: info.bytes, style: inferFontCategory({ family: file.name }), tags: [],
-            url: fontPath, view_url: fontPath, preview_url: "", preview_state: "disabled", preview_error: "", saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
+            family: file.name.replace(/\.[^.]+$/, ""), subfamily: "Regular", extension: info.extension, bytes: info.bytes,
+            style: analysis.style, style_source: analysis.source, glyph_method: analysis.method, glyph_error: analysis.error || "", glyph_analysis: analysis.features, tags: [],
+            url: fontPath, view_url: fontPath, preview_url: previewPath, preview_state: previewPath ? "generated" : "disabled", preview_error: "", saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
           }, codec);
           transferDone(file.name);
           operationMessage(output, `已上传字体 ${++finished} / ${unique.length}…`);
@@ -1878,8 +2452,89 @@ function setupDropZone(element, onFiles) {
   element.addEventListener("drop", e => onFiles(e.dataTransfer.files));
   element.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); element.click(); } });
 }
+async function queueFilesForLater(fileList) {
+  if (state.operation) { toast("请等待当前批次处理完成"); return; }
+  const valid = [...(fileList || [])].filter(file => /\.(red|ttf|otf|woff2?|svg|html?)$/i.test(String(file.name || "")));
+  if (!valid.length) { toast("没有可暂存的受支持文件"); return; }
+  const codec = await browserCodec();
+  setOperation("staging");
+  suppressCloudJob = true;
+  beginTransferProgress("后台暂存原文件", valid.length);
+  const status = $("#unifiedImportStatus");
+  status.hidden = false;
+  try {
+    const keys = [], names = [];
+    await mapConcurrent(valid, 2, async file => {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const sha = await codec.sha256Hex(bytes);
+      const ext = /\.htm$/i.test(file.name) ? "html" : String(file.name).split(".").pop().toLowerCase();
+      transferStage("上传原始文件到共享库", file.name);
+      keys.push(await uploadBrowserObject("staging", sha, ext, bytes, "application/octet-stream"));
+      names.push(file.name);
+      transferDone(file.name);
+    });
+    const response = await fetch(apiUrl("/api/jobs"), {
+      method: "POST", headers: requestHeaders({"Content-Type": "application/json"}),
+      body: JSON.stringify({kind: "staged-import", title: `暂存 ${valid.length} 个文件，等待处理`, total: valid.length,
+        items: names, source_keys: keys, device: /Android|iPhone|iPad/i.test(navigator.userAgent) ? "mobile" : "desktop"}),
+    });
+    if (!response.ok) throw new Error(`暂存任务创建失败（${response.status}）`);
+    suppressCloudJob = false;
+    finishTransferProgress(`${valid.length} 个原文件已暂存到共享库`);
+    operationMessage(status, `已暂存 ${valid.length} 个文件。可在任意设备打开「后台任务」点「继续处理暂存文件」完成压缩与入库。`);
+    toast("原文件已上传到共享库，稍后可继续处理");
+    loadJobs().catch(() => {});
+  } catch (error) {
+    operationMessage(status, `后台暂存失败：${error.message}`, true);
+    toast(`后台暂存失败：${error.message}`);
+  } finally { suppressCloudJob = false; setOperation(""); }
+}
+async function resumeStagedJobs() {
+  if (stagedResumeBusy || state.operation) { toast("请等待当前批次处理完成"); return; }
+  stagedResumeBusy = true;
+  const status = $("#jobsStatus");
+  try {
+    const data = await api("/api/jobs");
+    const queued = (data.items || []).filter(job => job.kind === "staged-import" && job.status === "queued" && Array.isArray(job.source_keys) && job.source_keys.length);
+    if (!queued.length) { operationMessage(status, "当前没有待处理的暂存文件。"); toast("没有待处理的暂存文件"); return; }
+    for (const job of queued) {
+      await sendCloudJobPatch({status: "running", stage: "正在读取暂存原文件"}, job.id);
+      const files = [];
+      for (let index = 0; index < job.source_keys.length; index++) {
+        const response = await fetch(assetUrl(job.source_keys[index]));
+        if (!response.ok) throw new Error(`读取暂存文件失败（${response.status}）`);
+        const name = job.items?.[index] || String(job.source_keys[index]).split("/").pop();
+        files.push(new File([await response.arrayBuffer()], name, {type: "application/octet-stream"}));
+      }
+      operationMessage(status, `正在处理「${job.title}」的 ${files.length} 个文件…`);
+      resumingStaged = true;
+      try { await importUnifiedFiles(files); }
+      finally { resumingStaged = false; }
+      await sendCloudJobPatch({status: "completed", completed: job.total, stage: "已在本设备完成导入", result: files.length ? `${files.length} 个文件已导入；主题仍需在导入页确认` : "无文件"}, job.id);
+    }
+    operationMessage(status, "暂存文件已处理完成；主题请在导入页确认所选并压缩。");
+    toast("暂存任务已处理完成");
+    await loadJobs();
+  } catch (error) {
+    operationMessage(status, `继续处理失败：${error.message}`, true);
+    toast(`继续处理失败：${error.message}`);
+  } finally { resumingStaged = false; stagedResumeBusy = false; }
+}
+async function clearFinishedJobs() {
+  if (state.operation) return;
+  try {
+    const data = await api("/api/jobs");
+    const finished = (data.items || []).filter(job => !["queued", "running"].includes(job.status));
+    for (const job of finished) {
+      await fetch(apiUrl(`/api/jobs/${encodeURIComponent(job.id)}`), {method: "DELETE", headers: requestHeaders()});
+    }
+    toast(`已清除 ${finished.length} 条已完成任务`);
+    await loadJobs();
+  } catch (error) { toast(`清理失败：${error.message}`); }
+}
 async function importUnifiedFiles(fileList) {
   if (state.operation) { toast("请等待当前批次处理完成"); return; }
+  if (!resumingStaged && $("#queueForLater")?.checked) { await queueFilesForLater(fileList); return; }
   const groups = { theme: [], font: [], asset: [] }, unsupported = [];
   for (const file of [...(fileList || [])]) {
     const extension = String(file.name || "").toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] || "";
@@ -1930,6 +2585,7 @@ $("#chooseUnifiedFolder").addEventListener("click", () => { if (!state.operation
 $("#unifiedFolderInput").addEventListener("change", async event => { await importUnifiedFiles(event.target.files); event.target.value = ""; });
 $("#refreshThemes").addEventListener("click", () => loadThemes(true));
 $("#themeSearchInput").addEventListener("input", event => { state.themeSearch = event.target.value; renderThemes(); });
+$("#themeAuthorFilter").addEventListener("change", event => { state.themeAuthor = event.target.value || "all"; renderThemes(); });
 $("#refreshFonts").addEventListener("click", () => loadFonts(true));
 $("#fontSearchInput").addEventListener("input", event => { state.fontSearch = event.target.value; renderFonts(); });
 $("#refreshAssets").addEventListener("click", () => loadAssets(true));
@@ -1944,6 +2600,9 @@ $("#syncSelectedAssets").addEventListener("click", () => syncSelectedAssets("ass
 $("#deleteSelectedTheme").addEventListener("click", () => deleteSelectedRecords("theme"));
 $("#deleteSelectedFont").addEventListener("click", () => deleteSelectedRecords("font"));
 $("#deleteSelectedAsset").addEventListener("click", () => deleteSelectedRecords("asset"));
+$("#downloadSelectedTheme").addEventListener("click", () => downloadSelectedRecords("theme"));
+$("#downloadSelectedFont").addEventListener("click", () => downloadSelectedRecords("font"));
+$("#downloadSelectedAsset").addEventListener("click", () => downloadSelectedRecords("asset"));
 document.addEventListener("change", event => {
   const input = event.target.closest("[data-selection]");
   if (!input || state.operation) return;
@@ -1957,6 +2616,8 @@ $("#mobileMenu").addEventListener("click", () => $(".sidebar").classList.toggle(
 $("#closeModal").addEventListener("click", () => $("#modalBackdrop").hidden = true);
 $("#openJobs").addEventListener("click", () => setView("jobs"));
 $("#refreshJobs").addEventListener("click", () => loadJobs().catch(() => {}));
+$("#resumeStagedJobs").addEventListener("click", () => resumeStagedJobs());
+$("#clearFinishedJobs").addEventListener("click", () => clearFinishedJobs());
 $$("[data-import-kind]").forEach(button => {
   button.addEventListener("click", () => setImportKind(button.dataset.importKind));
   button.addEventListener("keydown", event => {
@@ -2013,6 +2674,26 @@ document.addEventListener("visibilitychange", () => {
 $("#probePan123").addEventListener("click", probePan123);
 $("#saveApiBase").addEventListener("click", saveApiBaseSetting);
 $("#clearApiBase").addEventListener("click", () => { $("#apiBaseInput").value = ""; saveApiBaseSetting(); });
+(() => {
+  const config = pan123BackupConfig();
+  $("#pan123BackupToken").value = config.token;
+  $("#pan123BackupFolder").value = config.folder;
+})();
+$("#savePan123Backup").addEventListener("click", () => {
+  const token = String($("#pan123BackupToken").value || "").trim();
+  const folder = String($("#pan123BackupFolder").value || "").trim() || "Red-Garden-Backup";
+  try {
+    localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, token);
+    localStorage.setItem(PAN123_FOLDER_STORAGE_KEY, folder);
+    operationMessage($("#pan123BackupStatus"), token ? "已启用：确认主题时会把原包备份到 123 云盘。" : "会话 Token 为空，当前只保留 R2 原包。");
+    toast(token ? "123 云盘备份已启用" : "123 云盘备份已关闭");
+  } catch { operationMessage($("#pan123BackupStatus"), "当前浏览器无法保存设置，请检查隐私模式设置。", true); }
+});
+$("#clearPan123Backup").addEventListener("click", () => {
+  try { localStorage.removeItem(PAN123_TOKEN_STORAGE_KEY); } catch {}
+  $("#pan123BackupToken").value = "";
+  operationMessage($("#pan123BackupStatus"), "已关闭 123 云盘备份，原包仍会存入 R2。");
+});
 $("#testStorage").addEventListener("click", event => testStorage("library", event.currentTarget));
 $("#testArchive").addEventListener("click", event => testStorage("archive", event.currentTarget));
 $("#pullStorage").addEventListener("click", event => cloudOperation("pull", event.currentTarget));
