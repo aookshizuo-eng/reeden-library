@@ -47,7 +47,7 @@ function corsHeaders(request, env) {
   if (!origin || !allowed.includes(origin)) return {};
   return {
     "Access-Control-Allow-Origin": origin,
-    "Access-Control-Allow-Methods": "GET,HEAD,PUT,POST,PATCH,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,HEAD,PUT,POST,PATCH,DELETE,OPTIONS",
     "Access-Control-Allow-Headers": "Authorization,Content-Type,Content-Length",
     "Access-Control-Max-Age": "600",
     Vary: "Origin",
@@ -427,6 +427,68 @@ async function updateRecordClassification(request, env, kind, id) {
   return json({error: "收藏记录不存在"}, 404, request, env);
 }
 
+function referencedObjectKeys(value, keys = new Set()) {
+  if (Array.isArray(value)) { value.forEach(item => referencedObjectKeys(item, keys)); return keys; }
+  if (value && typeof value === "object") { Object.entries(value).forEach(([key, item]) => {
+    if (key === "record_sha256" && /^[a-f0-9]{64}$/i.test(String(item || ""))) keys.add(`records/${String(item).toLowerCase()}.json`);
+    referencedObjectKeys(item, keys);
+  }); return keys; }
+  if (typeof value !== "string") return keys;
+  const pattern = /(?:https?:\/\/[^/]+)?\/?(?:api\/objects\/)?(originals|compressed|fonts|previews|assets|records)\/([a-f0-9]{64})\.(red|jpg|json|ttf|otf|woff2?|svg|html)(?:[?#].*)?$/i;
+  const match = value.match(pattern);
+  if (match) keys.add(`${match[1].toLowerCase()}/${match[2].toLowerCase()}.${match[3].toLowerCase()}`);
+  return keys;
+}
+
+async function listAllRecordEntries(env) {
+  const entries = [];
+  let cursor;
+  do {
+    const listing = await env.ASSETS.list({prefix: "records/", cursor, limit: MAX_LIST_RECORDS});
+    const loaded = await mapConcurrent(listing.objects || [], 16, async item => {
+      const object = await env.ASSETS.get(item.key);
+      if (!object) return null;
+      try {
+        const record = JSON.parse(await object.text());
+        return record && typeof record === "object" ? {key: item.key, record} : null;
+      } catch { return null; }
+    });
+    entries.push(...loaded.filter(Boolean));
+    cursor = listing.truncated ? listing.cursor : undefined;
+  } while (cursor);
+  return entries;
+}
+
+async function deleteLibraryRecords(request, env) {
+  if (!originAllowed(request, env, {write: true})) return json({error: "Origin 不在允许列表中"}, 403, request, env);
+  if (!checkWriteToken(request, env)) return json({error: "删除接口需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
+  let payload;
+  try { payload = await request.json(); } catch { return json({error: "删除请求不是有效 JSON"}, 400, request, env); }
+  const requested = Array.isArray(payload?.items) ? payload.items : [];
+  if (!requested.length || requested.length > 100) return json({error: "请提供 1–100 个待删除记录"}, 400, request, env);
+  const targets = new Set(requested.filter(item => item && ["theme", "font", "asset"].includes(item.kind) && String(item.id || "")).map(item => `${item.kind}:${item.id}`));
+  if (!targets.size) return json({error: "删除记录格式无效"}, 400, request, env);
+  const entries = await listAllRecordEntries(env);
+  const matched = entries.filter(({record}) => targets.has(`${record.kind}:${record.id}`));
+  if (!matched.length) return json({ok: true, deleted: [], missing: [...targets], retainedShared: []}, 200, request, env);
+  const remainingRefs = new Set();
+  entries.filter(entry => !matched.includes(entry)).forEach(entry => referencedObjectKeys(entry.record, remainingRefs));
+  const deleteKeys = new Set(matched.map(entry => entry.key));
+  const candidateObjects = new Set();
+  matched.forEach(entry => referencedObjectKeys(entry.record, candidateObjects));
+  const retainedShared = [];
+  for (const key of candidateObjects) {
+    if (key.startsWith("records/")) continue;
+    if (remainingRefs.has(key)) retainedShared.push(key); else deleteKeys.add(key);
+  }
+  const failed = [];
+  for (const key of deleteKeys) {
+    try { if (typeof env.ASSETS.delete === "function") await env.ASSETS.delete(key); else failed.push({key, error: "R2 不支持删除"}); }
+    catch (error) { failed.push({key, error: error?.message || "删除失败"}); }
+  }
+  return json({ok: failed.length === 0, deleted: matched.map(entry => ({kind: entry.record.kind, id: entry.record.id})), deletedObjects: [...deleteKeys].filter(key => !key.startsWith("records/")), retainedShared, failed}, failed.length ? 207 : 200, request, env);
+}
+
 const LOCAL_PROCESSING_NOTICE = {
   mode: "browser-local",
   backgroundJobs: false,
@@ -444,6 +506,7 @@ export async function handle(request, env) {
   if (url.pathname === "/api/themes" && request.method === "GET") return listRecords(request, env, "theme");
   if (url.pathname === "/api/fonts" && request.method === "GET") return listRecords(request, env, "font");
   if (url.pathname === "/api/assets" && request.method === "GET") return listRecords(request, env, "asset");
+  if (url.pathname === "/api/library" && request.method === "DELETE") return deleteLibraryRecords(request, env);
   if (url.pathname === "/api/private/repack" && request.method === "POST") return repackPrivateRed(request, env);
   const classificationUpdate = url.pathname.match(/^\/api\/(assets|themes|fonts)\/([^/]+)$/);
   if (classificationUpdate && request.method === "PATCH") {

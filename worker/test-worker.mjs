@@ -54,9 +54,31 @@ const listed = await assetList.json();
 assert.equal(listed.records.length, 1);
 assert.equal(listed.records[0].author, "Alice");
 assert.deepEqual(listed.records[0].tags, ["icon"]);
+// Deletion removes the record and unreferenced objects while preserving an
+// object still referenced by another record.
+const sharedBytes = encoder.encode("shared-object");
+const sharedSha = await sha256(sharedBytes);
+await handle(new Request(`https://worker.example/api/objects/assets/${sharedSha}.svg`, {method: "PUT", headers: headers({"Content-Type": "image/svg+xml"}), body: sharedBytes}), env);
+for (const id of ["shared-a", "shared-b"]) {
+  const bytes = encoder.encode(JSON.stringify({kind: "asset", id, asset_type: "svg", name: id, object_url: `assets/${sharedSha}.svg`}));
+  const recordSha = await sha256(bytes);
+  await handle(new Request(`https://worker.example/api/objects/records/${recordSha}.json`, {method: "PUT", headers: headers(), body: bytes}), env);
+}
+const deleteOne = await handle(new Request("https://worker.example/api/library", {method: "DELETE", headers: headers({"Content-Type": "application/json"}), body: JSON.stringify({items: [{kind: "asset", id: "shared-a"}]}),}), env);
+assert.equal(deleteOne.status, 200);
+assert.equal((await env.ASSETS.get(`assets/${sharedSha}.svg`)) !== null, true);
+const deleteTwo = await handle(new Request("https://worker.example/api/library", {method: "DELETE", headers: headers({"Content-Type": "application/json"}), body: JSON.stringify({items: [{kind: "asset", id: "shared-b"}]}),}), env);
+assert.equal(deleteTwo.status, 200);
+assert.equal((await env.ASSETS.get(`assets/${sharedSha}.svg`)) === null, true);
+// The standalone Worker shares the Pages implementation, so the encrypted
+// RED repack route must exist here too (a 404 would mean the copies drifted).
+const repack = await handle(new Request("https://worker.example/api/private/repack", {method: "POST", headers: {Origin: origin, "Content-Type": "application/json"}, body: "{}"}), env);
+assert.equal(repack.status, 401);
+assert.match((await repack.text()), /SYNC_WRITE_TOKEN/);
 const options = await handle(new Request("https://worker.example/api/assets", {method: "OPTIONS", headers: {Origin: origin}}), env);
 assert.equal(options.status, 204);
 assert.match(options.headers.get("Access-Control-Allow-Methods") || "", /PATCH/);
+assert.match(options.headers.get("Access-Control-Allow-Methods") || "", /DELETE/);
 // Classification updates must work after the first R2 list page as well.
 for (let index = 0; index < 205; index++) {
   const extra = encoder.encode(JSON.stringify({kind: "asset", id: `asset-extra-${String(index).padStart(3, "0")}`, asset_type: "svg", name: `Extra ${index}`, author: "", style: "", tags: []}));

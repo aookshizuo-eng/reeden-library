@@ -103,8 +103,9 @@ function requestHeaders(headers = {}) {
   if (apiBase && syncToken) result.set("Authorization", `Bearer ${syncToken}`);
   return result;
 }
-const state = { themes: [], fonts: [], assets: [], review: [], jobs: [], activeView: "import", importKind: "theme", assetFilter: "all", assetSearch: "", fontSearch: "", fontFilter: "all", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs"), importAssetIds: readSessionIds("reeden-import-assets") };
+const state = { themes: [], fonts: [], assets: [], review: [], jobs: [], activeView: "import", importKind: "theme", themeSearch: "", assetFilter: "all", assetSearch: "", fontSearch: "", fontFilter: "all", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs"), importAssetIds: readSessionIds("reeden-import-assets") };
 const selections = { review: new Set(), theme: new Set(), font: new Set(), asset: new Set() };
+const loadedFontFaces = new Set();
 const BROWSER_TASK_CONCURRENCY = 3;
 const BROWSER_RECORD_CACHE_TTL = 15000;
 let browserLibraryRecordsCache;
@@ -655,6 +656,11 @@ function eligibleIds(kind) {
   const collection = kind === "theme" ? state.themes : kind === "font" ? state.fonts : state.assets;
   return collection.filter(item => !savedToCloud(item) && !isAssetBusy(kind, item.id)).map(item => item.id);
 }
+function selectableIds(kind) {
+  if (kind === "review") return state.review.filter(item => !isAssetBusy("staging", item.staging_id)).map(item => item.staging_id);
+  const collection = kind === "theme" ? state.themes : kind === "font" ? state.fonts : state.assets;
+  return collection.filter(item => !isAssetBusy(kind, item.id)).map(item => item.id);
+}
 function selectInput(kind, id, name, disabled = false) {
   return `<input class="item-select" type="checkbox" data-selection="${kind}" data-id="${escapeHtml(id)}" aria-label="选择${escapeHtml(name)}" ${selections[kind].has(id) ? "checked" : ""} ${disabled || state.operation ? "disabled" : ""} />`;
 }
@@ -666,7 +672,7 @@ function updateBulkControls() {
     ["asset", "selectAllAssets", "assetSelectedCount", "syncSelectedAssets"],
   ];
   toolbars.forEach(([kind, checkboxId, countId, buttonId]) => {
-    const ids = eligibleIds(kind);
+    const ids = selectableIds(kind);
     const available = new Set(ids);
     for (const id of selections[kind]) if (!available.has(id)) selections[kind].delete(id);
     const count = selections[kind].size;
@@ -675,8 +681,11 @@ function updateBulkControls() {
     checkbox.indeterminate = count > 0 && count < ids.length;
     checkbox.disabled = Boolean(state.operation) || !ids.length;
     $("#" + countId).textContent = `已选 ${count} / ${ids.length} 项`;
-    $("#" + buttonId).disabled = Boolean(state.operation) || storageDirty || !count || (["theme", "font", "asset"].includes(kind) && !r2Enabled());
+    const syncCount = [...selections[kind]].filter(id => eligibleIds(kind).includes(id)).length;
+    $("#" + buttonId).disabled = Boolean(state.operation) || storageDirty || !syncCount || (["theme", "font", "asset"].includes(kind) && !r2Enabled());
     $("#" + buttonId).title = storageDirty ? "请先保存存储设置" : "";
+    const deleteButton = $("#deleteSelected" + kind[0].toUpperCase() + kind.slice(1));
+    if (deleteButton) deleteButton.disabled = Boolean(state.operation) || !count;
   });
   const chosenReview = state.review.filter(item => selections.review.has(item.staging_id));
   const privateCount = chosenReview.filter(item => !browserPrivateCompressionEnabled() && requiresOriginalPreservation(item.info)).length;
@@ -689,13 +698,14 @@ function updateBulkControls() {
   $("#themeToolbar").hidden = !state.themes.length;
   $("#fontToolbar").hidden = !state.fonts.length;
   $("#assetToolbar").hidden = !state.assets.length;
-  const eligible = Object.fromEntries(Object.keys(selections).map(kind => [kind, new Set(eligibleIds(kind))]));
+  const eligible = Object.fromEntries(Object.keys(selections).map(kind => [kind, new Set(selectableIds(kind))]));
   $$("[data-selection]").forEach(input => {
     input.checked = selections[input.dataset.selection].has(input.dataset.id);
     input.disabled = Boolean(state.operation) || !eligible[input.dataset.selection].has(input.dataset.id);
     input.closest("article")?.classList.toggle("is-selected", input.checked);
   });
   $$(".sync-theme, .sync-font, .sync-asset").forEach(button => { const kind = button.classList.contains("sync-font") ? "font" : button.classList.contains("sync-asset") ? "asset" : "theme"; button.disabled = Boolean(state.operation) || !r2Enabled() || storageDirty || button.dataset.completed === "true" || isAssetBusy(kind, button.dataset.id); });
+  $$(".delete-record").forEach(button => { const kind = button.dataset.kind; button.disabled = Boolean(state.operation) || isAssetBusy(kind, button.dataset.id); });
   $$(".commit-theme, .discard-review, .rebuild-preview, #chooseThemes, #chooseThemeFolder, #indexThemeFolder, #addThemeButton, #chooseFonts, #chooseFontFolder, #chooseAssets, #chooseAssetFolder, #addAssetButton, #chooseUnifiedFiles, #chooseUnifiedFolder, #scanButton, #indexExistingCloud, #storageForm button[type='submit']").forEach(button => { button.disabled = Boolean(state.operation); });
   $$(".rebuild-preview").forEach(button => { button.disabled = Boolean(state.operation) || isAssetBusy("theme", button.dataset.id); });
   $("#storageForm button[type='submit']").disabled = Boolean(state.operation) || activeJobs().length > 0;
@@ -706,7 +716,7 @@ function updateBulkControls() {
 }
 function setOperation(operation) { state.operation = operation; updateBulkControls(); }
 function toggleAll(kind, checked) {
-  selections[kind] = new Set(checked ? eligibleIds(kind) : []);
+  selections[kind] = new Set(checked ? selectableIds(kind) : []);
   updateBulkControls();
 }
 const viewNames = { import: "导入", themes: "主题库", fonts: "字体库", assets: "收藏库", jobs: "后台任务", storage: "存储设置" };
@@ -720,9 +730,14 @@ function setView(view) {
   $$("[data-view-panel]").forEach(panel => { panel.hidden = panel.dataset.viewPanel !== view; });
   $$(".nav-item").forEach(item => item.classList.toggle("is-active", item.dataset.view === view));
   $("#topbarTitle").textContent = viewNames[view];
-  if (view === "themes") loadThemes().catch(error => toast(error.message));
-  if (view === "fonts") loadFonts().catch(error => toast(error.message));
-  if (view === "assets") loadAssets().catch(error => toast(error.message));
+  // During startup the boot sequence already loads storage and then all
+  // libraries. Loading here too would race a second, differently-deduplicated
+  // request and make the card count flicker between raw and merged records.
+  if (state.storage) {
+    if (view === "themes") loadThemes().catch(error => toast(error.message));
+    if (view === "fonts") loadFonts().catch(error => toast(error.message));
+    if (view === "assets") loadAssets().catch(error => toast(error.message));
+  }
   if (view === "jobs") loadJobs().catch(() => {});
   if (view === "storage") loadStorage().catch(error => toast(error.message));
 }
@@ -789,20 +804,56 @@ function fontClassificationEditor(font) {
   const tags = recordTags(font);
   return `<div class="record-classifications"><span class="category-chip">分类：${escapeHtml(style)}</span>${tags.map(tag => `<span class="category-chip">#${escapeHtml(tag)}</span>`).join("")}</div><details class="font-edit-details"><summary>编辑分类与标签</summary><form class="asset-meta-form record-classification-form" data-record-form="${escapeHtml(font?.id || "")}" data-record-kind="font"><div class="asset-meta-fields"><label>分类<input name="style" value="${escapeHtml(style === "其他" && !font?.style ? "" : style)}" placeholder="宋体、黑体、圆体、手写体" /></label><label>标签<input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="标签，用逗号分隔" /></label></div><button class="text-button" type="submit">保存分类</button></form></details>`;
 }
+function fontPreviewMarkup(font) {
+  const name = font.family || font.file_name || "字体";
+  // The specimen text always exists in the DOM. A broken preview image or a
+  // failed FontFace load must never leave an empty card.
+  const specimen = `<span class="font-preview-fallback" data-font-preview-id="${escapeHtml(font.id || "")}"${font.preview_url ? " hidden" : ""}>Aa 中文 你好 123</span>`;
+  const image = font.preview_url ? `<img class="font-preview-image" src="${escapeHtml(assetUrl(font.preview_url))}" alt="${escapeHtml(name)} 字形预览" loading="lazy" />` : "";
+  return `<div class="font-preview-frame" data-font-id="${escapeHtml(font.id || "")}">${image}${specimen}</div>`;
+}
+function loadFontPreviewFace(font) {
+  const url = assetUrl(font?.view_url || font?.url);
+  if (!url || !font?.id || loadedFontFaces.has(font.id) || typeof FontFace === "undefined") return;
+  const face = new FontFace(`font-${font.id}`, `url(${JSON.stringify(url)})`);
+  face.load().then(loaded => {
+    document.fonts.add(loaded);
+    loadedFontFaces.add(font.id);
+    const specimen = $(`[data-font-preview-id="${CSS.escape(font.id)}"]`);
+    if (specimen) specimen.style.fontFamily = `font-${font.id}, sans-serif`;
+  }).catch(() => {});
+}
+function recoverFontPreviewImage(image) {
+  const frame = image.closest(".font-preview-frame");
+  const fallback = frame?.querySelector(".font-preview-fallback");
+  if (!frame || !fallback) return;
+  image.remove();
+  fallback.hidden = false;
+  const font = state.fonts.find(item => String(item.id) === String(frame.dataset.fontId));
+  if (font) loadFontPreviewFace(font);
+}
 function fontCard(font, imported = false) {
   const name = font.family || font.file_name || "未命名字体";
   const category = fontCategory(font);
-  const selection = imported ? "" : selectInput("font", font.id, `字体 ${name}`, savedToCloud(font));
+  const selection = imported ? "" : selectInput("font", font.id, `字体 ${name}`, isAssetBusy("font", font.id));
   const actions = imported
     ? `<button class="text-button" data-open-view="jobs">查看同步任务</button>`
-    : `<button class="text-button sync-font" data-id="${escapeHtml(font.id)}" data-completed="${savedToCloud(font)}">${savedToCloud(font) ? "R2 已保存" : "同步字体到 R2"}</button>${font.url ? `<a class="download-link" href="${escapeHtml(assetUrl(font.url))}">下载原字体</a>` : ""}`;
-  return `<article class="font-card ${imported ? "import-font-card" : ""}"><div class="font-card-top">${selection}<span class="category-chip">${escapeHtml(category)}</span></div><div class="font-card-body"><h3 class="font-name">${escapeHtml(name)}</h3><div class="font-meta"><span>${escapeHtml((font.extension || "font").toUpperCase())}</span><span>${formatBytes(font.bytes)}</span><span>${escapeHtml(syncLabel(font))}</span></div>${font.sync_error ? `<p class="inline-error">${escapeHtml(typeof font.sync_error === "string" ? font.sync_error : Object.values(font.sync_error).join("；"))}</p>` : ""}${font.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof font.cleanup_warning === "string" ? font.cleanup_warning : Object.values(font.cleanup_warning).join("；"))}</p>` : ""}${imported ? "" : fontClassificationEditor(font)}</div><div class="font-actions">${actions}</div></article>`;
+    : `<button class="text-button sync-font" data-id="${escapeHtml(font.id)}" data-completed="${savedToCloud(font)}">${savedToCloud(font) ? "R2 已保存" : "同步字体到 R2"}</button>${font.url ? `<a class="download-link" href="${escapeHtml(assetUrl(font.url))}">下载原字体</a>` : ""}<button class="text-button danger-text delete-record" data-kind="font" data-id="${escapeHtml(font.id)}">删除</button>`;
+  return `<article class="font-card ${imported ? "import-font-card" : ""}"><div class="font-card-top">${selection}<span class="category-chip">${escapeHtml(category)}</span></div>${fontPreviewMarkup(font)}<div class="font-card-body"><h3 class="font-name">${escapeHtml(name)}</h3><div class="font-meta"><span>${escapeHtml((font.extension || "font").toUpperCase())}</span><span>${formatBytes(font.bytes)}</span><span>${escapeHtml(syncLabel(font))}</span></div>${font.sync_error ? `<p class="inline-error">${escapeHtml(typeof font.sync_error === "string" ? font.sync_error : Object.values(font.sync_error).join("；"))}</p>` : ""}${font.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof font.cleanup_warning === "string" ? font.cleanup_warning : Object.values(font.cleanup_warning).join("；"))}</p>` : ""}${imported ? "" : fontClassificationEditor(font)}</div><div class="font-actions">${actions}</div></article>`;
+}
+function themeMatchesSearch(theme) {
+  const needle = String(state.themeSearch || "").trim().toLocaleLowerCase("zh-CN");
+  if (!needle) return true;
+  return [theme.name, theme.author, theme.file_name, theme.source_name, theme.compression_supported === false ? "加密" : "压缩"].some(value => String(value || "").toLocaleLowerCase("zh-CN").includes(needle));
 }
 function renderThemes() {
   const list = $("#themeList");
-  $("#themeCount").textContent = `${state.themes.length} 个主题`;
-  $("#themeEmpty").hidden = state.themes.length > 0;
-  list.innerHTML = state.themes.map(theme => {
+  const visible = state.themes.filter(themeMatchesSearch);
+  $("#themeCount").textContent = visible.length === state.themes.length ? `${state.themes.length} 个主题` : `${visible.length} / ${state.themes.length} 个主题`;
+  $("#themeEmpty").hidden = visible.length > 0;
+  $("#themeEmpty h3").textContent = state.themes.length && !visible.length ? "没有匹配的主题" : "还没有已收录主题";
+  $("#themeEmpty p").textContent = state.themes.length && !visible.length ? "换一个主题名称、作者或压缩状态试试。" : "导入一个 `.red` 文件后，这里会显示预览、作者和压缩状态。";
+  list.innerHTML = visible.map(theme => {
     const preview = preferredPreview(theme.preview_light_url, theme.preview_dark_url);
     const resources = theme.resource_summary || [];
     const roles = [...new Set(resources.map(item => item.role).filter(Boolean))].slice(0, 4);
@@ -813,12 +864,13 @@ function renderThemes() {
     const compressionText = compressionSummary(theme);
     return `<article class="theme-card">
       <div class="theme-preview">${previewImage(preview.url, `${theme.name} ${preview.label} · ${previewKind(theme.preview_details)}`, "", theme.preview_details)}<span class="preview-caption">${escapeHtml(previewKind(theme.preview_details))} · 点击放大</span></div>
-      <div class="theme-info"><label class="item-heading">${selectInput("theme", theme.id, `主题 ${theme.name || "未命名主题"}`, savedToCloud(theme))}<span class="theme-title">${escapeHtml(theme.name || "未命名主题")}</span></label><div class="theme-meta">${escapeHtml(theme.author || "作者未记录")}</div><p>${compressionText} · ${escapeHtml(syncLabel(theme))}</p>${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === "string" ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join("；"))}</p>` : ""}<div class="theme-badges">${roles.map(role => `<span class="badge">${escapeHtml(role)}</span>`).join("")}</div>${classificationEditor(theme, "theme")}</div>
-      <div class="theme-actions"><span class="size-line">${formatBytes(theme.compressed_size || theme.library_size || theme.original_size)}</span><button class="text-button rebuild-preview" data-id="${escapeHtml(theme.id)}">更新预览</button>${syncAction}${compressedLink}${libraryLink}${originalLink}</div>
+      <div class="theme-info"><label class="item-heading">${selectInput("theme", theme.id, `主题 ${theme.name || "未命名主题"}`, isAssetBusy("theme", theme.id))}<span class="theme-title">${escapeHtml(theme.name || "未命名主题")}</span></label><div class="theme-meta">${escapeHtml(theme.author || "作者未记录")}</div><p>${compressionText} · ${escapeHtml(syncLabel(theme))}</p>${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === "string" ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join("；"))}</p>` : ""}<div class="theme-badges">${roles.map(role => `<span class="badge">${escapeHtml(role)}</span>`).join("")}</div></div>
+      <div class="theme-actions"><span class="size-line">${formatBytes(theme.compressed_size || theme.library_size || theme.original_size)}</span><button class="text-button rebuild-preview" data-id="${escapeHtml(theme.id)}">更新预览</button>${syncAction}${compressedLink}${libraryLink}${originalLink}<button class="text-button danger-text delete-record" data-kind="theme" data-id="${escapeHtml(theme.id)}">删除</button></div>
     </article>`;
   }).join("");
   $$(".sync-theme").forEach(button => button.addEventListener("click", () => syncTheme(button.dataset.id)));
   $$(".rebuild-preview").forEach(button => button.addEventListener("click", () => rebuildPreview(button.dataset.id)));
+  $$(".delete-record[data-kind='theme']").forEach(button => button.addEventListener("click", () => deleteSelectedRecords("theme", [button.dataset.id])));
   renderCompressionResults();
   updateBulkControls();
 }
@@ -855,7 +907,15 @@ function renderFonts() {
   $("#fontEmpty h3").textContent = state.fonts.length && !visible.length ? "没有匹配的字体" : "还没有字体";
   $("#fontEmpty p").textContent = state.fonts.length && !visible.length ? "换一个字体名称或分类试试。" : "从单个文件或文件夹开始建立字体索引。";
   $("#fontList").innerHTML = visible.map(font => fontCard(font)).join("");
+  $$("#fontList .font-preview-image").forEach(image => {
+    image.addEventListener("error", () => recoverFontPreviewImage(image), {once: true});
+    if (image.complete && image.naturalWidth === 0) recoverFontPreviewImage(image);
+  });
+  // Only fonts without a generated specimen need the original font file.
+  // Cards with a preview image must not download a multi-megabyte TTF/WOFF.
+  visible.filter(font => !font.preview_url).forEach(loadFontPreviewFace);
   $$(".sync-font").forEach(button => button.addEventListener("click", () => syncFont(button.dataset.id)));
+  $$(".delete-record[data-kind='font']").forEach(button => button.addEventListener("click", () => deleteSelectedRecords("font", [button.dataset.id])));
   renderImportedFonts();
   updateBulkControls();
 }
@@ -896,11 +956,11 @@ function assetCard(asset, imported = false) {
   const objectUrl = assetUrl(asset.download_url || asset.object_url || asset.url || "");
   return `<article class="asset-card ${imported ? "asset-card-imported" : ""}" data-asset-id="${escapeHtml(asset.id || asset.sha256 || "")}">
     <div class="asset-card-preview">${assetPreview(asset, imported)}<span class="preview-caption">${assetTypeLabel(asset)} · ${asset.bytes ? formatBytes(asset.bytes) : ""}</span></div>
-    <div class="asset-card-body"><div class="asset-card-head"><label class="item-heading">${imported ? "" : selectInput("asset", asset.id, `收藏 ${asset.name || asset.file_name}`, savedToCloud(asset))}<span class="theme-title">${escapeHtml(asset.name || asset.file_name || "未命名收藏")}</span></label><span class="badge">${assetTypeLabel(asset)}</span></div>
+    <div class="asset-card-body"><div class="asset-card-head"><label class="item-heading">${imported ? "" : selectInput("asset", asset.id, `收藏 ${asset.name || asset.file_name}`, isAssetBusy("asset", asset.id))}<span class="theme-title">${escapeHtml(asset.name || asset.file_name || "未命名收藏")}</span></label><span class="badge">${assetTypeLabel(asset)}</span></div>
       <div class="asset-meta">${escapeHtml(asset.file_name || "")} · SHA ${escapeHtml(String(asset.sha256 || "").slice(0, 12))}</div>
       <div class="asset-classifications">${author ? `<span class="category-chip">作者：${escapeHtml(author)}</span>` : `<span class="category-chip is-empty">未分作者</span>`}${style ? `<span class="category-chip">风格：${escapeHtml(style)}</span>` : `<span class="category-chip is-empty">未分风格</span>`}${tags.map(tag => `<span class="category-chip">#${escapeHtml(tag)}</span>`).join("")}</div>
       <form class="asset-meta-form" data-record-form="${escapeHtml(asset.id || "")}" data-record-kind="asset"><div class="asset-meta-fields"><label>作者<input name="author" value="${escapeHtml(author)}" placeholder="作者" /></label><label>风格<input name="style" value="${escapeHtml(style)}" placeholder="风格" /></label><label>标签<input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="标签，用逗号分隔" /></label></div><button class="text-button" type="submit">保存分类</button></form>
-    </div><div class="asset-actions"><button class="text-button sync-asset" data-id="${escapeHtml(asset.id || "")}" data-completed="${savedToCloud(asset)}">${savedToCloud(asset) ? "R2 已保存" : "同步到 R2"}</button>${objectUrl ? `<a class="download-link" href="${escapeHtml(objectUrl)}" download="${escapeHtml(asset.file_name || asset.name || "asset")}">下载原文件</a>` : ""}</div>
+    </div><div class="asset-actions"><button class="text-button sync-asset" data-id="${escapeHtml(asset.id || "")}" data-completed="${savedToCloud(asset)}">${savedToCloud(asset) ? "R2 已保存" : "同步到 R2"}</button>${objectUrl ? `<a class="download-link" href="${escapeHtml(objectUrl)}" download="${escapeHtml(asset.file_name || asset.name || "asset")}">下载原文件</a>` : ""}<button class="text-button danger-text delete-record" data-kind="asset" data-id="${escapeHtml(asset.id || "")}">删除</button></div>
   </article>`;
 }
 function renderAssets() {
@@ -911,6 +971,7 @@ function renderAssets() {
   list.innerHTML = visible.map(asset => assetCard(asset)).join("");
   $$(".asset-filters .filter-chip").forEach(button => button.classList.toggle("is-active", button.dataset.assetFilter === state.assetFilter));
   $$(".sync-asset").forEach(button => button.addEventListener("click", () => syncAsset(button.dataset.id)));
+  $$(".delete-record[data-kind='asset']").forEach(button => button.addEventListener("click", () => deleteSelectedRecords("asset", [button.dataset.id])));
   updateBulkControls();
 }
 function renderImportedAssets() {
@@ -1059,8 +1120,23 @@ async function retryJob(id) {
   } catch (error) { toast(error.message); }
   finally { setOperation(""); }
 }
+function latestRecords(records) {
+  // A classification edit writes a new immutable record with the same stable
+  // id. Both /api/library and the legacy per-kind endpoints must merge those
+  // duplicates the same way, otherwise the card count depends on which load
+  // finishes last.
+  const latest = new Map();
+  for (const record of records || []) {
+    const key = `${record.kind || "unknown"}:${record.id || record.sha256 || JSON.stringify(record)}`;
+    const current = latest.get(key);
+    const nextTime = Date.parse(record.updated_at || record.created_at || "") || 0;
+    const currentTime = Date.parse(current?.updated_at || current?.created_at || "") || 0;
+    if (!current || nextTime >= currentTime) latest.set(key, record);
+  }
+  return [...latest.values()];
+}
 async function loadThemes(force = false) {
-  const records = browserSyncEnabled() ? await loadBrowserLibraryRecords(force) : (await api("/api/themes")).items || [];
+  const records = browserSyncEnabled() ? await loadBrowserLibraryRecords(force) : latestRecords((await api("/api/themes")).items || []);
   state.themes = records.filter(item => item.kind === "theme" || !item.kind);
   renderThemes();
 }
@@ -1076,17 +1152,7 @@ async function loadBrowserLibraryRecords(force = false) {
       records.push(...(data.items || data.records || []));
       cursor = data.cursor || "";
     } while (cursor);
-    // A classification edit writes a new immutable record with the same
-    // stable id. Pick the newest record before any library view consumes it.
-    const latest = new Map();
-    for (const record of records) {
-      const key = `${record.kind || "unknown"}:${record.id || record.sha256 || JSON.stringify(record)}`;
-      const current = latest.get(key);
-      const nextTime = Date.parse(record.updated_at || record.created_at || "") || 0;
-      const currentTime = Date.parse(current?.updated_at || current?.created_at || "") || 0;
-      if (!current || nextTime >= currentTime) latest.set(key, record);
-    }
-    browserLibraryRecordsCache = [...latest.values()];
+    browserLibraryRecordsCache = latestRecords(records);
     browserLibraryRecordsLoadedAt = Date.now();
     return browserLibraryRecordsCache;
   })();
@@ -1118,7 +1184,7 @@ async function discardReview(id) {
   finally { setOperation(""); }
 }
 async function loadFonts(force = false) {
-  const records = browserSyncEnabled() ? await loadBrowserLibraryRecords(force) : (await api("/api/fonts")).items || [];
+  const records = browserSyncEnabled() ? await loadBrowserLibraryRecords(force) : latestRecords((await api("/api/fonts")).items || []);
   state.fonts = records.filter(item => item.kind === "font").map(font => ({ ...font, style: String(font.style || "").trim() || inferFontCategory(font) }));
   renderFonts();
 }
@@ -1377,12 +1443,46 @@ async function commitThemes(ids = [...selections.review]) {
 async function syncTheme(themeId) { return syncSelectedAssets("theme", [themeId]); }
 async function syncFont(fontId) { return syncSelectedAssets("font", [fontId]); }
 async function syncAsset(assetId) { return syncSelectedAssets("asset", [assetId]); }
+async function deleteSelectedRecords(kind, ids = [...selections[kind]]) {
+  if (state.operation) return;
+  const collection = kind === "theme" ? state.themes : kind === "font" ? state.fonts : state.assets;
+  const chosen = [...new Set(ids)].map(id => collection.find(item => String(item.id) === String(id))).filter(Boolean);
+  if (!chosen.length) return;
+  const label = kind === "theme" ? "主题" : kind === "font" ? "字体" : "收藏";
+  const names = chosen.slice(0, 3).map(item => item.name || item.family || item.file_name || "未命名").join("、");
+  const suffix = chosen.length > 3 ? ` 等 ${chosen.length} 项` : "";
+  const confirmed = window.confirm(`确认删除 ${label}“${names}”${suffix}？\n\n将删除库记录，并只删除没有被其他记录引用的 R2 对象。共享对象会保留。删除完成后会刷新清单；对象删除失败时会保留在 R2 并明确提示。已删除记录可通过重新导入原文件恢复。`);
+  if (!confirmed) return;
+  const output = $(kind === "theme" ? "#themeBatchStatus" : kind === "font" ? "#fontBatchStatus" : "#assetBatchStatus");
+  setOperation(`delete-${kind}`);
+  operationMessage(output, `正在删除 ${chosen.length} 项${label}，检查共享对象引用…`);
+  try {
+    const result = await api("/api/library", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items: chosen.map(item => ({ kind, id: item.id })) }) });
+    const deletedIds = new Set((result.deleted || []).map(item => String(item.id)));
+    if (kind === "theme") state.themes = state.themes.filter(item => !deletedIds.has(String(item.id)));
+    if (kind === "font") state.fonts = state.fonts.filter(item => !deletedIds.has(String(item.id)));
+    if (kind === "asset") state.assets = state.assets.filter(item => !deletedIds.has(String(item.id)));
+    chosen.forEach(item => selections[kind].delete(item.id));
+    invalidateBrowserLibraryRecords();
+    renderThemes(); renderFonts(); renderAssets();
+    const failed = result.failed || [];
+    const shared = result.retainedShared || [];
+    const message = `已删除 ${deletedIds.size} 项${label}。${shared.length ? `共享对象保留 ${shared.length} 个。` : ""}${failed.length ? ` ${failed.length} 个对象删除失败，文件仍保留在 R2，可稍后重试。` : ""}如需恢复已删除记录，请重新导入原文件。`;
+    operationMessage(output, message, Boolean(failed.length));
+    toast(failed.length ? `已删除记录，但有 ${failed.length} 个对象失败` : `${label}已删除，清单已刷新`);
+    await Promise.all([loadThemes(true), loadFonts(true), loadAssets(true)]);
+  } catch (error) {
+    operationMessage(output, `删除失败：${error.message}。原记录仍保留，可重试。`, true);
+    toast(`删除失败：${error.message}`);
+  } finally { setOperation(""); }
+}
 async function syncSelectedAssets(kind, ids = [...selections[kind]]) {
   if (state.operation || !r2Enabled() || storageDirty || !ids.length) return;
   if (browserSyncEnabled()) {
     const output = $(kind === "theme" ? "#themeBatchStatus" : kind === "font" ? "#fontBatchStatus" : "#assetBatchStatus");
+    const chosen = [...new Set(ids)].filter(id => eligibleIds(kind).includes(id));
     operationMessage(output, "免费浏览器模式会在导入/确认时直接上传到 R2；已有记录无需再次排队。", false);
-    ids.forEach(id => selections[kind].delete(id));
+    chosen.forEach(id => selections[kind].delete(id));
     updateBulkControls();
     return;
   }
@@ -1829,6 +1929,7 @@ $("#chooseUnifiedFiles").addEventListener("click", () => { if (!state.operation)
 $("#chooseUnifiedFolder").addEventListener("click", () => { if (!state.operation) $("#unifiedFolderInput").click(); });
 $("#unifiedFolderInput").addEventListener("change", async event => { await importUnifiedFiles(event.target.files); event.target.value = ""; });
 $("#refreshThemes").addEventListener("click", () => loadThemes(true));
+$("#themeSearchInput").addEventListener("input", event => { state.themeSearch = event.target.value; renderThemes(); });
 $("#refreshFonts").addEventListener("click", () => loadFonts(true));
 $("#fontSearchInput").addEventListener("input", event => { state.fontSearch = event.target.value; renderFonts(); });
 $("#refreshAssets").addEventListener("click", () => loadAssets(true));
@@ -1840,6 +1941,9 @@ $("#commitSelectedThemes").addEventListener("click", () => commitThemes());
 $("#syncSelectedThemes").addEventListener("click", () => syncSelectedAssets("theme"));
 $("#syncSelectedFonts").addEventListener("click", () => syncSelectedAssets("font"));
 $("#syncSelectedAssets").addEventListener("click", () => syncSelectedAssets("asset"));
+$("#deleteSelectedTheme").addEventListener("click", () => deleteSelectedRecords("theme"));
+$("#deleteSelectedFont").addEventListener("click", () => deleteSelectedRecords("font"));
+$("#deleteSelectedAsset").addEventListener("click", () => deleteSelectedRecords("asset"));
 document.addEventListener("change", event => {
   const input = event.target.closest("[data-selection]");
   if (!input || state.operation) return;

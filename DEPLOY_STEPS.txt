@@ -1,4 +1,7 @@
 # Free deployment helper (does not contain credentials)
+# Before every static deploy, keep the two publish directories in sync and run the regression check:
+# 0. node scripts/sync-pages.mjs
+# 0. node scripts/verify-pages.mjs
 # 1. Create GitHub repository and push this directory.
 # 2. Enable Settings > Pages > GitHub Actions.
 # 3. In worker/, copy wrangler.toml.example to wrangler.toml and fill bucket/origin.

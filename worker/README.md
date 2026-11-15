@@ -1,6 +1,6 @@
 # Reeden 免费 R2 同步 Worker
 
-这是给 GitHub Pages 前端使用的轻量同步接口。普通主题和字体在手机/电脑浏览器本地处理，Worker 负责把结果写入同一个 R2 Bucket、读取记录和返回对象。加密 RED 的图片仍由浏览器先压缩，Worker 通过私有格式密钥认证清单、更新哈希并重新封包；Worker 不接收图像解码任务，也不把私钥返回浏览器。Worker 不保存 R2 Access Key；R2 通过绑定访问。
+这是给 GitHub Pages 前端使用的轻量同步接口。`worker.js` 只是入口，实际实现与 Cloudflare Pages 的 `pages/worker-api.js` 是同一份文件（Wrangler 会把 `../pages/worker-api.js` 打进产物），避免两套代码各自演化后漏掉删除、加密 RED 重封等接口。普通主题和字体在手机/电脑浏览器本地处理，Worker 负责把结果写入同一个 R2 Bucket、读取记录和返回对象。加密 RED 的图片仍由浏览器先压缩，Worker 通过私有格式密钥认证清单、更新哈希并重新封包；Worker 不接收图像解码任务，也不把私钥返回浏览器。Worker 不保存 R2 Access Key；R2 通过绑定访问。
 
 R2 对象布局：
 
