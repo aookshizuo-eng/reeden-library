@@ -345,6 +345,12 @@ const dlResponse = await handle(new Request(dlBase, {headers: {Origin: origin}})
 assert.equal(dlResponse.status, 200);
 assert.equal(dlResponse.headers.get("Content-Type"), "application/zip");
 assert.match(dlResponse.headers.get("Content-Disposition") || "", /^attachment; filename=/);
+// The archive name follows the caller's local date; junk falls back to UTC.
+const dlDated = await handle(new Request(`${dlBase}&date=2026-11-16`, {headers: {Origin: origin}}), dlEnv);
+assert.match(dlDated.headers.get("Content-Disposition") || "", /reeden-font-2026-11-16\.zip/);
+const dlJunkDate = await handle(new Request(`${dlBase}&date=../../etc`, {headers: {Origin: origin}}), dlEnv);
+assert.match(dlJunkDate.headers.get("Content-Disposition") || "", /reeden-font-\d{4}-\d{2}-\d{2}\.zip/);
+assert.doesNotMatch(dlJunkDate.headers.get("Content-Disposition") || "", /etc/);
 const zipBytes = new Uint8Array(await dlResponse.arrayBuffer());
 const u16 = at => zipBytes[at] | (zipBytes[at + 1] << 8);
 const u32 = at => (zipBytes[at] | (zipBytes[at + 1] << 8) | (zipBytes[at + 2] << 16) | (zipBytes[at + 3] << 24)) >>> 0;

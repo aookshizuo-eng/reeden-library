@@ -549,7 +549,7 @@ function downloadEntries(kind, records) {
   }
   return entries;
 }
-function streamZip(request, env, kind, entries) {
+function streamZip(request, env, kind, entries, stamp) {
   const encoder = new TextEncoder();
   const manifest = {
     created_at: new Date().toISOString(), kind,
@@ -602,7 +602,7 @@ function streamZip(request, env, kind, entries) {
   const headers = new Headers(corsHeaders(request, env));
   headers.set("Content-Type", "application/zip");
   headers.set("Cache-Control", "no-store");
-  headers.set("Content-Disposition", `attachment; filename="reeden-${kind}-${new Date().toISOString().slice(0, 10)}.zip"`);
+  headers.set("Content-Disposition", `attachment; filename="reeden-${kind}-${stamp}.zip"`);
   headers.set("X-Reeden-Download-Files", String(entries.length));
   return new Response(stream, {status: 200, headers});
 }
@@ -623,7 +623,12 @@ async function downloadSelected(request, env) {
     return json({ok: true, kind, records: chosen.length, count: entries.length,
       files: entries.map(item => ({name: item.name, path: item.path}))}, 200, request, env);
   }
-  return streamZip(request, env, kind, entries);
+  // The archive name should follow the user's calendar. A Worker has no
+  // timezone, so the client passes its local date and we only accept a plain
+  // YYYY-MM-DD (a 03:00 CST download used to be stamped with yesterday).
+  const requested = String(url.searchParams.get("date") || "");
+  const stamp = /^\d{4}-\d{2}-\d{2}$/.test(requested) ? requested : new Date().toISOString().slice(0, 10);
+  return streamZip(request, env, kind, entries, stamp);
 }
 
 async function listRecords(request, env, wantedKind = null) {

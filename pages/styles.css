@@ -461,6 +461,7 @@ button:disabled { cursor: not-allowed; opacity: .65; }
   .bulk-toolbar { display: grid; grid-template-columns: 1fr 1fr; align-items: center; gap: 8px 10px; }
   .bulk-toolbar > .select-label { grid-column: 1 / 2; }
   .bulk-toolbar > .selection-count { grid-column: 2 / 3; justify-self: end; }
+  .bulk-toolbar > .bundle-toggle { grid-column: 1 / -1; min-height: 44px; }
   .bulk-toolbar > button { width: 100%; grid-column: auto; }
   .bulk-toolbar > button:last-of-type, .bulk-toolbar > .bulk-status { grid-column: 1 / -1; }
   .section-heading { flex-direction: column; align-items: stretch; gap: 10px; }

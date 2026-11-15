@@ -1669,14 +1669,17 @@ function renderThemes() {
     const resources = theme.resource_summary || [];
     const roles = [...new Set(resources.map(item => item.role).filter(Boolean))].slice(0, 4);
     const syncAction = theme.compressed_url || theme.library_url || theme.original_url ? `<button class="text-button sync-theme" data-id="${escapeHtml(theme.id)}" data-completed="${savedToCloud(theme)}">${savedToCloud(theme) ? "R2 已保存" : "同步到 R2"}</button>` : "";
-    const compressedLink = theme.compressed_url ? `<a class="download-link" href="${escapeHtml(assetUrl(theme.compressed_url))}">下载压缩包</a>` : "";
-    const libraryLink = theme.library_url ? `<a class="download-link" href="${escapeHtml(assetUrl(theme.library_url))}">下载主题</a>` : "";
+    // "下载压缩包" and "下载主题" used to point at the same stored object, so
+    // every card showed the same link twice. Keep one link for the packaged
+    // theme plus the untouched original; bundling only happens in bulk.
+    const themeFile = theme.compressed_url || theme.library_url;
+    const themeLink = themeFile ? `<a class="download-link" href="${escapeHtml(assetUrl(themeFile))}">下载主题</a>` : "";
     const originalLink = theme.original_url ? `<a class="download-link" href="${escapeHtml(assetUrl(theme.original_url))}">下载原始包</a>` : "";
     const compressionText = compressionSummary(theme);
     return `<article class="theme-card">
       <div class="theme-preview">${previewImage(preview.url, `${theme.name} ${preview.label} · ${previewKind(theme.preview_details)}`, "", theme.preview_details)}<span class="preview-caption">${escapeHtml(previewKind(theme.preview_details))} · 点击放大</span></div>
       <div class="theme-info"><label class="item-heading">${selectInput("theme", theme.id, `主题 ${theme.name || "未命名主题"}`, isAssetBusy("theme", theme.id))}<span class="theme-title">${escapeHtml(theme.name || "未命名主题")}</span></label><div class="theme-meta">${escapeHtml(theme.author || "作者未记录")}</div><p>${compressionText} · ${escapeHtml(syncLabel(theme))}</p>${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === "string" ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join("；"))}</p>` : ""}<div class="theme-badges">${roles.map(role => `<span class="badge">${escapeHtml(role)}</span>`).join("")}${theme.original_123?.key ? `<span class="badge is-good" title="${escapeHtml(theme.original_123.key)}">123 已备份</span>` : theme.original_123_error ? `<span class="badge" title="${escapeHtml(theme.original_123_error)}">123 备份失败</span>` : `<span class="badge">123 未备份</span>`}</div></div>
-      <div class="theme-actions"><span class="size-line">${formatBytes(theme.compressed_size || theme.library_size || theme.original_size)}</span><button class="text-button rebuild-preview" data-id="${escapeHtml(theme.id)}">更新预览</button>${syncAction}${compressedLink}${libraryLink}${originalLink}<button class="text-button danger-text delete-record" data-kind="theme" data-id="${escapeHtml(theme.id)}">删除</button></div>
+      <div class="theme-actions"><span class="size-line">${formatBytes(theme.compressed_size || theme.library_size || theme.original_size)}</span><button class="text-button rebuild-preview" data-id="${escapeHtml(theme.id)}">更新预览</button>${syncAction}${themeLink}${originalLink}<button class="text-button danger-text delete-record" data-kind="theme" data-id="${escapeHtml(theme.id)}">删除</button></div>
     </article>`;
   }).join("");
   $$(".sync-theme").forEach(button => button.addEventListener("click", () => syncTheme(button.dataset.id)));
@@ -2321,13 +2324,62 @@ async function fetchDownloadableBytes(path, timeoutMs = 90000) {
     throw error;
   } finally { clearTimeout(timer); }
 }
+// A single item is always handed over as its own file. Bundling is a batch
+// decision, and even there the user can switch it off and get every file one
+// by one instead of a ZIP.
+// ZIP names should follow the user's calendar, not UTC: a 03:30 CST download
+// used to be stamped with yesterday's date.
+function localDateStamp() {
+  const now = new Date();
+  const pad = value => String(value).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+async function downloadRecordsSeparately(kind, chosen, output) {
+  const files = [];
+  for (const record of chosen) {
+    for (const file of downloadableFiles(kind, record)) {
+      // Previews are handy inside an archive but pure noise in a loose batch.
+      if (kind === "theme" && /\.(preview|night)\.jpg$/i.test(file.name)) continue;
+      files.push(file);
+    }
+  }
+  if (!files.length) throw new Error("没有可下载的文件");
+  let done = 0, failed = 0;
+  for (const file of files) {
+    try {
+      const bytes = await fetchDownloadableBytes(file.path);
+      const url = URL.createObjectURL(new Blob([bytes]));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = file.name;
+      document.body.append(link); link.click(); link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      done++;
+    } catch { failed++; }
+    operationMessage(output, `正在逐个下载：${done} / ${files.length} 个文件${failed ? `（失败 ${failed}）` : ""}…`);
+    await new Promise(resolve => setTimeout(resolve, 300));
+  }
+  return {done, failed};
+}
 async function downloadSelectedRecords(kind, ids = [...selections[kind]]) {
   if (state.operation) return;
   const collection = kind === "theme" ? state.themes : kind === "font" ? state.fonts : state.assets;
   const chosen = [...new Set(ids)].map(id => collection.find(item => String(item.id) === String(id))).filter(Boolean);
   if (!chosen.length) { toast("请先勾选要下载的项目"); return; }
   const output = $(`#${kind}BatchStatus`);
-  const query = new URLSearchParams({kind, ids: chosen.map(item => String(item.id)).join(",")}).toString();
+  const bundle = document.querySelector(`input[data-bundle="${kind}"]`)?.checked !== false;
+  if (!bundle) {
+    setOperation(`download-${kind}`);
+    operationMessage(output, `正在逐个下载 ${chosen.length} 项，不打包…`);
+    try {
+      const {done, failed} = await downloadRecordsSeparately(kind, chosen, output);
+      operationMessage(output, `已下载 ${done} 个文件${failed ? `，失败 ${failed} 个` : ""}。如果浏览器询问“是否允许下载多个文件”，请选择允许。`, failed > 0);
+    } catch (error) {
+      operationMessage(output, `下载失败：${error.message}`, true);
+    } finally { setOperation(""); }
+    return;
+  }
+  const query = new URLSearchParams({kind, ids: chosen.map(item => String(item.id)).join(","), date: localDateStamp()}).toString();
   setOperation(`download-${kind}`);
   // Remote mode: the shared Worker streams a Stored ZIP directly from R2.
   // Nothing is pulled into JS memory and already-compressed fonts/RED files
@@ -2342,7 +2394,7 @@ async function downloadSelectedRecords(kind, ids = [...selections[kind]]) {
       if (!probe.ok || !info?.ok) throw new Error(info?.error || `HTTP ${probe.status}`);
       const link = document.createElement("a");
       link.href = apiUrl(`/api/download?${query}`);
-      link.download = `reeden-${kind}-${new Date().toISOString().slice(0, 10)}.zip`;
+      link.download = `reeden-${kind}-${localDateStamp()}.zip`;
       document.body.append(link); link.click(); link.remove();
       operationMessage(output, `已发起批量下载：${info.count} 个文件由共享库直接打包，可在浏览器下载列表查看进度。`);
       toast(`已发起 ${chosen.length} 项批量下载`);
@@ -2382,7 +2434,7 @@ async function downloadSelectedRecords(kind, ids = [...selections[kind]]) {
     const url = URL.createObjectURL(new Blob([zip], {type: "application/zip"}));
     const link = document.createElement("a");
     link.href = url;
-    link.download = `reeden-${kind}-${new Date().toISOString().slice(0, 10)}.zip`;
+    link.download = `reeden-${kind}-${localDateStamp()}.zip`;
     document.body.append(link); link.click(); link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 120000);
     operationMessage(output, `已打包 ${manifest.length} 个文件，下载已开始。${failures.length ? ` ${failures.length} 个文件读取失败，详见包内 manifest.json。` : ""}`, false);
