@@ -2275,8 +2275,10 @@ async function commitThemes(ids = [...selections.review]) {
       // failed items remain visible for retry.
       for (const item of selected) if (!failures.some(entry => entry.item === item)) { state.review = state.review.filter(review => review !== item); selections.review.delete(item.staging_id); }
       renderReview(); renderThemes(); renderJobs();
+      const completedFiles = results.filter(result => result.record && result.item?.file).map(result => result.item.file);
       const message = failures.length ? `${completed.length} 个主题已保存到 R2，${failures.length} 个失败，请查看错误后重试。` : `${completed.length} 个主题已压缩并保存到 R2。`;
       operationMessage($("#reviewBatchStatus"), message, Boolean(failures.length)); toast(message);
+      offerLocalCleanup(completedFiles, `本次 ${completedFiles.length} 个主题已压缩并保存到 R2，可以删掉本地原包释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
       return;
     }
     const result = await api("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "commit-themes", ids: chosen, ...options }) });
@@ -2589,8 +2591,11 @@ async function importFonts(files) {
       state.importFontIds = added.map(font => font.id);
       saveSessionIds("reeden-import-fonts", state.importFontIds);
       renderFonts();
+      const failedFiles = new Set(failures.map(item => item.file));
+      const succeededFiles = unique.filter(file => !failedFiles.has(file));
       const message = `已上传 ${added.length} 个字体，重复跳过 ${duplicates} 个${failures.length ? `，失败 ${failures.length} 个` : ""}。`;
       operationMessage(output, message, Boolean(failures.length)); toast(message);
+      offerLocalCleanup(succeededFiles, `本次 ${succeededFiles.length} 个字体已上传成功，可以删掉本地副本释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
       return;
     }
     operationMessage(output, `查重完成，正在接收 ${unique.length} 个新字体，完成后交给后台…`);
@@ -2680,8 +2685,11 @@ async function importAssets(files) {
       state.importAssetIds = added.map(asset => asset.id);
       saveSessionIds("reeden-import-assets", state.importAssetIds);
       renderAssets(); renderImportedAssets();
+      const failedAssetFiles = new Set(failures.map(item => item.file));
+      const succeededAssetFiles = unique.filter(item => !failedAssetFiles.has(item.file)).map(item => item.file);
       const message = `已上传 ${added.length} 个收藏，重复跳过 ${duplicates} 个${failures.length ? `，失败 ${failures.length} 个` : ""}。`;
       operationMessage(output, message, Boolean(failures.length)); toast(message);
+      offerLocalCleanup(succeededAssetFiles, `本次 ${succeededAssetFiles.length} 个收藏已上传成功，可以删掉本地副本释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
       return;
     }
     operationMessage(output, `查重完成，正在接收 ${unique.length} 个新收藏…`);
@@ -2922,6 +2930,7 @@ async function queueFilesForLater(fileList) {
     finishTransferProgress(`${valid.length} 个原文件已暂存到共享库`);
     operationMessage(status, `已暂存 ${valid.length} 个文件。可在任意设备打开「后台任务」点「继续处理暂存文件」完成压缩与入库。`);
     toast("原文件已上传到共享库，稍后可继续处理");
+    offerLocalCleanup(valid, `本次 ${valid.length} 个原文件已暂存到共享库，可以删掉本地副本；需要重新处理时从云端读取即可。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
     loadJobs().catch(() => {});
   } catch (error) {
     operationMessage(status, `后台暂存失败：${error.message}`, true);
@@ -3025,6 +3034,191 @@ async function clearFinishedJobs() {
     await loadJobs();
   } catch (error) { toast(`清理失败：${error.message}`); }
 }
+/* Local file cleanup --------------------------------------------------------
+   A page cannot delete a file picked through <input type="file">: the browser
+   only hands over a read-only snapshot of the bytes. Two sources can remove it
+   afterwards: the Android shell exposes a small Storage Access Framework
+   bridge, and Chrome/Edge return a writable directory handle when the user
+   grants one. Everything else gets an honest list instead of a button that
+   cannot possibly work. */
+const pickedFileSources = new WeakMap();
+const LOCAL_CLEANUP_KEY = "reeden-local-cleanup";
+
+function localCleanupEnabled() {
+  try { return localStorage.getItem(LOCAL_CLEANUP_KEY) === "1"; } catch { return false; }
+}
+function nativeFileBridge() {
+  const bridge = window.RedGardenNative;
+  if (!bridge || typeof bridge.capability !== "function") return null;
+  try { return JSON.parse(String(bridge.capability() || "{}"))?.canDelete ? bridge : null; } catch { return null; }
+}
+function supportsDirectoryHandle() { return typeof window.showDirectoryPicker === "function"; }
+function refreshCleanupHint() {
+  const hint = $("#localCleanupHint");
+  if (!hint) return;
+  const mode = nativeFileBridge() ? "app" : supportsDirectoryHandle() ? "picker" : "none";
+  hint.dataset.cleanupMode = mode;
+  hint.textContent = mode === "app"
+    ? "本机文件删除：可用。上传成功后弹窗询问，删除由应用通过系统文件接口完成，系统可能再确认一次。"
+    : mode === "picker"
+      ? "本机文件删除：勾选上面的开关后，「选择文件夹」会申请写入权限，上传成功后弹窗询问是否删掉本地副本；用「选择文件」或拖入的文件只能手动删除。"
+      : "本机文件删除：当前浏览器不允许网页删除本机文件，上传后会提示你手动清理（手机 APK 与桌面 Chrome/Edge 支持自动删除）。";
+}
+function registerPickedFiles(items, source = null) {
+  const batch = { source, entries: [] };
+  for (const item of [...(items || [])]) {
+    if (!item) continue;
+    const file = typeof File !== "undefined" && item instanceof File ? item : item.file;
+    if (!file) continue;
+    const entry = {
+      file,
+      name: file.name || "",
+      size: Number.isFinite(item.size) ? item.size : Number(file.size) || 0,
+      path: item.path || file.webkitRelativePath || file.name || "",
+      parent: item.parent || null,
+    };
+    pickedFileSources.set(file, { batch, entry });
+    batch.entries.push(entry);
+  }
+  return batch;
+}
+async function collectDirectoryFiles(handle, prefix = "") {
+  const collected = [];
+  for await (const child of handle.values()) {
+    if (child.kind === "directory") { collected.push(...await collectDirectoryFiles(child, `${prefix}${child.name}/`)); continue; }
+    let file;
+    try { file = await child.getFile(); } catch { continue; }
+    collected.push({ file, path: `${prefix}${child.name}`, parent: handle });
+  }
+  return collected;
+}
+// Folder picking has two modes on purpose: the writable directory handle (so a
+// later delete is actually possible) and the plain webkitdirectory input.
+async function pickFolderWithAccess(inputId, handler) {
+  const input = $("#" + inputId);
+  if (!input) return;
+  if (!localCleanupEnabled() || !supportsDirectoryHandle()) { input.click(); return; }
+  let handle;
+  try {
+    handle = await window.showDirectoryPicker({ id: "reeden-import", mode: "readwrite" });
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    toast(`无法申请文件夹写入权限，改用普通选择：${error?.message || error?.name || "未知原因"}`);
+    input.click();
+    return;
+  }
+  try {
+    const collected = await collectDirectoryFiles(handle);
+    if (!collected.length) { toast("这个文件夹里没有可选文件"); return; }
+    registerPickedFiles(collected, { directory: handle });
+    await handler(collected.map(item => item.file));
+  } catch (error) {
+    toast(`读取文件夹失败：${error?.message || error?.name || "未知原因"}`);
+  }
+}
+function cleanupTargets(files) {
+  const bridge = nativeFileBridge();
+  const targets = [];
+  const seen = new Set();
+  for (const file of files || []) {
+    if (!file || seen.has(file)) continue;
+    seen.add(file);
+    const entry = pickedFileSources.get(file)?.entry;
+    targets.push({
+      file,
+      name: entry?.name || file.name || "未命名文件",
+      size: Number.isFinite(entry?.size) ? entry.size : Number(file.size) || 0,
+      path: entry?.path || file.webkitRelativePath || file.name || "",
+      parent: entry?.parent || null,
+      deletable: Boolean(entry?.parent || bridge),
+    });
+  }
+  return { targets, bridge };
+}
+function openCleanupDialog(targets, summary) {
+  const dialog = $("#cleanupDialog");
+  return new Promise(resolve => {
+    if (!dialog || typeof dialog.showModal !== "function") { resolve({ selected: [], bridge: null }); return; }
+    const deletable = targets.filter(target => target.deletable);
+    const list = $("#cleanupList");
+    list.innerHTML = targets.map((target, index) => {
+      const detail = [target.path && target.path !== target.name ? target.path : "", formatBytes(target.size), target.deletable ? "" : "当前环境不允许网页删除，请手动处理"].filter(Boolean).join(" · ");
+      return `<li class="${target.deletable ? "" : "is-locked"}"><label class="check-label"><input type="checkbox" data-cleanup-index="${index}" ${target.deletable ? "checked" : "disabled"} /><span><strong>${escapeHtml(target.name)}</strong><small>${escapeHtml(detail)}</small></span></label></li>`;
+    }).join("");
+    $("#cleanupDialogDescription").textContent = summary;
+    const boxes = $$("#cleanupList input[data-cleanup-index]");
+    const confirm = $("#cleanupConfirm");
+    const finish = value => { if (dialog.open) dialog.close(); resolve(value); };
+    const counters = () => {
+      const picked = boxes.filter(box => box.checked && !box.disabled).length;
+      $("#cleanupSummary").textContent = deletable.length ? `${picked} / ${deletable.length} 个可删除` : "没有可自动删除的文件";
+      $("#cleanupSelectAll").checked = deletable.length > 0 && picked === deletable.length;
+      $("#cleanupSelectAll").indeterminate = picked > 0 && picked < deletable.length;
+      $("#cleanupSelectAll").disabled = deletable.length === 0;
+      $("#cleanupSelectAllLabel").textContent = `全选（${deletable.length}）`;
+      confirm.disabled = picked === 0;
+      confirm.textContent = deletable.length ? `删除所选（${picked}）` : "知道了";
+    };
+    $("#cleanupSelectAll").onchange = event => { boxes.forEach(box => { if (!box.disabled) box.checked = event.target.checked; }); counters(); };
+    boxes.forEach(box => { box.onchange = counters; });
+    $("#cleanupConfirm").onclick = () => {
+      const selected = targets.filter((target, index) => { const box = boxes[index]; return box && box.checked && !box.disabled; });
+      finish({ selected, bridge: nativeFileBridge() });
+    };
+    $("#cleanupCancel").onclick = () => finish({ selected: [], bridge: null });
+    $("#closeCleanupDialog").onclick = () => finish({ selected: [], bridge: null });
+    dialog.oncancel = event => { event.preventDefault(); finish({ selected: [], bridge: null }); };
+    counters();
+    dialog.showModal();
+  });
+}
+async function removeDirectoryEntry(target) {
+  const parent = target.parent;
+  let permission = "granted";
+  if (typeof parent.queryPermission === "function") permission = await parent.queryPermission({ mode: "readwrite" });
+  if (permission !== "granted" && typeof parent.requestPermission === "function") permission = await parent.requestPermission({ mode: "readwrite" });
+  if (permission !== "granted") throw new Error("未获得该文件夹的写入授权");
+  await parent.removeEntry(target.name);
+}
+async function performLocalCleanup(selected, bridge) {
+  const byHandle = selected.filter(target => target.parent);
+  const byNative = selected.filter(target => !target.parent && bridge);
+  let deleted = 0;
+  const failures = [];
+  for (const target of byHandle) {
+    try { await removeDirectoryEntry(target); deleted++; }
+    catch (error) { failures.push({ name: target.name, reason: error?.message || "删除失败" }); }
+  }
+  if (byNative.length) {
+    try {
+      const payload = byNative.map(target => ({ name: target.name, size: target.size }));
+      const result = JSON.parse(String(bridge.deleteFiles(JSON.stringify(payload)) || "{}"));
+      if (result?.unsupported) failures.push({ name: `${byNative.length} 个文件`, reason: result.message || "系统不允许删除这些文件" });
+      else {
+        deleted += Number(result?.deleted) || 0;
+        for (const item of result?.failed || []) failures.push({ name: item?.name || "文件", reason: item?.reason || "删除失败" });
+      }
+    } catch (error) { failures.push({ name: `${byNative.length} 个文件`, reason: error?.message || "原生删除失败" }); }
+  }
+  return { deleted, failures };
+}
+// Called after a batch has actually landed in R2. Never blocks the import:
+// the caller keeps its operation lock release path, and a dismissed dialog just
+// leaves the files on disk.
+async function offerLocalCleanup(files, summary) {
+  const { targets } = cleanupTargets(files);
+  if (!targets.length) return;
+  if (!targets.some(target => target.deletable)) {
+    refreshCleanupHint();
+    toast(`${targets.length} 个文件已上传，本地副本需手动删除`);
+    return;
+  }
+  const { selected, bridge } = await openCleanupDialog(targets, summary);
+  if (!selected.length) return;
+  const result = await performLocalCleanup(selected, bridge);
+  if (result.failures.length) toast(`已删除 ${result.deleted} 个本地文件，${result.failures.length} 个失败：${result.failures[0].name}（${result.failures[0].reason}）`);
+  else toast(`已删除 ${result.deleted} 个本地文件`);
+}
 async function importUnifiedFiles(fileList) {
   if (state.operation) { toast("请等待当前批次处理完成"); return; }
   if (!resumingStaged && $("#queueForLater")?.checked) { await queueFilesForLater(fileList); return; }
@@ -3050,7 +3244,7 @@ async function importUnifiedFiles(fileList) {
   operationMessage(status, `本批已分流：${groups.theme.length} 个主题、${groups.font.length} 个字体、${groups.asset.length} 个收藏。${unsupported.length ? `已跳过不支持的文件：${unsupported.join("、")}` : ""}`, Boolean(unsupported.length));
 }
 $("#chooseThemes").addEventListener("click", () => $("#themeInput").click());
-$("#chooseThemeFolder").addEventListener("click", () => $("#themeFolderInput").click());
+$("#chooseThemeFolder").addEventListener("click", () => pickFolderWithAccess("themeFolderInput", analyzeFiles));
 $("#indexThemeFolder").addEventListener("click", () => $("#existingThemeFolderInput").click());
 $("#addThemeButton").addEventListener("click", () => { setView("import"); });
 $("#themeInput").addEventListener("change", async e => { await analyzeFiles(e.target.files); e.target.value = ""; });
@@ -3059,13 +3253,13 @@ $("#existingThemeFolderInput").addEventListener("change", async e => { await ind
 setupDropZone($("#themeDropZone"), analyzeFiles);
 $("#themeDropZone").addEventListener("click", () => { if (!state.operation) $("#themeInput").click(); });
 $("#chooseFonts").addEventListener("click", () => $("#fontInput").click());
-$("#chooseFontFolder").addEventListener("click", () => $("#fontFolderInput").click());
+$("#chooseFontFolder").addEventListener("click", () => pickFolderWithAccess("fontFolderInput", importFonts));
 $("#fontInput").addEventListener("change", async e => { await importFonts(e.target.files); e.target.value = ""; });
 $("#fontFolderInput").addEventListener("change", async e => { await importFonts(e.target.files); e.target.value = ""; });
 setupDropZone($("#fontDropZone"), importFonts);
 $("#fontDropZone").addEventListener("click", () => { if (!state.operation) $("#fontInput").click(); });
 $("#chooseAssets").addEventListener("click", () => $("#assetInput").click());
-$("#chooseAssetFolder").addEventListener("click", () => $("#assetFolderInput").click());
+$("#chooseAssetFolder").addEventListener("click", () => pickFolderWithAccess("assetFolderInput", importAssets));
 $("#assetInput").addEventListener("change", async e => { await importAssets(e.target.files); e.target.value = ""; });
 $("#assetFolderInput").addEventListener("change", async e => { await importAssets(e.target.files); e.target.value = ""; });
 setupDropZone($("#assetDropZone"), importAssets);
@@ -3074,8 +3268,14 @@ setupDropZone($("#unifiedDropZone"), importUnifiedFiles);
 $("#unifiedDropZone").addEventListener("click", () => { if (!state.operation) $("#unifiedInput").click(); });
 $("#unifiedInput").addEventListener("change", async event => { await importUnifiedFiles(event.target.files); event.target.value = ""; });
 $("#chooseUnifiedFiles").addEventListener("click", () => { if (!state.operation) $("#unifiedInput").click(); });
-$("#chooseUnifiedFolder").addEventListener("click", () => { if (!state.operation) $("#unifiedFolderInput").click(); });
+$("#chooseUnifiedFolder").addEventListener("click", () => { if (!state.operation) pickFolderWithAccess("unifiedFolderInput", importUnifiedFiles); });
 $("#unifiedFolderInput").addEventListener("change", async event => { await importUnifiedFiles(event.target.files); event.target.value = ""; });
+$("#localCleanupEnabled").checked = localCleanupEnabled();
+$("#localCleanupEnabled").addEventListener("change", event => {
+  try { localStorage.setItem(LOCAL_CLEANUP_KEY, event.target.checked ? "1" : "0"); } catch {}
+  toast(event.target.checked ? "已开启：选择文件夹时申请写入权限，上传成功后再询问是否删除" : "已关闭本地文件清理，上传后不会询问删除");
+});
+refreshCleanupHint();
 $("#refreshThemes").addEventListener("click", () => loadThemes(true));
 $("#themeSearchInput").addEventListener("input", event => { state.themeSearch = event.target.value; renderThemes(); });
 $("#themeAuthorFilter").addEventListener("change", event => { state.themeAuthor = event.target.value || "all"; renderThemes(); });

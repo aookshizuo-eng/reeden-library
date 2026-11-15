@@ -3,11 +3,15 @@ package xyz.aookshizuo.reedenlibrary;
 import android.app.Activity;
 import android.app.DownloadManager;
 import android.content.Intent;
+import android.database.Cursor;
+import android.graphics.Bitmap;
 import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.provider.DocumentsContract;
+import android.provider.OpenableColumns;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowManager;
@@ -15,6 +19,7 @@ import android.webkit.CookieManager;
 import android.webkit.DownloadListener;
 import android.webkit.MimeTypeMap;
 import android.webkit.ValueCallback;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
@@ -22,11 +27,17 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -38,6 +49,11 @@ public final class MainActivity extends Activity {
 
     private WebView webView;
     private ValueCallback<Uri[]> fileCallback;
+    // Documents the user opened through this app's own chooser. The web layer may
+    // only ask to delete these, matched by display name and size, so a stray call
+    // can never reach a file the user never picked here.
+    private final List<Uri> pickedUris = new ArrayList<>();
+    private volatile String currentPageUrl = HOME_URL;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -96,8 +112,14 @@ public final class MainActivity extends Activity {
         view.getSettings().setTextZoom(100);
         if (Build.VERSION.SDK_INT >= 33) view.getSettings().setAlgorithmicDarkeningAllowed(false);
         CookieManager.getInstance().setAcceptCookie(true);
+        view.addJavascriptInterface(new LocalFileBridge(), "RedGardenNative");
 
         view.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageStarted(WebView v, String url, Bitmap favicon) {
+                currentPageUrl = url == null ? "" : url;
+            }
+
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest request) {
                 return openBundledSiteAsset(request.getUrl(), request.getMethod());
@@ -119,10 +141,22 @@ public final class MainActivity extends Activity {
                 if (fileCallback != null) fileCallback.onReceiveValue(null);
                 fileCallback = callback;
                 try {
-                    Intent intent = params.createIntent();
+                    // OPEN_DOCUMENT (not GET_CONTENT) is what lets the provider
+                    // hand back a deletable document: we ask for write access up
+                    // front, so "delete the local copy after upload" can actually
+                    // be honoured instead of failing at the end of a long upload.
+                    Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
                     intent.addCategory(Intent.CATEGORY_OPENABLE);
-                    if (params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE) {
-                        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                    intent.setType("*/*");
+                    intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE);
+                    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                            | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                    // accept may be a list of extensions (.red, .ttf) that the
+                    // document UI cannot filter on; only real MIME types help.
+                    String[] accept = params.getAcceptTypes();
+                    if (accept != null && accept.length > 0 && accept[0] != null && accept[0].contains("/")) {
+                        intent.putExtra(Intent.EXTRA_MIME_TYPES, accept);
                     }
                     startActivityForResult(intent, FILE_CHOOSER_REQUEST);
                 } catch (Exception error) {
@@ -215,8 +249,130 @@ public final class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode != FILE_CHOOSER_REQUEST || fileCallback == null) return;
         Uri[] results = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
+        synchronized (pickedUris) {
+            pickedUris.clear();
+            if (results != null) {
+                for (Uri uri : results) if (uri != null) pickedUris.add(uri);
+            }
+        }
         fileCallback.onReceiveValue(results);
         fileCallback = null;
+    }
+
+    private boolean isTrustedPage() {
+        try {
+            return isSiteUrl(Uri.parse(currentPageUrl == null ? "" : currentPageUrl));
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private static final class DocumentInfo {
+        final String name;
+        final long size;
+
+        DocumentInfo(String name, long size) {
+            this.name = name;
+            this.size = size;
+        }
+    }
+
+    private DocumentInfo describe(Uri uri) {
+        try (Cursor cursor = getContentResolver().query(uri,
+                new String[]{OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                if (cursor.isNull(0)) return null;
+                String name = cursor.getString(0);
+                long size = cursor.isNull(1) ? -1L : cursor.getLong(1);
+                return name == null ? null : new DocumentInfo(name, size);
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    // Removing the bookmark after a successful match keeps a second call from
+    // deleting a different file that happens to share the same name.
+    private Uri takePickedUri(String name, long size) {
+        synchronized (pickedUris) {
+            for (Iterator<Uri> iterator = pickedUris.iterator(); iterator.hasNext(); ) {
+                Uri uri = iterator.next();
+                DocumentInfo info = describe(uri);
+                if (info == null) {
+                    iterator.remove();
+                    continue;
+                }
+                if (!name.equals(info.name)) continue;
+                if (size >= 0 && info.size >= 0 && size != info.size) continue;
+                iterator.remove();
+                return uri;
+            }
+            return null;
+        }
+    }
+
+    private String deleteDocument(Uri uri) {
+        try {
+            if (DocumentsContract.deleteDocument(getContentResolver(), uri)) return null;
+        } catch (Exception ignored) {
+        }
+        try {
+            if (getContentResolver().delete(uri, null, null) > 0) return null;
+        } catch (Exception ignored) {
+        }
+        return "系统或来源应用不允许删除该文件";
+    }
+
+    private static JSONObject failure(String name, String reason) {
+        JSONObject object = new JSONObject();
+        try {
+            object.put("name", name == null ? "" : name);
+            object.put("reason", reason);
+        } catch (Exception ignored) {
+        }
+        return object;
+    }
+
+    public final class LocalFileBridge {
+        @JavascriptInterface
+        public String capability() {
+            return isTrustedPage() ? "{\"canDelete\":true}" : "{\"canDelete\":false}";
+        }
+
+        @JavascriptInterface
+        public String deleteFiles(String payload) {
+            if (!isTrustedPage()) {
+                return "{\"deleted\":0,\"failed\":[],\"unsupported\":true,\"message\":\"当前页面不在受信任站点，未执行删除\"}";
+            }
+            int deleted = 0;
+            JSONArray failed = new JSONArray();
+            try {
+                JSONArray requested = new JSONArray(payload == null || payload.isEmpty() ? "[]" : payload);
+                for (int index = 0; index < requested.length(); index++) {
+                    JSONObject item = requested.optJSONObject(index);
+                    if (item == null) continue;
+                    String name = item.optString("name", "");
+                    long size = item.optLong("size", -1L);
+                    Uri match = takePickedUri(name, size);
+                    if (match == null) {
+                        failed.put(failure(name, "这次选择里没有这个文件，请手动删除"));
+                        continue;
+                    }
+                    String error = deleteDocument(match);
+                    if (error == null) deleted++;
+                    else failed.put(failure(name, error));
+                }
+            } catch (Exception error) {
+                failed.put(failure("", "删除请求解析失败：" + error.getMessage()));
+            }
+            JSONObject result = new JSONObject();
+            try {
+                result.put("deleted", deleted);
+                result.put("failed", failed);
+            } catch (Exception ignored) {
+            }
+            return result.toString();
+        }
     }
 
     @Override

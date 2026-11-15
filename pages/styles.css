@@ -296,6 +296,18 @@ button:disabled { cursor: not-allowed; opacity: .65; }
 .preview-dialog-head h2 { font-size: 17px; margin: 3px 0 12px; }
 .preview-description { margin: 0 0 16px; color: var(--muted); font-size: 13px; }
 .preview-dialog > img { display: block; max-width: 100%; max-height: calc(100svh - 172px); width: auto; height: auto; margin: 0 auto; object-fit: contain; }
+.cleanup-dialog { width: min(620px, calc(100vw - 32px)); }
+.cleanup-hint { margin: 6px 0 0; }
+.cleanup-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+.cleanup-list { list-style: none; margin: 0; padding: 0; max-height: min(320px, 42svh); overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+.cleanup-list:empty { display: none; }
+.cleanup-list li + li { border-top: 1px solid var(--border); }
+.cleanup-list label { display: flex; align-items: flex-start; gap: 10px; padding: 9px 12px; }
+.cleanup-list strong { display: block; font-size: 13px; word-break: break-all; }
+.cleanup-list small { color: var(--muted); font-size: 12px; word-break: break-all; }
+.cleanup-list li.is-locked { background: var(--raised); }
+.cleanup-list li.is-locked strong { color: var(--muted); }
+.cleanup-note { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
 
 .nav-count { margin-left: auto; min-width: 20px; text-align: center; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
 .import-tabs { display: flex; gap: 5px; margin-bottom: 18px; }

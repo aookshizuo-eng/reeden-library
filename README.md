@@ -18,6 +18,8 @@ Android APK 加载 `https://aookshizuo-eng.github.io/reeden-library/`，它来�
 
 加密 RED v2 只把 4–5 KB 的「文件头 + 加密清单」发给 Worker 的 `/api/private/directory` 解析资源目录，图片字节始终留在设备里；压缩后由 `/api/private/seal` 只重封文件头，设备本地拼装完整包。CPU 密集的 ZIP 解析、图片解码与 WebP 编码在 `free_codec_worker.js` 的 Web Worker 池里并发执行，不再阻塞界面。旧版 Worker 不存在这些接口时会自动回退到整包 `/api/private/repack`。
 
+上传成功后会弹出「删除本地文件」对话框：列出这一批真正写进 R2 的文件，默认全选，可以逐项取消或整批保留。手机上由 APK 的原生桥用系统 Storage Access Framework 删除（系统可能再确认一次）；桌面 Chrome/Edge 在勾选导入页的「清理本地文件」后，「选择文件夹」改走 File System Access 的读写目录句柄，删的是目录里那份真实文件。用「选择文件」、拖拽或在普通手机浏览器里上传时，网页没有删除本机文件的权限，此时不会弹出一个按不动的删除框，而是提示需要手动清理。
+
 上传进度写入共享 R2 的持久化任务，刷新页面或换一台设备都能看到；勾选导入页的「后台暂存」会先把原文件上传到 R2 `staging/`，之后在任意设备打开页面就会自动接着处理并完成压缩入库（不需要再点按钮，「后台任务」里的开关可以关掉自动继续）。处理完成后暂存的原文件会被删除，不会在 R2 里长期留第二份。服务器/命令行也可以上传：`REEDEN_SYNC_TOKEN=<Token> node scripts/remote-import.mjs --dir <目录>`，可选 `--123-token` 把原始 RED 备份到 123 云盘。网页端在「存储设置 → 原始 RED 备份到 123 云盘」填入会话 Token 后，确认主题时会自动把未压缩原包备份到 123；Token 只保存在设备浏览器，不写进仓库或 R2。保存设置时会自动做一次只读连接校验，也可点「测试连接」复验：只列云盘根目录和备份目录，不会创建文件夹或上传测试文件，状态栏会显示是否连上、根目录项目数与备份目录是否存在。
 
 要确认「真的有备份」：点「查看备份清单」会列出备份目录内的文件（名称、大小、文件数、合计字节），并与共享库里的主题记录对账，显示已备份 / 失败 / 未备份数量；主题卡片也会显示「123 已备份」「123 未备份」或「123 备份失败」徽标。清单与对账都是只读的。备份只在「导入 .red → 确认并压缩保存」时发生，字体、SVG/HTML、预览图不写入 123。若想单独验证写入链路，点「验证备份写入」会在备份目录下新建 `_verify/` 子目录并上传一个固定内容的小 `.red` 测试文件（会保留在云盘），成功后显示文件路径、大小和 FileId；重复点击会复用同一文件，不会重复占用空间。
@@ -36,8 +38,8 @@ R2 对象键只保留可读名：`compressed/少女心事-压缩.red`、`origina
 
 ## Android APK
 
-`android/` 是一个轻量 WebView 壳：它把同一份 Pages 前端打进 APK，并保留 GitHub Pages origin，因此手机和电脑填写同一个 R2 Worker 后共用同一套主题、字体和预览库。APK 需要联网访问 R2；它不会把 R2 密钥或 123 会话打包进去。
+`android/` 是一个轻量 WebView 壳：它把同一份 Pages 前端打进 APK，并保留 GitHub Pages origin，因此手机和电脑填写同一个 R2 Worker 后共用同一套主题、字体和预览库。APK 需要联网访问 R2；它不会把 R2 密钥或 123 会话打包进去。文件选择器使用 `ACTION_OPEN_DOCUMENT` 并申请写权限，因此「上传成功后删除本地文件」只能删本次通过应用选择的文件，按显示名与大小匹配；网页层只在本站点 origin 下拿得到 `RedGardenNative` 桥。
 
-没有 Android Studio 时也可以用 `android/build-apk.sh` 手动打包：脚本使用 `android/toolchain/` 下的 JDK 17、build-tools 35 和 platform 35（华为/腾讯镜像均可下载）依次跑 aapt2 → javac → d8 → zipalign → apksigner，产出 `android/build/red-garden-1.1.1.apk`，签名为仓库里的 debug keystore。`android/toolchain/` 与 `android/build/` 已在 `.gitignore` 中，不要提交。
+没有 Android Studio 时也可以用 `android/build-apk.sh` 手动打包：脚本使用 `android/toolchain/` 下的 JDK 17、build-tools 35 和 platform 35（华为/腾讯镜像均可下载）依次跑 aapt2 → javac → d8 → zipalign → apksigner，产出 `android/build/red-garden-1.1.2.apk`，签名为仓库里的 debug keystore。`android/toolchain/` 与 `android/build/` 已在 `.gitignore` 中，不要提交。
 
 推送仓库后，在 GitHub Actions 运行 **Build Red Garden Android APK**，下载构建产物 `red-garden-android-debug` 里的 `app-debug.apk`。这是 debug 签名包，适合个人安装；如果公开分发，需要换成自己的 release keystore。
