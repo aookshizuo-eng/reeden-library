@@ -886,6 +886,7 @@ async function pan123DirectSignIn(username, password) {
   const token = String(data?.data?.token || "");
   if (![0, 200].includes(code) || !token) {
     const detail = String(data?.message || data?.msg || "").trim();
+    if (!detail && Number(code) === -1) throw new Error("账号或密码不正确。若账号开了二次验证，请改用「扫码连接」。");
     throw new Error(detail || `123 登录失败（HTTP ${response.status}）`);
   }
   return token;
@@ -924,7 +925,6 @@ async function loginPan123Quick(event) {
     }
     if (!token) throw new Error(directNote || "123 登录接口没有返回会话");
     // 先把密码从 DOM 里清掉，再保存 Token。
-    form.reset();
     const input = $("#pan123BackupToken");
     if (input) input.value = token;
     try {
@@ -938,6 +938,8 @@ async function loginPan123Quick(event) {
     const message = error instanceof TypeError ? "浏览器没能连上 123 登录接口（可能被扩展或网络拦截）。" : error.message;
     operationMessage(output, `123 登录失败：${message}。如果提示需要验证码，请改用「扫码连接」，或在下方直接粘贴会话 Token。`, true);
   } finally {
+    // 密码用完即弃：成功失败都不留在表单里。
+    form.reset();
     if (button) button.disabled = false;
   }
 }
@@ -3803,7 +3805,9 @@ async function startPan123Qr() {
   // 以前这里遇到 document.hidden / 有后台任务就直接 return，手机上点了没反应，
   // 也没任何提示。现在只拦真正会冲突的操作，并且把原因写出来。
   if (state.operation) { operationMessage($("#pan123QrStatus"), "当前有操作正在进行，完成后再生成二维码。", true); return; }
-  if (activeJobs().length) { operationMessage($("#pan123QrStatus"), "后台任务正在处理，完成后再扫码登录。", true); return; }
+  // 只有本机后端模式的扫码要占用后端任务队列；浏览器直连 123 不碰 Worker，
+  // 后台有任务在跑时也照样能扫，不然用户看到的就是「点了没反应」。
+  if (!browserSyncEnabled() && activeJobs().length) { operationMessage($("#pan123QrStatus"), "后台任务正在处理，完成后再扫码登录。", true); return; }
   stopPan123Qr();
   // 浏览器同步模式直接连 123：不经过 Worker 就没有「海外 IP 强制验证码」。
   if (browserSyncEnabled()) { await startPan123BrowserQr(); return; }
