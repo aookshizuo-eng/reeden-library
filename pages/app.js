@@ -397,8 +397,90 @@ function privatePrefix(raw) {
   if (!Number.isSafeInteger(prefixLength) || prefixLength > raw.length) throw new Error("RED v2 加密目录长度无效");
   return raw.subarray(0, prefixLength);
 }
-async function privateDirectory(prefix) {
-  const response = await fetch(apiUrl("/api/private/directory"), {
+function indexOfBytes(haystack, needle, from = 0) {
+  if (!needle?.length) return -1;
+  const first = needle[0];
+  for (let index = Math.max(0, from); index <= haystack.length - needle.length; index++) {
+    if (haystack[index] !== first) continue;
+    let offset = 1;
+    while (offset < needle.length && haystack[index + offset] === needle[offset]) offset++;
+    if (offset === needle.length) return index;
+  }
+  return -1;
+}
+// Byte-level brace matching is safe on UTF-8: continuation bytes are >= 0x80,
+// so { } " and \ can never appear inside a multi-byte character.
+function jsonObjectAt(raw, openIndex, limit = 4 * 1024 * 1024) {
+  let depth = 0, inString = false, escaped = false;
+  for (let index = openIndex; index < raw.length && index - openIndex < limit; index++) {
+    const byte = raw[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (byte === 0x5c) escaped = true;
+      else if (byte === 0x22) inString = false;
+      continue;
+    }
+    if (byte === 0x22) inString = true;
+    else if (byte === 0x7b) depth++;
+    else if (byte === 0x7d && !--depth) return raw.subarray(openIndex, index + 1);
+  }
+  return null;
+}
+// A private RED keeps its images in a plain sequential area, and Reeden writes
+// the theme JSON there unencrypted after the images. The encrypted manifest
+// carries no name/author, so without this the review card can only fall back to
+// the file name and shows "作者未记录".
+function privatePlainIdentity(raw, from = 0) {
+  const marker = new TextEncoder().encode('"author"');
+  const decoder = new TextDecoder("utf-8");
+  const positions = [];
+  let at = indexOfBytes(raw, marker, from);
+  while (at >= 0 && positions.length < 24) { positions.push(at); at = indexOfBytes(raw, marker, at + 1); }
+  let name = "", author = "";
+  const collect = node => {
+    const identity = { name: "", author: "" };
+    const visit = value => {
+      if (!value || typeof value !== "object") return;
+      if (!identity.name) {
+        const candidate = value.name || value.title || value.themeName;
+        if (typeof candidate === "string" && candidate.trim()) identity.name = candidate.trim();
+      }
+      if (!identity.author) {
+        const candidate = value.author || value.creator || value.designer;
+        if (typeof candidate === "string" && candidate.trim()) identity.author = candidate.trim();
+      }
+      for (const child of Object.values(value)) if (child && typeof child === "object") visit(child);
+    };
+    visit(node);
+    return identity;
+  };
+  // The nearest brace before "author" is usually the nested "light"/"dark"
+  // object, which has an author but no name. Walk outwards through enclosing
+  // objects and merge what each level contributes.
+  for (const position of positions.reverse()) {
+    let scan = position;
+    for (let level = 0; level < 8; level++) {
+      let open = scan;
+      for (let back = 0; back < 2 * 1024 * 1024 && open > from; back++, open--) if (raw[open] === 0x7b) break;
+      if (raw[open] !== 0x7b) break;
+      const slice = jsonObjectAt(raw, open);
+      if (slice) {
+        let value = null;
+        try { value = JSON.parse(decoder.decode(slice)); } catch { value = null; }
+        if (value) {
+          const identity = collect(value);
+          if (identity.name && !name) name = identity.name;
+          if (identity.author && !author) author = identity.author;
+          if (name && author) break;
+        }
+      }
+      scan = open - 1;
+    }
+    if (name && author) break;
+  }
+  return name || author ? { name, author } : null;
+}
+async function privateDirectory(prefix) {  const response = await fetch(apiUrl("/api/private/directory"), {
     method: "POST", headers: requestHeaders({"Content-Type": "application/json"}),
     body: JSON.stringify({prefix_base64: base64Bytes(prefix)}),
   });
@@ -2151,6 +2233,14 @@ async function analyzeFiles(files) {
           entries = await codec.extractPrivatePreviewImages(raw);
         }
         const identity = metadataFromEntries(entries, file.name);
+        // The private container encrypts its directory, so the ZIP metadata
+        // pass finds nothing. Recover name/author from the plain JSON Reeden
+        // writes after the images instead of settling for the file name.
+        if (String(inspection?.format || "").includes("private")) {
+          const plain = privatePlainIdentity(raw);
+          if (plain?.name) identity.name = plain.name;
+          if (plain?.author) identity.author = plain.author;
+        }
         let previewUrl = "";
         let previewDetails = { kind: previewCompositionKind(entries), simulation: true, encrypted_source: inspection.format === "red_private_v2" };
         if (entries.length) {
