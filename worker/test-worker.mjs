@@ -261,6 +261,34 @@ const verifyFetch = async (url, init = {}) => {
   else if (p === "/b/api/user/info") data = {Nickname: "测试用户"};
   return new Response(JSON.stringify({code: 0, data}), {status: 200, headers: {"Content-Type": "application/json"}});
 };
+// 网页端账号密码登录：密码只在这一跳里出现，响应只回会话 Token。
+const loginCalls = [];
+const loginFetch = async (url, init = {}) => {
+  const u = new URL(String(url));
+  loginCalls.push({host: u.host, path: u.pathname, body: init.body});
+  if (u.pathname === "/api/user/sign_in") return new Response(JSON.stringify({code: 200, data: {token: "jwt-session"}}), {status: 200, headers: {"Content-Type": "application/json"}});
+  if (u.pathname === "/b/api/user/info") return new Response(JSON.stringify({code: 0, data: {Nickname: "测试用户"}}), {status: 200, headers: {"Content-Type": "application/json"}});
+  return new Response("{}", {status: 200, headers: {"Content-Type": "application/json"}});
+};
+const loginRequest = new Request("https://worker.example/api/storage/123/login", {method: "POST", headers: headers({"Content-Type": "application/json"}), body: JSON.stringify({username: "13800000000", password: "secret"})});
+const login = await __test.loginPan123(loginRequest, env, loginFetch);
+assert.equal(login.status, 200);
+const loginResult = await login.json();
+assert.equal(loginResult.ok, true);
+assert.equal(loginResult.token, "jwt-session");
+assert.equal(loginResult.nickname, "测试用户");
+const signInCall = () => loginCalls.filter(call => call.path === "/api/user/sign_in").pop();
+assert.equal(signInCall().host, "login.123pan.com");
+assert.deepEqual(JSON.parse(signInCall().body), {passport: "13800000000", password: "secret", remember: true});
+const mailLogin = await __test.loginPan123(new Request("https://worker.example/api/storage/123/login", {method: "POST", headers: headers({"Content-Type": "application/json"}), body: JSON.stringify({username: "a@b.com", password: "x"})}), env, loginFetch);
+assert.equal(mailLogin.status, 200);
+assert.deepEqual(JSON.parse(signInCall().body), {mail: "a@b.com", password: "x", type: 2});
+const badLoginFetch = async () => new Response(JSON.stringify({code: 1, message: "账号或密码错误"}), {status: 200, headers: {"Content-Type": "application/json"}});
+const badLogin = await __test.loginPan123(new Request("https://worker.example/api/storage/123/login", {method: "POST", headers: headers({"Content-Type": "application/json"}), body: JSON.stringify({username: "13800000000", password: "x"})}), env, badLoginFetch);
+assert.equal(badLogin.status, 422);
+assert.equal((await badLogin.json()).error, "账号或密码错误");
+const loginDenied = await __test.loginPan123(new Request("https://worker.example/api/storage/123/login", {method: "POST", headers: {Origin: origin, "Content-Type": "application/json"}, body: JSON.stringify({username: "a", password: "b"})}), env, loginFetch);
+assert.equal(loginDenied.status, 401);
 const verifyRequest = new Request("https://worker.example/api/backup/123/verify", {method: "POST", headers: headers({"X-Pan123-Token": "device-session-token", "X-Pan123-Folder": "Red-Garden-Backup"})});
 const verified = await __test.verifyPan123(verifyRequest, env, verifyFetch);
 assert.equal(verified.status, 200);

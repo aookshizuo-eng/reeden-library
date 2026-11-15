@@ -442,6 +442,8 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 /* ---------- 手机底部导航 ---------- */
 /* 基础隐藏，只在手机断点打开。桌面保持左侧栏，手机上左上角的抽屉太难按到。 */
 .mobile-tabs, .mobile-more { display: none; }
+.pan123-quick-login { display: grid; gap: 12px; min-width: 0; }
+.pan123-quick-login .form-actions { margin: 0; }
 .web-login-block {
   display: grid; gap: 8px; padding: 12px 13px;
   border: 1px dashed var(--control); border-radius: var(--radius-control); background: var(--surface);
@@ -666,6 +668,9 @@ button:disabled { cursor: not-allowed; opacity: .5; }
   .pending-card .pending-size { display: none; }
   /* 网页登录是 123 备份的主入口，占满一行并给足触控高度 */
   .web-login-block button { justify-self: stretch; width: 100%; min-height: 46px; }
+  .pan123-quick-login .form-actions { flex-direction: column; align-items: stretch; }
+  .pan123-quick-login .form-actions button { width: 100%; min-height: 44px; }
+  .pan123-quick-login .form-actions .text-button { min-height: 38px; }
   .topbar { position: fixed; top: 0; left: 0; right: 0; height: 54px; z-index: 15; background: var(--surface); border-bottom: 1px solid var(--rule); padding: 0 12px; gap: 8px; }
   .crumbs { margin-right: auto; margin-left: 0; }
   .crumbs > span:first-child, .crumb-sep { display: none; }

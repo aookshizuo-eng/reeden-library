@@ -558,20 +558,24 @@ async function mapLargePrivateConfigs(entries, slice, replacements, codec) {
   const result = new Map();
   if (typeof codec?.sha256Hex !== "function") return result;
   const maps = privateRefMaps(replacements);
-  if (!maps.tokens.size) return result;
   for (const entry of entries) {
     if (!/\.json$/i.test(entry.path)) continue;
     const bytes = slice(entry);
     if (bytes.length <= PRIVATE_CONFIG_INLINE_LIMIT) continue;
     let text;
     try { text = new TextDecoder().decode(bytes); } catch { continue; }
-    const lower = text.toLowerCase();
-    // 没有任何被替换的图片引用：原样保留，连上传都省掉。
-    if (![...maps.tokens].some(token => lower.includes(token))) continue;
     let document;
     try { document = JSON.parse(text); } catch { continue; }
-    const mapped = new TextEncoder().encode(JSON.stringify(mapPrivateRefsClient(document, maps)));
-    result.set(entry.path, {bytes: mapped, sha256: await codec.sha256Hex(mapped)});
+    const lower = text.toLowerCase();
+    const touched = maps.tokens.size > 0 && [...maps.tokens].some(token => lower.includes(token));
+    // 关键：只要配置超过 512 KB 就一律以 mapped 形式提交，哪怕里面没有被替换的
+    // 图片引用。以前「没有引用就跳过」会让这份大 JSON 以 base64 明文回给 Worker，
+    // Worker 再去 JSON.parse 就撞上 1 MB 上限与 10 ms CPU，整包重封直接 422。
+    // 现在 Worker 对这些大配置只登记字节和 sha256，既不解析也不算大小账。
+    const mappedBytes = touched
+      ? new TextEncoder().encode(JSON.stringify(mapPrivateRefsClient(document, maps)))
+      : bytes.slice();
+    result.set(entry.path, {bytes: mappedBytes, sha256: await codec.sha256Hex(mappedBytes)});
   }
   return result;
 }
@@ -736,8 +740,7 @@ async function verifyPan123Backup() {
     if (response.status === 401) throw new Error("同步写入 Token 无效或未保存，请先在「多设备访问」重新保存");
     if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
     const who = data.nickname ? `（${data.nickname}）` : "";
-    operationMessage(output, `已连接 123 云盘${who}：根目录 ${data.rootItems} 项，备份目录 ${data.folder || "云盘根目录"}${data.folderExists ? "已存在" : "将在首次备份时创建"}。只读校验，未写入任何文件。`);
-    refreshPan123BackupList({quiet: true}).catch(() => {});
+    operationMessage(output, `已连接 123 云盘${who}，备份目录 ${data.folder || "云盘根目录"}。`);
     return true;
   } catch (error) {
     operationMessage(output, `123 云盘连接失败：${error.message}`, true);
@@ -793,6 +796,47 @@ function acceptPan123Tokens(payload) {
     await tryOne(index + 1);
   };
   tryOne(0).catch(() => {});
+}
+// 网页端账号密码登录：浏览器读不到 123 的跨域响应，也不该让用户去开发者工具里
+// 抄 Token，所以这一次登录请求交给同步 Worker 代发（/api/storage/123/login），
+// 只回会话 Token 与昵称。密码不落盘、不写 R2、不写仓库。
+async function loginPan123Quick(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const output = $("#pan123BackupStatus");
+  const username = String(form.elements.username?.value || "").trim();
+  const password = String(form.elements.password?.value || "");
+  if (!username || !password) { operationMessage(output, "请填写 123 云盘账号和密码。", true); return; }
+  if (!apiBase) { operationMessage(output, "请先在「多设备访问」保存同步 API 地址与写入 Token：登录请求要经它转发。", true); return; }
+  const button = $("#pan123QuickLoginButton");
+  if (button) button.disabled = true;
+  operationMessage(output, "正在登录 123 云盘…");
+  try {
+    const response = await fetch(apiUrl("/api/storage/123/login"), {
+      method: "POST", headers: requestHeaders({"Content-Type": "application/json"}),
+      body: JSON.stringify({username, password}),
+    });
+    const text = await response.text();
+    let data = {}; try { data = text ? JSON.parse(text) : {}; } catch {}
+    if (response.status === 401) throw new Error("同步写入 Token 无效或未保存，请先在「多设备访问」重新保存");
+    if (!response.ok || !data.ok || !data.token) throw new Error(data.error || `HTTP ${response.status}`);
+    // 先把密码从 DOM 里清掉，再保存 Token。
+    form.reset();
+    const input = $("#pan123BackupToken");
+    if (input) input.value = data.token;
+    try {
+      localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, data.token);
+      localStorage.setItem(PAN123_FOLDER_STORAGE_KEY, String($("#pan123BackupFolder")?.value || "").trim() || "Red-Garden-Backup");
+    } catch {}
+    const who = data.nickname ? `（${data.nickname}）` : "";
+    operationMessage(output, `已连接 123 云盘${who}。原包会在确认主题时备份到 123，压缩包和预览仍存 R2。`);
+    toast("123 云盘已连接");
+  } catch (error) {
+    const message = error instanceof TypeError ? "暂时无法连接同步 API，请检查网络与地址。" : error.message;
+    operationMessage(output, `123 登录失败：${message}。若提示需要验证码，请改用「网页登录」，或在下方直接粘贴会话 Token。`, true);
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
 async function webLoginPan123() {
   const output = $("#pan123BackupStatus");
@@ -854,6 +898,10 @@ async function refreshPan123BackupList({quiet = false} = {}) {
     const backed = themes.filter(theme => theme.original_123?.key);
     const failed = themes.filter(theme => !theme.original_123?.key && theme.original_123_error);
     const missing = themes.filter(theme => !theme.original_123?.key && !theme.original_123_error);
+    // quiet 是「登录 / 验证之后顺手刷新一下」，用户此刻只想知道有没有连上；
+    // 把几十个文件名铺到面板里既答非所问，又把下面的按钮顶出视野。清单只在
+    // 明确点「查看备份清单」时才渲染。
+    if (quiet) return data;
     const parts = [
       `<div class="backup-head">123 云盘 / ${escapeHtml(data.folder || "云盘根目录")}</div>`,
       `<div>${data.folderExists ? "目录已存在" : "目录尚未创建（首次备份时自动创建）"}：文件 ${data.fileCount} 个，其中 <code>.red</code> 原包 ${redFiles.length} 个，合计 ${formatBytes(data.totalBytes)}；${folders.length} 个子目录${data.truncated ? "（仅显示前 1000 项）" : ""}。</div>`,
@@ -906,8 +954,7 @@ async function verifyPan123Write() {
     const text = await response.text();
     let data = {}; try { data = text ? JSON.parse(text) : {}; } catch {}
     if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
-    operationMessage(output, `123 写入验证通过：${data.key}（${formatBytes(data.bytes)}，${data.reused ? "已存在并复用" : "新建"}，FileId ${data.fileId}）。测试文件保留在 _verify/ 子目录，不会混进真实原包。`);
-    await refreshPan123BackupList({quiet: true});
+    operationMessage(output, `123 写入验证通过：${data.key}（${formatBytes(data.bytes)}，${data.reused ? "已存在并复用" : "新建"}）。测试文件保留在 _verify/ 子目录，不会混进真实原包。`);
     return true;
   } catch (error) {
     operationMessage(output, `123 写入验证失败：${error.message}（R2 原包不受影响）`, true);
@@ -3389,8 +3436,17 @@ async function savePan123Credentials(event, kind) {
   try {
     const response = await fetch(apiUrl(`/api/storage/123/${kind === "login" ? "login" : "session"}`), { method: "POST", headers: requestHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(payload) });
     const result = await response.json().catch(() => ({}));
-    if (!response.ok || result.ok === false || result.configured === false || (kind === "login" && result.authenticated !== true)) {
-      throw new Error(kind === "login" ? `登录未完成（${response.status}）。请检查账号信息；如需验证码，请在自己的浏览器登录，再使用下方的已有会话。` : `会话保存未完成（${response.status}）。请重新检查 Token 后提交。`);
+    if (!response.ok || result.ok === false || result.configured === false || (kind === "login" && result.authenticated !== true && !result.token)) {
+      throw new Error(kind === "login" ? `登录未完成（${result.error || response.status}）。请检查账号信息；如需验证码，请改用「网页登录」，或使用下方的已有会话。` : `会话保存未完成（${response.status}）。请重新检查 Token 后提交。`);
+    }
+    // 网页版的密码登录由 Worker 代发、只回 Token，会话统一存在本机浏览器；
+    // 这条路径不需要再去问服务端「配置好没有」。
+    if (kind === "login" && result.token) {
+      const input = $("#pan123BackupToken");
+      if (input) input.value = result.token;
+      try { localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, result.token); } catch {}
+      operationMessage(output, `登录成功${result.nickname ? `（${result.nickname}）` : ""}，会话已保存在本机。备份目录在「原始 RED 备份到 123 云盘」里设置。`);
+      return;
     }
     await refreshPan123Session(result.source);
     operationMessage(output, kind === "login" ? "登录成功，会话已加密保存，账号与密码输入已清空。保存备份配置后，可运行上传验证。" : "会话已加密保存，Token 输入已清空。保存备份配置后，请运行上传验证确认会话有效。");
@@ -4077,13 +4133,14 @@ $("#savePan123Backup").addEventListener("click", () => {
   } catch { operationMessage($("#pan123BackupStatus"), "当前浏览器无法保存设置，请检查隐私模式设置。", true); }
 });
 $("#verifyPan123Backup").addEventListener("click", () => { verifyPan123Backup(); });
+$("#pan123QuickLogin")?.addEventListener("submit", loginPan123Quick);
 $("#pan123WebLogin")?.addEventListener("click", webLoginPan123);
 (() => {
   const hint = $("#pan123WebLoginHint");
   if (!hint) return;
   hint.textContent = nativeAppBridge()?.caps?.pan123Login
-    ? "在应用内打开 123 云盘登录页，用账号密码登录后会自动取回会话 Token 并验证。"
-    : "浏览器会新开 123 云盘网页；登录后从开发者工具复制 Authorization 里的会话 Token 填到下面。";
+    ? "登录请求由同步 Worker 代发，密码不回传、不落盘；遇到验证码时点「改用网页登录」，在应用内登录页完成后再取回会话。"
+    : "登录请求由同步 Worker 代发，密码不回传、不落盘；遇到验证码时点「改用网页登录」，在浏览器登录后用 Token 兜底。";
 })();
 $("#listPan123Backup").addEventListener("click", () => { refreshPan123BackupList(); });
 $("#verifyPan123Write").addEventListener("click", () => { verifyPan123Write(); });

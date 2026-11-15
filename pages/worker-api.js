@@ -1066,6 +1066,53 @@ async function findPan123Folder(token, path, fetchImpl) {
   }
   return {exists: true, parent};
 }
+/** 网页端账号密码登录 123：浏览器既拿不到 123 的跨域响应，也不该把密码交给
+ * 一个陌生页面，所以这一次登录请求由 Worker 代发，成功只回会话 Token。
+ * 密码只在这次请求的内存里过一遍——不写日志、不落 R2、不写 KV；返回体里也
+ * 只有 token 和昵称。手机号与邮箱走 123 自己的两种表单形状。 */
+const PAN123_SIGN_IN = "https://login.123pan.com/api/user/sign_in";
+async function loginPan123(request, env, fetchImpl = fetch) {
+  if (!originAllowed(request, env, {write: true})) return json({error: "Origin 不在允许列表中"}, 403, request, env);
+  if (!checkWriteToken(request, env)) return json({error: "123 登录需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
+  let payload;
+  try { payload = await request.json(); } catch { return json({error: "请求体不是有效 JSON"}, 400, request, env); }
+  const username = String(payload?.username || "").trim();
+  const password = String(payload?.password || "");
+  if (!username || !password) return json({error: "请填写 123 云盘账号和密码"}, 400, request, env);
+  if (username.length > 120 || password.length > 200) return json({error: "账号或密码过长"}, 400, request, env);
+  const isMail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(username);
+  const body = isMail ? {mail: username, password, type: 2} : {passport: username, password, remember: true};
+  let response;
+  try {
+    response = await fetchImpl(PAN123_SIGN_IN, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json", platform: "web", "app-version": "3",
+        Origin: "https://yun.123pan.com", Referer: "https://yun.123pan.com/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return json({ok: false, error: "123 登录接口暂时不可达，请稍后重试"}, 502, request, env);
+  }
+  let data = {};
+  try { data = await response.json(); } catch {
+    return json({ok: false, error: `123 登录返回了非 JSON 响应（HTTP ${response.status}）`}, 502, request, env);
+  }
+  const code = Number(data?.code);
+  const token = String(data?.data?.token || "");
+  if (![0, 200].includes(code) || !token) {
+    return json({ok: false, error: String(data?.message || `123 登录失败（HTTP ${response.status}）`), code}, 422, request, env);
+  }
+  // 顺手取昵称，前端就能只说「已连接 xxx」，不必把文件清单铺出来。
+  let nickname = "";
+  try {
+    const user = await pan123Request(token, "/user/info", {method: "GET", fetchImpl});
+    nickname = String(user?.Nickname || user?.nickname || user?.UserName || user?.userName || "");
+  } catch {}
+  return json({ok: true, provider: "123pan", token, nickname, channel: isMail ? "mail" : "passport"}, 200, request, env);
+}
 async function verifyPan123(request, env, fetchImpl = fetch) {
   if (!originAllowed(request, env, {write: true})) return json({error: "Origin 不在允许列表中"}, 403, request, env);
   if (!checkWriteToken(request, env)) return json({error: "123 连接校验需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
@@ -1215,6 +1262,7 @@ export async function handle(request, env) {
   if (url.pathname === "/api/private/repack" && request.method === "POST") return repackPrivateRed(request, env);
   if (url.pathname === "/api/private/directory" && request.method === "POST") return privateDirectory(request, env);
   if (url.pathname === "/api/private/seal" && request.method === "POST") return sealPrivatePrefix(request, env);
+  if (url.pathname === "/api/storage/123/login" && request.method === "POST") return loginPan123(request, env);
   if (url.pathname === "/api/backup/123/verify" && request.method === "POST") return verifyPan123(request, env);
   if (url.pathname === "/api/backup/123/list" && request.method === "POST") return listPan123Backups(request, env);
   if (url.pathname === "/api/backup/123" && request.method === "POST") return backupOriginalTo123(request, env);
@@ -1242,4 +1290,4 @@ export async function handle(request, env) {
 
 export default {fetch: handle};
 
-export const __test = {configuredOrigins, corsHeaders, originAllowed, objectSpec, maxUpload, digestHex, base64Bytes, base64String, decryptPrivateManifest, repackPrivateRed, privateDirectory, sealPrivatePrefix, listJobs, createJob, updateJob, deleteJob, backupOriginalTo123, verifyPan123, listPan123Backups, downloadSelected, downloadEntries, crc32Bytes, headerText, deleteStagingObject};
+export const __test = {configuredOrigins, corsHeaders, originAllowed, objectSpec, maxUpload, digestHex, base64Bytes, base64String, decryptPrivateManifest, repackPrivateRed, privateDirectory, sealPrivatePrefix, listJobs, createJob, updateJob, deleteJob, backupOriginalTo123, verifyPan123, listPan123Backups, loginPan123, downloadSelected, downloadEntries, crc32Bytes, headerText, deleteStagingObject};

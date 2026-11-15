@@ -162,8 +162,32 @@
           <section class="settings-grid">
             <div class="settings-label"><h2>多设备访问</h2><p>GitHub Pages 等静态站点可以把界面连接到单独的同步 API。API 地址只保存在当前浏览器，不在仓库中保存密钥。</p></div>
             <div class="settings-panel static-api-panel"><label>同步 API 地址<input id="apiBaseInput" type="url" inputmode="url" placeholder="https://你的-worker.example.workers.dev" autocomplete="off" spellcheck="false" /></label><label>同步写入 Token（可选）<input id="syncTokenInput" type="password" inputmode="text" placeholder="仅在 Worker 要求时填写" autocomplete="off" spellcheck="false" /></label><p class="field-help">留空使用本机服务；填写 HTTPS 地址后，手机和电脑会读取同一个 R2 库。Token 只保存在当前浏览器并随写入请求发送；它可以被浏览器读取，不适合作为高强度秘密。</p><div class="form-actions"><button class="secondary-button" id="saveApiBase" type="button">保存同步地址</button><button class="text-button" id="clearApiBase" type="button">清除并使用本机</button></div><p class="operation-status" id="apiBaseStatus" role="status"></p></div>
-            <div class="settings-label"><h2>原始 RED 备份到 123 云盘</h2><p>可选。启用后，确认主题时会把未压缩原包额外备份到 123 云盘；压缩 RED、预览和字体仍只存 R2。会话 Token 仅保存在本设备浏览器。</p></div>
-            <div class="settings-panel"><div class="web-login-block"><button class="primary-button" id="pan123WebLogin" type="button">用账号密码网页登录</button><p class="field-help" id="pan123WebLoginHint">在应用内打开 123 云盘登录页，登录完成后自动取回会话 Token 并验证连接。</p></div><label>123 云盘会话 Token<input id="pan123BackupToken" type="password" autocomplete="off" spellcheck="false" placeholder="浏览器开发者工具中复制 Authorization 里 Bearer 之后的值" /></label><label>备份目录<input id="pan123BackupFolder" type="text" value="Red-Garden-Backup" spellcheck="false" /></label><div class="form-actions"><button class="secondary-button" id="savePan123Backup" type="button">保存备份设置</button><button class="secondary-button" id="verifyPan123Backup" type="button">测试连接</button><button class="secondary-button" id="listPan123Backup" type="button">查看备份清单</button><button class="secondary-button" id="verifyPan123Write" type="button">验证备份写入</button><button class="text-button" id="clearPan123Backup" type="button">关闭备份</button></div><p class="operation-status" id="pan123BackupStatus" role="status"></p><div class="backup-inventory" id="pan123BackupList" aria-live="polite"></div><p class="field-help">需要先填写上方同步 API 地址与写入 Token。备份由同一个 Worker 代转，Token 不会写入仓库或 R2；留空时只保留 R2 原包。「测试连接」和「查看备份清单」只读，不创建任何文件或文件夹。「验证备份写入」会在备份目录下新建 <code>_verify/</code> 子目录并上传 1 个约 40 字节的 <code>reeden-backup-check.red</code> 测试文件（会保留在云盘），用来确认写入链路真的可用。</p></div>
+            <div class="settings-label"><h2>原始 RED 备份到 123 云盘</h2><p>可选。用 123 账号密码登录即可，密码只在登录那一刻由同步 Worker 转给 123 官方接口、不落盘；会话只保存在本机浏览器。启用后，确认主题时会把未压缩原包额外备份到 123 云盘，压缩 RED、预览和字体仍只存 R2。</p></div>
+            <div class="settings-panel">
+              <form class="pan123-quick-login" id="pan123QuickLogin" autocomplete="off">
+                <div class="field-pair">
+                  <label>123 云盘账号<input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="手机号或邮箱" required /></label>
+                  <label>登录密码<input name="password" type="password" autocomplete="current-password" spellcheck="false" required /></label>
+                </div>
+                <div class="form-actions">
+                  <button class="primary-button" type="submit" id="pan123QuickLoginButton">登录并连接</button>
+                  <button class="text-button" id="pan123WebLogin" type="button">改用网页登录</button>
+                </div>
+                <p class="field-help" id="pan123WebLoginHint">登录请求由同步 Worker 代发到 123 官方登录接口，成功后只把会话 Token 存在本机，密码不回传、不落盘。</p>
+              </form>
+              <label>备份目录<input id="pan123BackupFolder" type="text" value="Red-Garden-Backup" spellcheck="false" /></label>
+              <div class="form-actions">
+                <button class="secondary-button" id="savePan123Backup" type="button">保存备份设置</button>
+                <button class="secondary-button" id="verifyPan123Backup" type="button">测试连接</button>
+                <button class="secondary-button" id="listPan123Backup" type="button">查看备份清单</button>
+                <button class="secondary-button" id="verifyPan123Write" type="button">验证备份写入</button>
+                <button class="text-button" id="clearPan123Backup" type="button">关闭备份</button>
+              </div>
+              <p class="operation-status" id="pan123BackupStatus" role="status"></p>
+              <div class="backup-inventory" id="pan123BackupList" aria-live="polite"></div>
+              <details class="session-fallback" id="pan123TokenDetails"><summary>已有会话 Token？直接粘贴</summary><div class="session-fallback-content"><label>123 云盘会话 Token<input id="pan123BackupToken" type="password" autocomplete="off" spellcheck="false" placeholder="浏览器开发者工具中复制 Authorization 里 Bearer 之后的值" /></label></div></details>
+              <p class="field-help">需要先填写上方同步 API 地址与写入 Token。备份由同一个 Worker 代转，Token 不会写入仓库或 R2；留空时只保留 R2 原包。「测试连接」和「查看备份清单」只读，不创建任何文件或文件夹。「验证备份写入」会在备份目录下新建 <code>_verify/</code> 子目录并上传 1 个约 40 字节的 <code>reeden-backup-check.red</code> 测试文件（会保留在云盘），用来确认写入链路真的可用。</p>
+            </div>
             <div class="settings-label"><h2>已有资产与存储地</h2><p>本地文件和已读取的云端清单分别计数。读取 R2 已有库后，新导入主题会与云端记录一起检查重复。</p><p class="settings-note" id="storageDestination">尚未连接云端存储。</p></div>
             <div class="settings-panel"><div id="storageInventory" class="storage-inventory" aria-live="polite">正在读取本地资产…</div></div>
             <div class="settings-label"><h2>Cloudflare R2</h2><p>一个私有 Bucket 存放主题文件、预览图、字体和库清单；普通主题可在设备本地压缩，加密主题会先在设备压缩明文图片，再由同步 Worker 认证重封。预览优先组合日间书架，有同模式启动图时一起展示，日间无可用资源才读取夜间。文件使用临时下载地址，Bucket 无需公开。</p><p class="settings-note" id="credentialState">尚未配置 R2 凭据。</p><p class="settings-note"><a class="download-link" href="https://dash.cloudflare.com/?to=/:account/r2/overview" target="_blank" rel="noreferrer">打开 Cloudflare R2 控制台</a></p><p class="settings-note"><a class="download-link" href="https://developers.cloudflare.com/r2/api/tokens/" target="_blank" rel="noreferrer">查看 R2 访问密钥说明</a></p></div>

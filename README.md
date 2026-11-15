@@ -20,7 +20,7 @@ Android APK 加载 `https://aookshizuo-eng.github.io/reeden-library/`，它来�
 
 上传成功后会弹出「删除本地文件」对话框：列出这一批真正写进 R2 的文件，默认全选，可以逐项取消或整批保留。手机上由 APK 的原生桥用系统 Storage Access Framework 删除（系统可能再确认一次）；桌面 Chrome/Edge 在勾选导入页的「清理本地文件」后，「选择文件夹」改走 File System Access 的读写目录句柄，删的是目录里那份真实文件。用「选择文件」、拖拽或在普通手机浏览器里上传时，网页没有删除本机文件的权限，此时不会弹出一个按不动的删除框，而是提示需要手动清理。
 
-上传进度写入共享 R2 的持久化任务，刷新页面或换一台设备都能看到；勾选导入页的「后台暂存」会先把原文件上传到 R2 `staging/`，之后在任意设备打开页面就会自动接着处理并完成压缩入库（不需要再点按钮，「后台任务」里的开关可以关掉自动继续）。处理完成后暂存的原文件会被删除，不会在 R2 里长期留第二份。服务器/命令行也可以上传：`REEDEN_SYNC_TOKEN=<Token> node scripts/remote-import.mjs --dir <目录>`，可选 `--123-token` 把原始 RED 备份到 123 云盘。网页端在「存储设置 → 原始 RED 备份到 123 云盘」填入会话 Token 后，确认主题时会自动把未压缩原包备份到 123；Token 只保存在设备浏览器，不写进仓库或 R2。保存设置时会自动做一次只读连接校验，也可点「测试连接」复验：只列云盘根目录和备份目录，不会创建文件夹或上传测试文件，状态栏会显示是否连上、根目录项目数与备份目录是否存在。
+上传进度写入共享 R2 的持久化任务，刷新页面或换一台设备都能看到；勾选导入页的「后台暂存」会先把原文件上传到 R2 `staging/`，之后在任意设备打开页面就会自动接着处理并完成压缩入库（不需要再点按钮，「后台任务」里的开关可以关掉自动继续）。处理完成后暂存的原文件会被删除，不会在 R2 里长期留第二份。服务器/命令行也可以上传：`REEDEN_SYNC_TOKEN=<Token> node scripts/remote-import.mjs --dir <目录>`，可选 `--123-token` 把原始 RED 备份到 123 云盘。网页端在「存储设置 → 原始 RED 备份到 123 云盘」用 123 账号密码点「登录并连接」即可：密码只在登录那一刻由同步 Worker 转给 123 官方登录接口（`POST /api/storage/123/login`），不落盘、不写进 R2，成功后只把会话 Token 存在设备浏览器；遇到验证码可改用「网页登录」再粘贴 Token。连接成功后确认主题时会自动把未压缩原包备份到 123。保存设置时会自动做一次只读连接校验，也可点「测试连接」复验：只列云盘根目录和备份目录，不会创建文件夹或上传测试文件。登录与校验成功后状态栏只说「已连接 123 云盘（昵称）」，不会顺手把云盘文件清单铺出来——那要显式点「查看备份清单」。
 
 要确认「真的有备份」：点「查看备份清单」会列出备份目录内的文件（名称、大小、文件数、合计字节），并与共享库里的主题记录对账，显示已备份 / 失败 / 未备份数量；主题卡片也会显示「123 已备份」「123 未备份」或「123 备份失败」徽标。清单与对账都是只读的。备份只在「导入 .red → 确认并压缩保存」时发生，字体、SVG/HTML、预览图不写入 123。若想单独验证写入链路，点「验证备份写入」会在备份目录下新建 `_verify/` 子目录并上传一个固定内容的小 `.red` 测试文件（会保留在云盘），成功后显示文件路径、大小和 FileId；重复点击会复用同一文件，不会重复占用空间。
 
@@ -30,7 +30,7 @@ Android APK 加载 `https://aookshizuo-eng.github.io/reeden-library/`，它来�
 
 ## 免费 Worker
 
-`pages/worker-api.js`（由 `pages/_worker.js` 挂载，R2 绑定 `R2_ASSETS`）是 Cloudflare Pages 正在使用的同步接口；`worker/worker.js` 是同一实现的可单独部署入口（R2 绑定 `ASSETS`）。接口包含内容寻址对象读写、共享对象安全的删除（`DELETE /api/objects/staging/<sha>.<ext>` 只允许删暂存副本，库内对象走记录删除）、分类更新、持久化任务（`/api/jobs`）、加密目录 `/api/private/directory`、前缀重封 `/api/private/seal`、兼容旧客户端的 `/api/private/repack`，可选的原包备份 `/api/backup/123`、只读连接校验 `/api/backup/123/verify`、只读备份清单 `/api/backup/123/list`，以及流式批量下载 `/api/download?kind=font&ids=...`（`&probe=1` 只返回文件清单，不读取对象字节）。Worker 不持有 123 会话，浏览器也拿不到服务端私有格式密钥。
+`pages/worker-api.js`（由 `pages/_worker.js` 挂载，R2 绑定 `R2_ASSETS`）是 Cloudflare Pages 正在使用的同步接口；`worker/worker.js` 是同一实现的可单独部署入口（R2 绑定 `ASSETS`）。接口包含内容寻址对象读写、共享对象安全的删除（`DELETE /api/objects/staging/<sha>.<ext>` 只允许删暂存副本，库内对象走记录删除）、分类更新、持久化任务（`/api/jobs`）、加密目录 `/api/private/directory`、前缀重封 `/api/private/seal`、兼容旧客户端的 `/api/private/repack`，网页端 123 登录代理 `/api/storage/123/login`、可选的原包备份 `/api/backup/123`、只读连接校验 `/api/backup/123/verify`、只读备份清单 `/api/backup/123/list`，以及流式批量下载 `/api/download?kind=font&ids=...`（`&probe=1` 只返回文件清单，不读取对象字节）。Worker 不持有 123 会话，浏览器也拿不到服务端私有格式密钥。
 
 R2 对象键只保留可读名：`compressed/少女心事-压缩.red`、`originals/少女心事-原包.red`、`previews/少女心事-预览.jpg`、`fonts/浪漫融化在银河里.ttf`。SHA-256 不再写进文件名——浏览器上传时通过 `X-Content-SHA256` 请求头声明，Worker 校验一致后写进对象自定义元数据 `sha256`。同名但内容不同时自动加 `-2`、`-3`，内容相同则复用同一个对象。**改动前写入的对象仍带 `~<sha>` 后缀，接口继续可读可删，不迁移也能正常使用**；重新上传一次即可换成干净名字。
 
