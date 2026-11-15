@@ -502,7 +502,8 @@ public final class MainActivity extends Activity {
         @JavascriptInterface
         public String releaseSharedFiles(String idsJson) {
             if (!isTrustedPage()) return "{\"released\":0}";
-            releaseSharedFiles(idsJson);
+            // 同名方法在内部类里会解析到自己，必须显式限定到外部类，否则无限递归。
+            MainActivity.this.releaseSharedFiles(idsJson);
             return "{\"released\":true}";
         }
 
