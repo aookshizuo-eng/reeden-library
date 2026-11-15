@@ -581,9 +581,99 @@ async function verifyPan123Backup() {
     if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
     const who = data.nickname ? `（${data.nickname}）` : "";
     operationMessage(output, `已连接 123 云盘${who}：根目录 ${data.rootItems} 项，备份目录 ${data.folder || "云盘根目录"}${data.folderExists ? "已存在" : "将在首次备份时创建"}。只读校验，未写入任何文件。`);
+    refreshPan123BackupList({quiet: true}).catch(() => {});
     return true;
   } catch (error) {
     operationMessage(output, `123 云盘连接失败：${error.message}`, true);
+    return false;
+  }
+}
+function pan123InputConfig() {
+  return {
+    token: String($("#pan123BackupToken")?.value || "").trim() || pan123BackupConfig().token,
+    folder: String($("#pan123BackupFolder")?.value || "").trim() || "Red-Garden-Backup",
+  };
+}
+// "查看备份清单" answers the real question: are original .red packages actually
+// sitting in 123, and does every theme in the shared library have one? It is
+// read-only and auth-gated; the Worker never stores the session token.
+async function refreshPan123BackupList({quiet = false} = {}) {
+  const output = $("#pan123BackupStatus");
+  const list = $("#pan123BackupList");
+  const config = pan123InputConfig();
+  if (!config.token) { if (!quiet) operationMessage(output, "请先填写并保存 123 云盘会话 Token，再查看备份清单。", true); return null; }
+  if (!apiBase) { if (!quiet) operationMessage(output, "请先在「多设备访问」保存同步 API 地址与写入 Token。", true); return null; }
+  if (!quiet) operationMessage(output, "正在读取 123 云盘备份清单…");
+  try {
+    const response = await fetch(apiUrl("/api/backup/123/list"), {
+      method: "POST", headers: requestHeaders({"X-Pan123-Token": config.token, "X-Pan123-Folder": config.folder}),
+    });
+    const text = await response.text();
+    let data = {}; try { data = text ? JSON.parse(text) : {}; } catch {}
+    if (response.status === 401) throw new Error("同步写入 Token 无效或未保存，请先在「多设备访问」重新保存");
+    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    const items = Array.isArray(data.items) ? data.items : [];
+    const files = items.filter(item => item.type === "file");
+    const folders = items.filter(item => item.type === "folder");
+    const redFiles = files.filter(item => /\.red$/i.test(item.name));
+    const themes = state.themes || [];
+    const backed = themes.filter(theme => theme.original_123?.key);
+    const failed = themes.filter(theme => !theme.original_123?.key && theme.original_123_error);
+    const missing = themes.filter(theme => !theme.original_123?.key && !theme.original_123_error);
+    const parts = [
+      `<div class="backup-head">123 云盘 / ${escapeHtml(data.folder || "云盘根目录")}</div>`,
+      `<div>${data.folderExists ? "目录已存在" : "目录尚未创建（首次备份时自动创建）"}：文件 ${data.fileCount} 个，其中 <code>.red</code> 原包 ${redFiles.length} 个，合计 ${formatBytes(data.totalBytes)}；${folders.length} 个子目录${data.truncated ? "（仅显示前 1000 项）" : ""}。</div>`,
+      `<div>共享库主题 ${themes.length} 个：已备份 ${backed.length} 个，备份失败 ${failed.length} 个，未备份 ${missing.length} 个。主题卡片也会显示「123 已备份 / 未备份」。</div>`,
+    ];
+    if (items.length) {
+      parts.push(`<ul>${items.slice(0, 40).map(item => `<li><span>${item.type === "folder" ? "目录 · " : ""}${escapeHtml(item.name)}</span><span>${item.type === "folder" ? "文件夹" : formatBytes(item.bytes)}</span></li>`).join("")}</ul>`);
+      if (items.length > 40) parts.push(`<div>仅列出前 40 项，共 ${items.length} 项。</div>`);
+    } else {
+      parts.push(`<div>目录里还没有文件。备份只发生在「导入 .red → 确认并压缩保存」这一步，字体、SVG/HTML 和预览图不备份到 123。</div>`);
+    }
+    if (missing.length) parts.push(`<div>未备份的主题：${escapeHtml(missing.slice(0, 8).map(theme => theme.name || theme.id).join("、"))}${missing.length > 8 ? ` 等 ${missing.length} 个` : ""}。</div>`);
+    if (failed.length) parts.push(`<div class="inline-error">备份失败：${escapeHtml(failed.slice(0, 5).map(theme => `${theme.name || theme.id}（${theme.original_123_error}）`).join("；"))}</div>`);
+    list.innerHTML = parts.join("");
+    if (!quiet) operationMessage(output, `备份清单已更新：${redFiles.length} 个 .red 原包，库内 ${backed.length} / ${themes.length} 个主题已备份。只读检查，未写入文件。`);
+    return data;
+  } catch (error) {
+    if (!quiet) operationMessage(output, `123 备份清单读取失败：${error.message}`, true);
+    return null;
+  }
+}
+// "测试连接" only proves the account can be read. This one actually exercises
+// the upload path with a tiny fixed .red file; repeated runs reuse the same file.
+async function verifyPan123Write() {
+  const output = $("#pan123BackupStatus");
+  const config = pan123InputConfig();
+  if (!config.token) { operationMessage(output, "请先填写并保存 123 云盘会话 Token。", true); return false; }
+  if (!apiBase) { operationMessage(output, "请先在「多设备访问」保存同步 API 地址与写入 Token。", true); return false; }
+  operationMessage(output, "正在验证 123 云盘写入链路（会上传 1 个小测试文件）…");
+  try {
+    const codec = await loadFreeCodec();
+    if (!codec?.md5Hex) throw new Error("浏览器处理器未加载，请刷新页面后重试");
+    const bytes = new TextEncoder().encode("Red Garden 123 backup write verification\n");
+    const etag = await codec.md5Hex(bytes);
+    const folder = `${config.folder.replace(/\/+$/g, "")}/_verify`;
+    const response = await fetch(apiUrl("/api/backup/123"), {
+      method: "POST",
+      headers: requestHeaders({
+        "Content-Type": "application/octet-stream",
+        "X-Pan123-Token": config.token,
+        "X-Pan123-Folder": folder,
+        "X-Pan123-Filename": "reeden-backup-check.red",
+        "X-Pan123-Etag": etag,
+      }),
+      body: bytes,
+    });
+    const text = await response.text();
+    let data = {}; try { data = text ? JSON.parse(text) : {}; } catch {}
+    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    operationMessage(output, `123 写入验证通过：${data.key}（${formatBytes(data.bytes)}，${data.reused ? "已存在并复用" : "新建"}，FileId ${data.fileId}）。测试文件保留在 _verify/ 子目录，不会混进真实原包。`);
+    await refreshPan123BackupList({quiet: true});
+    return true;
+  } catch (error) {
+    operationMessage(output, `123 写入验证失败：${error.message}（R2 原包不受影响）`, true);
     return false;
   }
 }
@@ -1422,7 +1512,7 @@ function renderThemes() {
     const compressionText = compressionSummary(theme);
     return `<article class="theme-card">
       <div class="theme-preview">${previewImage(preview.url, `${theme.name} ${preview.label} · ${previewKind(theme.preview_details)}`, "", theme.preview_details)}<span class="preview-caption">${escapeHtml(previewKind(theme.preview_details))} · 点击放大</span></div>
-      <div class="theme-info"><label class="item-heading">${selectInput("theme", theme.id, `主题 ${theme.name || "未命名主题"}`, isAssetBusy("theme", theme.id))}<span class="theme-title">${escapeHtml(theme.name || "未命名主题")}</span></label><div class="theme-meta">${escapeHtml(theme.author || "作者未记录")}</div><p>${compressionText} · ${escapeHtml(syncLabel(theme))}</p>${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === "string" ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join("；"))}</p>` : ""}<div class="theme-badges">${roles.map(role => `<span class="badge">${escapeHtml(role)}</span>`).join("")}</div></div>
+      <div class="theme-info"><label class="item-heading">${selectInput("theme", theme.id, `主题 ${theme.name || "未命名主题"}`, isAssetBusy("theme", theme.id))}<span class="theme-title">${escapeHtml(theme.name || "未命名主题")}</span></label><div class="theme-meta">${escapeHtml(theme.author || "作者未记录")}</div><p>${compressionText} · ${escapeHtml(syncLabel(theme))}</p>${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === "string" ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join("；"))}</p>` : ""}<div class="theme-badges">${roles.map(role => `<span class="badge">${escapeHtml(role)}</span>`).join("")}${theme.original_123?.key ? `<span class="badge is-good" title="${escapeHtml(theme.original_123.key)}">123 已备份</span>` : theme.original_123_error ? `<span class="badge" title="${escapeHtml(theme.original_123_error)}">123 备份失败</span>` : `<span class="badge">123 未备份</span>`}</div></div>
       <div class="theme-actions"><span class="size-line">${formatBytes(theme.compressed_size || theme.library_size || theme.original_size)}</span><button class="text-button rebuild-preview" data-id="${escapeHtml(theme.id)}">更新预览</button>${syncAction}${compressedLink}${libraryLink}${originalLink}<button class="text-button danger-text delete-record" data-kind="theme" data-id="${escapeHtml(theme.id)}">删除</button></div>
     </article>`;
   }).join("");
@@ -2796,6 +2886,8 @@ $("#savePan123Backup").addEventListener("click", () => {
   } catch { operationMessage($("#pan123BackupStatus"), "当前浏览器无法保存设置，请检查隐私模式设置。", true); }
 });
 $("#verifyPan123Backup").addEventListener("click", () => { verifyPan123Backup(); });
+$("#listPan123Backup").addEventListener("click", () => { refreshPan123BackupList(); });
+$("#verifyPan123Write").addEventListener("click", () => { verifyPan123Write(); });
 $("#clearPan123Backup").addEventListener("click", () => {
   try { localStorage.removeItem(PAN123_TOKEN_STORAGE_KEY); } catch {}
   $("#pan123BackupToken").value = "";

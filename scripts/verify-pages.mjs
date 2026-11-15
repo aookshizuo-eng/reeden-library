@@ -33,10 +33,10 @@ const [app, html] = await Promise.all([
   readFile(path.join(source, "index.html"), "utf8"),
 ]);
 for (const marker of ["function fontPreviewMarkup", "function loadFontPreviewFace", "function recoverFontPreviewImage", "new FontFace(", "font-preview-frame", "font-preview-fallback", "data-font-preview-id", "data-font-id", "function renderFonts",
-  "function analyzeFontGlyphs", "function inkProfile", "window.opentype", "glyph_method", "function downloadSelectedRecords", "function fetchDownloadableBytes", "function renderThemeAuthorFilter", "function compressPrivateRedWithDirectory", "function queueFilesForLater", "function resumeStagedJobs", "function backupOriginalTo123", "function runCodecTask", "function loadLibraryAfterConnection", "function fetchWithReadTimeout", "API_READ_TIMEOUT_MS", "已连接共享库", "function verifyPan123Backup", "/api/backup/123/verify", "已连接 123 云盘"]) {
+  "function analyzeFontGlyphs", "function inkProfile", "window.opentype", "glyph_method", "function downloadSelectedRecords", "function fetchDownloadableBytes", "function renderThemeAuthorFilter", "function compressPrivateRedWithDirectory", "function queueFilesForLater", "function resumeStagedJobs", "function backupOriginalTo123", "function runCodecTask", "function loadLibraryAfterConnection", "function fetchWithReadTimeout", "API_READ_TIMEOUT_MS", "已连接共享库", "function verifyPan123Backup", "/api/backup/123/verify", "已连接 123 云盘", "function refreshPan123BackupList", "function verifyPan123Write", "/api/backup/123/list", "123 已备份"]) {
   if (!app.includes(marker)) errors.push(`前端缺少关键回归标记：${marker}`);
 }
-for (const id of ["fontList", "fontCount", "fontEmpty", "themeAuthorFilter", "downloadSelectedTheme", "downloadSelectedFont", "downloadSelectedAsset", "queueForLater", "resumeStagedJobs", "pan123BackupToken", "verifyPan123Backup"]) {
+for (const id of ["fontList", "fontCount", "fontEmpty", "themeAuthorFilter", "downloadSelectedTheme", "downloadSelectedFont", "downloadSelectedAsset", "queueForLater", "resumeStagedJobs", "pan123BackupToken", "verifyPan123Backup", "listPan123Backup", "verifyPan123Write", "pan123BackupList"]) {
   if (!html.includes(`id=\"${id}\"`)) errors.push(`页面结构回归检查失败：缺少 #${id}`);
 }
 for (const file of ["app.js", "free_codec.js", "free_codec_worker.js", "opentype.min.js"]) {
@@ -54,7 +54,7 @@ const [workerEntry, workerApi] = await Promise.all([
   readFile(path.join(root, "pages", "worker-api.js"), "utf8"),
 ]);
 if (!workerEntry.includes('from "../pages/worker-api.js"') || !workerEntry.includes("export {default}")) errors.push("worker/worker.js 未复用 pages/worker-api.js，独立 Worker 接口会分叉");
-for (const route of ['"/api/library" && request.method === "DELETE"', '"/api/private/repack"', '"/api/private/directory"', '"/api/private/seal"', '"/api/backup/123"', '"/api/backup/123/verify"', '"/api/jobs"', '"/api/download" && request.method === "GET"']) {
+for (const route of ['"/api/library" && request.method === "DELETE"', '"/api/private/repack"', '"/api/private/directory"', '"/api/private/seal"', '"/api/backup/123"', '"/api/backup/123/verify"', '"/api/backup/123/list"', '"/api/jobs"', '"/api/download" && request.method === "GET"']) {
   if (!workerApi.includes(route)) errors.push(`pages/worker-api.js 缺少关键路由：${route}`);
 }
 if (!workerApi.includes("function streamZip") || !workerApi.includes("zipEndOfCentralDirectory")) errors.push("pages/worker-api.js 缺少流式 ZIP 打包实现");
@@ -105,10 +105,12 @@ if (liveUrl) {
         if (!result?.ok) errors.push(`线上 /api/download 流式打包探测失败：HTTP ${probe.status}`);
         else console.log(`live check: /api/download probe ok (${target.kind}, ${result.count} files)`);
       }
-      // The read-only 123 connection check must exist and stay auth-gated.
-      const verifyProbe = await fetch(`${liveUrl}/api/backup/123/verify`, {method: "POST", headers: {Origin: liveUrl, "X-Pan123-Token": ""}});
-      if (verifyProbe.status !== 401) errors.push(`线上 /api/backup/123/verify 鉴权探测失败：HTTP ${verifyProbe.status}`);
-      else console.log("live check: /api/backup/123/verify auth-gated (401)");
+      // Both read-only 123 checks must exist and stay auth-gated.
+      for (const route of ["/api/backup/123/verify", "/api/backup/123/list"]) {
+        const probe = await fetch(`${liveUrl}${route}`, {method: "POST", headers: {Origin: liveUrl, "X-Pan123-Token": ""}});
+        if (probe.status !== 401) errors.push(`线上 ${route} 鉴权探测失败：HTTP ${probe.status}`);
+        else console.log(`live check: ${route} auth-gated (401)`);
+      }
     }
   } catch (error) {
     errors.push(`线上检查失败：${error.message}`);

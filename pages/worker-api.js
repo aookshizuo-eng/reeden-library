@@ -995,6 +995,49 @@ async function verifyPan123(request, env, fetchImpl = fetch) {
       folderExists: folderInfo.exists, rootItems: items.length, nickname}, 200, request, env);
   } catch (error) { return json({ok: false, error: error?.message || "123 连接校验失败"}, 422, request, env); }
 }
+/** Read-only inventory of the configured 123 backup directory. It never
+ * creates a folder or writes a file, and is auth-gated like the write route
+ * because it exposes the contents of the user's cloud drive. */
+async function listPan123Backups(request, env, fetchImpl = fetch) {
+  if (!originAllowed(request, env, {write: true})) return json({error: "Origin 不在允许列表中"}, 403, request, env);
+  if (!checkWriteToken(request, env)) return json({error: "123 备份清单需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
+  let token, folder;
+  try {
+    token = pan123Token(request.headers.get("X-Pan123-Token"));
+    const rawFolder = request.headers.get("X-Pan123-Folder");
+    folder = rawFolder === null ? "Red-Garden-Backup" : String(rawFolder).trim().replace(/^\/+|\/+$/g, "");
+  } catch (error) { return json({error: error.message}, 400, request, env); }
+  try {
+    const {exists, parent} = await findPan123Folder(token, folder, fetchImpl);
+    if (!exists) return json({ok: true, provider: "123pan", connected: true, folder, folderExists: false, items: [], fileCount: 0, totalBytes: 0, truncated: false}, 200, request, env);
+    const items = [];
+    let next = "0", pages = 0;
+    while (pages < 10) {
+      const data = await pan123Request(token, "/file/list/new", {method: "GET", fetchImpl, params: {
+        driveId: 0, limit: 100, next, orderBy: "file_id", orderDirection: "desc",
+        parentFileId: String(parent), trashed: "false", SearchData: "", Page: 1,
+        OnlyLookAbnormalFile: 0, event: "homeListFile", operateType: 4, inDirectSpace: "false",
+      }});
+      const list = Array.isArray(data.InfoList) ? data.InfoList : [];
+      for (const item of list) {
+        if (!item || !item.FileName) continue;
+        items.push({
+          name: String(item.FileName), type: Number(item.Type) === 1 ? "folder" : "file",
+          bytes: Number(item.Size) || 0, etag: String(item.Etag || ""), fileId: String(item.FileId || ""),
+          created_at: String(item.CreateTime || item.CreateAt || ""), updated_at: String(item.UpdateTime || item.UpdateAt || ""),
+        });
+      }
+      const cursor = String(data.Next ?? "-1");
+      if (!list.length || cursor === "-1" || cursor === "" || cursor === "0" || cursor === next) break;
+      next = cursor;
+      pages++;
+    }
+    const files = items.filter(item => item.type === "file");
+    return json({ok: true, provider: "123pan", connected: true, folder, folderExists: true,
+      items, fileCount: files.length, totalBytes: files.reduce((sum, item) => sum + item.bytes, 0),
+      truncated: pages >= 10}, 200, request, env);
+  } catch (error) { return json({ok: false, error: error?.message || "123 备份清单读取失败"}, 422, request, env); }
+}
 async function backupOriginalTo123(request, env, fetchImpl = fetch) {
   if (!originAllowed(request, env, {write: true})) return json({error: "Origin 不在允许列表中"}, 403, request, env);
   if (!checkWriteToken(request, env)) return json({error: "123 备份接口需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
@@ -1070,6 +1113,7 @@ export async function handle(request, env) {
   if (url.pathname === "/api/private/directory" && request.method === "POST") return privateDirectory(request, env);
   if (url.pathname === "/api/private/seal" && request.method === "POST") return sealPrivatePrefix(request, env);
   if (url.pathname === "/api/backup/123/verify" && request.method === "POST") return verifyPan123(request, env);
+  if (url.pathname === "/api/backup/123/list" && request.method === "POST") return listPan123Backups(request, env);
   if (url.pathname === "/api/backup/123" && request.method === "POST") return backupOriginalTo123(request, env);
   const classificationUpdate = url.pathname.match(/^\/api\/(assets|themes|fonts)\/([^/]+)$/);
   if (classificationUpdate && request.method === "PATCH") {
@@ -1094,4 +1138,4 @@ export async function handle(request, env) {
 
 export default {fetch: handle};
 
-export const __test = {configuredOrigins, corsHeaders, originAllowed, objectSpec, maxUpload, digestHex, base64Bytes, base64String, decryptPrivateManifest, repackPrivateRed, privateDirectory, sealPrivatePrefix, listJobs, createJob, updateJob, deleteJob, backupOriginalTo123, verifyPan123, downloadSelected, downloadEntries, crc32Bytes};
+export const __test = {configuredOrigins, corsHeaders, originAllowed, objectSpec, maxUpload, digestHex, base64Bytes, base64String, decryptPrivateManifest, repackPrivateRed, privateDirectory, sealPrivatePrefix, listJobs, createJob, updateJob, deleteJob, backupOriginalTo123, verifyPan123, listPan123Backups, downloadSelected, downloadEntries, crc32Bytes};

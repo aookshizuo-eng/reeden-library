@@ -184,6 +184,40 @@ const verifyDenied = await handle(new Request("https://worker.example/api/backup
 assert.equal(verifyDenied.status, 401);
 const verifyNoToken = await __test.verifyPan123(new Request("https://worker.example/api/backup/123/verify", {method: "POST", headers: headers()}), env, verifyFetch);
 assert.equal(verifyNoToken.status, 400);
+// The backup inventory is read-only, auth-gated and reconciles with library records.
+const inventoryCalls = [];
+const inventoryFetch = async (url, init = {}) => {
+  const u = new URL(String(url));
+  const parent = u.searchParams.get("parentFileId");
+  inventoryCalls.push({path: u.pathname, parent, auth: init.headers?.Authorization || ""});
+  let data = {};
+  if (u.pathname === "/b/api/file/list/new" && parent === "0") data = {InfoList: [{FileName: "Red-Garden-Backup", Type: 1, FileId: "9"}], Next: "-1"};
+  else if (u.pathname === "/b/api/file/list/new" && parent === "9") data = {InfoList: [
+    {FileName: "theme-a.red", Type: 0, Size: 1024, Etag: "abc", FileId: "101", CreateTime: "2026-11-16T00:00:00+08:00"},
+    {FileName: "probes", Type: 1, Size: 131072, FileId: "102"},
+  ], Next: "-1"};
+  return new Response(JSON.stringify({code: 0, data}), {status: 200, headers: {"Content-Type": "application/json"}});
+};
+const inventoryRequest = new Request("https://worker.example/api/backup/123/list", {method: "POST", headers: headers({"X-Pan123-Token": "device-session-token", "X-Pan123-Folder": "Red-Garden-Backup"})});
+const inventory = await __test.listPan123Backups(inventoryRequest, env, inventoryFetch);
+assert.equal(inventory.status, 200);
+const inv = await inventory.json();
+assert.equal(inv.ok, true);
+assert.equal(inv.folderExists, true);
+assert.equal(inv.items.length, 2);
+assert.equal(inv.fileCount, 1);
+assert.equal(inv.totalBytes, 1024);
+assert.equal(inv.items[0].name, "theme-a.red");
+assert.equal(inv.items[0].type, "file");
+assert.equal(inv.items[1].type, "folder");
+assert.equal(inventoryCalls.some(call => call.path.includes("upload_request")), false);
+assert.equal(inventoryCalls.every(call => call.auth === "Bearer device-session-token"), true);
+const inventoryDenied = await handle(new Request("https://worker.example/api/backup/123/list", {method: "POST", headers: {Origin: origin, "X-Pan123-Token": "device-session-token"}}), env);
+assert.equal(inventoryDenied.status, 401);
+const emptyInventoryFetch = async () => new Response(JSON.stringify({code: 0, data: {InfoList: [], Next: "-1"}}), {status: 200, headers: {"Content-Type": "application/json"}});
+const emptyInventory = await __test.listPan123Backups(inventoryRequest, env, emptyInventoryFetch);
+assert.equal(emptyInventory.status, 200);
+assert.equal((await emptyInventory.json()).folderExists, false);
 // Batch download: the Worker builds a Stored ZIP straight from R2, so the
 // browser never has to fetch 50 MB of fonts into JS memory and deflate them
 // again. Verify the archive byte-for-byte, including the manifest.
