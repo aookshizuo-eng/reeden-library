@@ -868,7 +868,10 @@ function acceptPan123Tokens(payload) {
     }
     if (input) input.value = tokens[index].token;
     try { localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, tokens[index].token); } catch {}
-    if (await verifyPan123Backup()) return;
+    if (await verifyPan123Backup()) {
+      if (source === "scan" || source === "password") toast(`${pan123TokenSourceLabel(source)}成功`);
+      return;
+    }
     await tryOne(index + 1);
   };
   tryOne(0).catch(() => {});
