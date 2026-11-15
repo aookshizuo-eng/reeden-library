@@ -957,6 +957,44 @@ async function pan123Folder(token, path, fetchImpl) {
   }
   return parent;
 }
+// Read-only variant used by "测试连接": walk the configured folder without
+// creating anything, so connecting never leaves a probe file in the account.
+async function findPan123Folder(token, path, fetchImpl) {
+  let parent = 0;
+  for (const name of String(path || "").split("/").filter(Boolean)) {
+    if (name.length > 240 || name === "." || name === "..") throw new Error("123 备份目录名称无效");
+    const found = await pan123Find(token, parent, name, fetchImpl);
+    if (!found || Number(found.Type) !== 1) return {exists: false, parent};
+    parent = Number(found.FileId);
+  }
+  return {exists: true, parent};
+}
+async function verifyPan123(request, env, fetchImpl = fetch) {
+  if (!originAllowed(request, env, {write: true})) return json({error: "Origin 不在允许列表中"}, 403, request, env);
+  if (!checkWriteToken(request, env)) return json({error: "123 连接校验需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
+  let token, folder;
+  try {
+    token = pan123Token(request.headers.get("X-Pan123-Token"));
+    const rawFolder = request.headers.get("X-Pan123-Folder");
+    folder = rawFolder === null ? "Red-Garden-Backup" : String(rawFolder).trim().replace(/^\/+|\/+$/g, "");
+  } catch (error) { return json({error: error.message}, 400, request, env); }
+  try {
+    const data = await pan123Request(token, "/file/list/new", {method: "GET", fetchImpl, params: {
+      driveId: 0, limit: 100, next: "0", orderBy: "file_id", orderDirection: "desc",
+      parentFileId: "0", trashed: "false", SearchData: "", Page: 1,
+      OnlyLookAbnormalFile: 0, event: "homeListFile", operateType: 4, inDirectSpace: "false",
+    }});
+    const items = Array.isArray(data.InfoList) ? data.InfoList : [];
+    const folderInfo = await findPan123Folder(token, folder, fetchImpl);
+    let nickname = "";
+    try {
+      const user = await pan123Request(token, "/user/info", {method: "GET", fetchImpl});
+      nickname = String(user?.Nickname || user?.nickname || user?.UserName || user?.userName || "");
+    } catch {}
+    return json({ok: true, provider: "123pan", connected: true, folder,
+      folderExists: folderInfo.exists, rootItems: items.length, nickname}, 200, request, env);
+  } catch (error) { return json({ok: false, error: error?.message || "123 连接校验失败"}, 422, request, env); }
+}
 async function backupOriginalTo123(request, env, fetchImpl = fetch) {
   if (!originAllowed(request, env, {write: true})) return json({error: "Origin 不在允许列表中"}, 403, request, env);
   if (!checkWriteToken(request, env)) return json({error: "123 备份接口需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
@@ -1031,6 +1069,7 @@ export async function handle(request, env) {
   if (url.pathname === "/api/private/repack" && request.method === "POST") return repackPrivateRed(request, env);
   if (url.pathname === "/api/private/directory" && request.method === "POST") return privateDirectory(request, env);
   if (url.pathname === "/api/private/seal" && request.method === "POST") return sealPrivatePrefix(request, env);
+  if (url.pathname === "/api/backup/123/verify" && request.method === "POST") return verifyPan123(request, env);
   if (url.pathname === "/api/backup/123" && request.method === "POST") return backupOriginalTo123(request, env);
   const classificationUpdate = url.pathname.match(/^\/api\/(assets|themes|fonts)\/([^/]+)$/);
   if (classificationUpdate && request.method === "PATCH") {
@@ -1055,4 +1094,4 @@ export async function handle(request, env) {
 
 export default {fetch: handle};
 
-export const __test = {configuredOrigins, corsHeaders, originAllowed, objectSpec, maxUpload, digestHex, base64Bytes, base64String, decryptPrivateManifest, repackPrivateRed, privateDirectory, sealPrivatePrefix, listJobs, createJob, updateJob, deleteJob, backupOriginalTo123, downloadSelected, downloadEntries, crc32Bytes};
+export const __test = {configuredOrigins, corsHeaders, originAllowed, objectSpec, maxUpload, digestHex, base64Bytes, base64String, decryptPrivateManifest, repackPrivateRed, privateDirectory, sealPrivatePrefix, listJobs, createJob, updateJob, deleteJob, backupOriginalTo123, verifyPan123, downloadSelected, downloadEntries, crc32Bytes};

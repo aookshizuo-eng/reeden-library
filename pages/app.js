@@ -556,6 +556,37 @@ async function backupOriginalTo123(raw, name, codec) {
     return {error: error.message};
   }
 }
+// "测试连接" only lists the 123 root and the configured backup folder. It
+// never creates a folder, uploads a probe file or stores the token on a server.
+async function verifyPan123Backup() {
+  const output = $("#pan123BackupStatus");
+  const token = String($("#pan123BackupToken")?.value || "").trim() || pan123BackupConfig().token;
+  const folder = String($("#pan123BackupFolder")?.value || "").trim() || "Red-Garden-Backup";
+  if (!token) {
+    operationMessage(output, "请先填写 123 云盘会话 Token：在 123 网盘网页 F12 → Network → 任一 /b/api 请求 → 复制 Authorization: Bearer 之后的值。", true);
+    return false;
+  }
+  if (!apiBase) {
+    operationMessage(output, "请先在「多设备访问」保存同步 API 地址与写入 Token。", true);
+    return false;
+  }
+  operationMessage(output, "正在验证 123 云盘会话（只读校验）…");
+  try {
+    const response = await fetch(apiUrl("/api/backup/123/verify"), {
+      method: "POST", headers: requestHeaders({"X-Pan123-Token": token, "X-Pan123-Folder": folder}),
+    });
+    const text = await response.text();
+    let data = {}; try { data = text ? JSON.parse(text) : {}; } catch {}
+    if (response.status === 401) throw new Error("同步写入 Token 无效或未保存，请先在「多设备访问」重新保存");
+    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    const who = data.nickname ? `（${data.nickname}）` : "";
+    operationMessage(output, `已连接 123 云盘${who}：根目录 ${data.rootItems} 项，备份目录 ${data.folder || "云盘根目录"}${data.folderExists ? "已存在" : "将在首次备份时创建"}。只读校验，未写入任何文件。`);
+    return true;
+  } catch (error) {
+    operationMessage(output, `123 云盘连接失败：${error.message}`, true);
+    return false;
+  }
+}
 async function browserCodec() {
   const codec = await loadFreeCodec();
   if (!codec?.inspectContainer || !codec?.sha256Hex || !codec?.md5Hex || !codec?.compressImage || !codec?.extractPrivatePreviewImages) throw new Error("浏览器处理器未加载，请刷新页面后重试");
@@ -2747,6 +2778,7 @@ $("#clearApiBase").addEventListener("click", () => { $("#apiBaseInput").value = 
   const config = pan123BackupConfig();
   $("#pan123BackupToken").value = config.token;
   $("#pan123BackupFolder").value = config.folder;
+  if (config.token) operationMessage($("#pan123BackupStatus"), "已保存 123 云盘会话 Token；点击「测试连接」可验证会话是否仍然有效。");
 })();
 $("#savePan123Backup").addEventListener("click", () => {
   const token = String($("#pan123BackupToken").value || "").trim();
@@ -2754,10 +2786,16 @@ $("#savePan123Backup").addEventListener("click", () => {
   try {
     localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, token);
     localStorage.setItem(PAN123_FOLDER_STORAGE_KEY, folder);
-    operationMessage($("#pan123BackupStatus"), token ? "已启用：确认主题时会把原包备份到 123 云盘。" : "会话 Token 为空，当前只保留 R2 原包。");
-    toast(token ? "123 云盘备份已启用" : "123 云盘备份已关闭");
+    if (token) {
+      toast("123 云盘设置已保存，正在验证连接");
+      verifyPan123Backup();
+    } else {
+      operationMessage($("#pan123BackupStatus"), "会话 Token 为空，当前只保留 R2 原包。");
+      toast("123 云盘备份已关闭");
+    }
   } catch { operationMessage($("#pan123BackupStatus"), "当前浏览器无法保存设置，请检查隐私模式设置。", true); }
 });
+$("#verifyPan123Backup").addEventListener("click", () => { verifyPan123Backup(); });
 $("#clearPan123Backup").addEventListener("click", () => {
   try { localStorage.removeItem(PAN123_TOKEN_STORAGE_KEY); } catch {}
   $("#pan123BackupToken").value = "";

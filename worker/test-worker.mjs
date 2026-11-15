@@ -160,6 +160,30 @@ const backupUnauthorized = await __test.backupOriginalTo123(new Request("https:/
 assert.equal(backupUnauthorized.status, 401);
 const cors = __test.corsHeaders(new Request("https://worker.example/api/backup/123", {headers: {Origin: origin}}), env);
 assert.match(cors["Access-Control-Allow-Headers"] || "", /X-Pan123-Token/);
+// "测试连接" is strictly read-only: no upload_request, no probe file, no new folder.
+const verifyCalls = [];
+const verifyFetch = async (url, init = {}) => {
+  const p = new URL(String(url)).pathname;
+  verifyCalls.push({path: p, method: init.method || "GET", auth: init.headers?.Authorization || ""});
+  let data = {};
+  if (p === "/b/api/file/list/new") data = {InfoList: [{FileName: "Red-Garden-Backup", Type: 1, FileId: "9"}]};
+  else if (p === "/b/api/user/info") data = {Nickname: "测试用户"};
+  return new Response(JSON.stringify({code: 0, data}), {status: 200, headers: {"Content-Type": "application/json"}});
+};
+const verifyRequest = new Request("https://worker.example/api/backup/123/verify", {method: "POST", headers: headers({"X-Pan123-Token": "device-session-token", "X-Pan123-Folder": "Red-Garden-Backup"})});
+const verified = await __test.verifyPan123(verifyRequest, env, verifyFetch);
+assert.equal(verified.status, 200);
+const verifyResult = await verified.json();
+assert.equal(verifyResult.connected, true);
+assert.equal(verifyResult.folderExists, true);
+assert.equal(verifyResult.rootItems, 1);
+assert.equal(verifyResult.nickname, "测试用户");
+assert.equal(verifyCalls.some(call => call.path.includes("upload_request")), false);
+assert.equal(verifyCalls.every(call => call.auth === "Bearer device-session-token"), true);
+const verifyDenied = await handle(new Request("https://worker.example/api/backup/123/verify", {method: "POST", headers: {Origin: origin, "X-Pan123-Token": "device-session-token"}}), env);
+assert.equal(verifyDenied.status, 401);
+const verifyNoToken = await __test.verifyPan123(new Request("https://worker.example/api/backup/123/verify", {method: "POST", headers: headers()}), env, verifyFetch);
+assert.equal(verifyNoToken.status, 400);
 // Batch download: the Worker builds a Stored ZIP straight from R2, so the
 // browser never has to fetch 50 MB of fonts into JS memory and deflate them
 // again. Verify the archive byte-for-byte, including the manifest.

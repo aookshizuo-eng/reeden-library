@@ -11,6 +11,7 @@ pages/*.js text eol=lf
 pages/*.css text eol=lf
 pages/*.md text eol=lf
 scripts/*.mjs text eol=lf
+worker/*.mjs text eol=lf
 # Documentation and deploy notes are plain text too; keep their working-tree
 # line endings identical on Windows and Linux checkouts.
 *.md text eol=lf
