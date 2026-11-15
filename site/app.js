@@ -510,6 +510,71 @@ function privateResult(raw, output, decisions) {
   return {bytes: output, originalBytes: raw.length, compressedBytes: output.length, savedBytes: raw.length - output.length,
     packageSelected: true, decisions, format: "red_private_v2", privateWorker: true};
 }
+/* 加密主题里的 .json 配置（theme.json、reader_schema/*、navbar_pack 等）写着
+   图片引用：裸 MD5 / 带扩展名的哈希 / 完整资源路径。图片换成 WebP 后这些引用
+   必须跟着变，否则主题打不开。小配置交给 Worker 映射；有的主题单个 schema.json
+   就有 2 MB，在免费版 Worker 里 JSON.parse 会撞 CPU 上限（10ms）直接 500，所以
+   超过 512 KB 的配置在浏览器里按同一套规则先映射好，Worker 只登记不解析。 */
+const PRIVATE_CONFIG_INLINE_LIMIT = 512 * 1024;
+function privateReplaceExtension(path, extension) {
+  const ext = String(extension || "").replace(/^\./, "").toLowerCase();
+  const safe = ["png", "jpg", "jpeg", "webp", "gif"].includes(ext);
+  return safe && /\.(?:png|jpe?g|webp|gif|img)$/i.test(String(path || "")) ? String(path).replace(/\.(?:png|jpe?g|webp|gif|img)$/i, `.${ext}`) : path;
+}
+function privateRefMaps(replacements) {
+  const maps = {hashes: new Map(), paths: new Map(), extensions: new Map(), tokens: new Set()};
+  const put = (map, key, value) => { const normalized = String(key || "").toLowerCase(); if (normalized) map.set(normalized, value); };
+  for (const item of replacements || []) {
+    const oldSha = String(item.old_sha256 || ""), newSha = String(item.new_sha256 || "");
+    if (oldSha && newSha) { put(maps.hashes, oldSha, newSha); maps.tokens.add(oldSha.toLowerCase()); }
+    if (item.old_md5 && item.new_md5) { put(maps.hashes, item.old_md5, String(item.new_md5)); maps.tokens.add(String(item.old_md5).toLowerCase()); }
+    if (item.path) maps.tokens.add(String(item.path).toLowerCase());
+    const extension = String(item.new_extension || "").replace(/^\./, "").toLowerCase();
+    if (!extension || !item.path) continue;
+    const newPath = privateReplaceExtension(item.path, extension);
+    if (newPath !== item.path) maps.paths.set(item.path, newPath);
+    put(maps.extensions, oldSha, extension);
+    put(maps.extensions, item.old_md5, extension);
+  }
+  return maps;
+}
+// 与 pages/worker-api.js 的 mapPrivateRefs 保持一致：路径整串优先，其次是裸哈希
+// 与「哈希.扩展名」，命中就用新哈希替换、扩展名跟随后端给出的新格式。哈希统一
+// 输出小写——包内资源名就是小写，大写引用照抄成大写文件名反而找不到文件。
+function mapPrivateRefsClient(value, maps) {
+  if (Array.isArray(value)) return value.map(item => mapPrivateRefsClient(item, maps));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapPrivateRefsClient(item, maps)]));
+  if (typeof value !== "string") return value;
+  if (maps.paths.has(value)) return maps.paths.get(value);
+  const exact = maps.hashes.get(value.toLowerCase());
+  if (exact) return exact;
+  const match = value.match(/^([a-f0-9]{32}|[a-f0-9]{64})(\.[A-Za-z0-9]+)?$/i);
+  if (!match) return value;
+  const mapped = maps.hashes.get(match[1].toLowerCase());
+  const extension = maps.extensions.get(match[1].toLowerCase());
+  return mapped ? mapped + (extension ? `.${extension}` : (match[2] || "")) : value;
+}
+async function mapLargePrivateConfigs(entries, slice, replacements, codec) {
+  const result = new Map();
+  if (typeof codec?.sha256Hex !== "function") return result;
+  const maps = privateRefMaps(replacements);
+  if (!maps.tokens.size) return result;
+  for (const entry of entries) {
+    if (!/\.json$/i.test(entry.path)) continue;
+    const bytes = slice(entry);
+    if (bytes.length <= PRIVATE_CONFIG_INLINE_LIMIT) continue;
+    let text;
+    try { text = new TextDecoder().decode(bytes); } catch { continue; }
+    const lower = text.toLowerCase();
+    // 没有任何被替换的图片引用：原样保留，连上传都省掉。
+    if (![...maps.tokens].some(token => lower.includes(token))) continue;
+    let document;
+    try { document = JSON.parse(text); } catch { continue; }
+    const mapped = new TextEncoder().encode(JSON.stringify(mapPrivateRefsClient(document, maps)));
+    result.set(entry.path, {bytes: mapped, sha256: await codec.sha256Hex(mapped)});
+  }
+  return result;
+}
 async function compressPrivateRedViaWorker(raw, codec, options = {}) {
   const prefix = privatePrefix(raw);
   const directory = await privateDirectory(prefix);
@@ -551,9 +616,14 @@ async function compressPrivateRedWithDirectory(raw, codec, options, prefix, dire
       old_md5: oldHash.md5, new_md5: newHash.md5, new_length: item.bytes.length,
       new_extension: imageExtensionForMime(item.mime)};
   });
-  const configs = entries.filter(entry => /\.json$/i.test(entry.path)).map(entry => ({path: entry.path, bytes_base64: base64Bytes(slice(entry))}));
+  const localConfigs = await mapLargePrivateConfigs(entries, slice, replacements, codec);
+  const configs = entries
+    .filter(entry => /\.json$/i.test(entry.path) && !localConfigs.has(entry.path))
+    .map(entry => ({path: entry.path, bytes_base64: base64Bytes(slice(entry))}));
+  for (const [path, item] of localConfigs) configs.push({path, bytes_base64: base64Bytes(item.bytes), mapped: true, sha256: item.sha256});
   const seal = await privateSeal(prefix, replacements, configs);
-  const configMap = new Map((seal.configs || []).map(item => [item.path, bytesFromBase64(item.bytes_base64)]));
+  const configMap = new Map([...localConfigs].map(([path, item]) => [path, item.bytes]));
+  for (const item of seal.configs || []) configMap.set(item.path, bytesFromBase64(item.bytes_base64));
   const changedMap = new Map(changed.map(item => [item.entry.path, item.bytes]));
   const sourceByPath = new Map(entries.map(entry => [entry.path, entry]));
   const chunks = [bytesFromBase64(seal.prefix_base64)];

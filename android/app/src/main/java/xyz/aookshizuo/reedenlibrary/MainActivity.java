@@ -2,6 +2,7 @@ package xyz.aookshizuo.reedenlibrary;
 
 import android.app.Activity;
 import android.app.DownloadManager;
+import android.content.ClipData;
 import android.content.Intent;
 import android.database.Cursor;
 import android.graphics.Bitmap;
@@ -55,6 +56,9 @@ public final class MainActivity extends Activity {
 
     private WebView webView;
     private ValueCallback<Uri[]> fileCallback;
+    // 这次选择器是否支持多选（<input multiple>）。多选结果的 content URI 交给
+    // WebView 并不可靠，所以只要是多选型输入框，一律改走原生复制通道。
+    private boolean fileChooserMulti = false;
     // Documents the user opened through this app's own chooser. The web layer may
     // only ask to delete these, matched by display name and size, so a stray call
     // can never reach a file the user never picked here.
@@ -66,6 +70,7 @@ public final class MainActivity extends Activity {
     private static final String SHARED_PREFIX = SITE_PREFIX + "/__shared__/";
     private final Map<String, File> sharedFiles = new ConcurrentHashMap<>();
     private final org.json.JSONArray sharedMeta = new org.json.JSONArray();
+    private int sharedSequence = 0;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -113,15 +118,20 @@ public final class MainActivity extends Activity {
         }, "red-garden-share").start();
     }
 
-    private void importSharedUri(Uri uri) {
+    private boolean importSharedUri(Uri uri) {
         DocumentInfo info = describe(uri);
         String name = info != null && info.name != null ? info.name : "分享文件";
         String extension = "";
         int dot = name.lastIndexOf('.');
         if (dot >= 0 && dot + 1 < name.length()) extension = name.substring(dot + 1).toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
-        String id = Long.toHexString(System.nanoTime()) + (extension.isEmpty() ? "" : "." + extension);
+        // nanoTime 在同一批循环里可能取到同一个值，加序号避免多选时互相覆盖。
+        String id;
+        synchronized (this) {
+            sharedSequence++;
+            id = Long.toHexString(System.nanoTime()) + "-" + sharedSequence + (extension.isEmpty() ? "" : "." + extension);
+        }
         File dir = new File(getCacheDir(), "shared");
-        if (!dir.isDirectory() && !dir.mkdirs()) return;
+        if (!dir.isDirectory() && !dir.mkdirs()) return false;
         File target = new File(dir, id);
         long total = 0;
         try (InputStream input = getContentResolver().openInputStream(uri);
@@ -135,7 +145,7 @@ public final class MainActivity extends Activity {
             }
         } catch (Exception error) {
             target.delete();
-            return;
+            return false;
         }
         sharedFiles.put(id, target);
         try {
@@ -148,6 +158,7 @@ public final class MainActivity extends Activity {
             }
         } catch (Exception ignored) {
         }
+        return true;
     }
 
     private String sharedMetaJson() {
@@ -160,7 +171,24 @@ public final class MainActivity extends Activity {
         if (webView == null || sharedFiles.isEmpty()) return;
         String script = "window.onRedGardenSharedFiles && window.onRedGardenSharedFiles("
                 + org.json.JSONObject.quote(sharedMetaJson()) + ");";
-        webView.evaluateJavascript(script, null);
+        deliverSharedFiles(script, 0);
+    }
+
+    /**
+     * 页面可能还没执行到 app.js（冷启动后马上分享、或刚选完文件时仍在加载），
+     * 这时注入会静默丢掉。先确认回调存在，最多重试 6 次，仍失败就留给页面
+     * 启动时的 pullSharedFiles 兜底（sharedMeta 不会丢）。
+     */
+    private void deliverSharedFiles(String script, int attempt) {
+        if (webView == null) return;
+        webView.evaluateJavascript("typeof window.onRedGardenSharedFiles === 'function'", value -> {
+            if ("true".equals(value)) {
+                webView.evaluateJavascript(script, null);
+                return;
+            }
+            if (attempt >= 6) return;
+            webView.postDelayed(() -> deliverSharedFiles(script, attempt + 1), 700);
+        });
     }
 
     private WebResourceResponse openSharedFile(Uri uri, String method) {
@@ -290,6 +318,7 @@ public final class MainActivity extends Activity {
                     intent.addCategory(Intent.CATEGORY_OPENABLE);
                     intent.setType("*/*");
                     intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE);
+                    fileChooserMulti = params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE;
                     intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
                             | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                             | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
@@ -399,15 +428,66 @@ public final class MainActivity extends Activity {
             return;
         }
         if (requestCode != FILE_CHOOSER_REQUEST || fileCallback == null) return;
-        Uri[] results = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
+        Uri[] results = collectResultUris(resultCode, data);
+        boolean multiMode = fileChooserMulti;
+        fileChooserMulti = false;
+        if (results == null || results.length == 0) {
+            fileCallback.onReceiveValue(null);
+            fileCallback = null;
+            return;
+        }
+        // 记下这次选择的文档，后面「上传后删除本地副本」要用它按名字+大小匹配。
         synchronized (pickedUris) {
             pickedUris.clear();
-            if (results != null) {
-                for (Uri uri : results) if (uri != null) pickedUris.add(uri);
-            }
+            for (Uri uri : results) if (uri != null) pickedUris.add(uri);
+        }
+        if (results.length > 1 || multiMode) {
+            // 多选时不再把 content URI 数组交回 WebView。国产 ROM 的文档提供器
+            // 经常只让 WebView 拿到第一个 URI（其余静默丢掉），有时干脆一个都不
+            // 认，表现就是"单选能导入、多选没反应"。这里关闭选择结果，把文件复制
+            // 进 cache，复用已经验证过的分享通道（/__shared__/<id> 同源流式读取）
+            // 交给页面按后缀分流，路径与「分享到 APK」完全一致。
+            fileCallback.onReceiveValue(null);
+            fileCallback = null;
+            final Uri[] batch = results;
+            Toast.makeText(this, batch.length > 1 ? "正在读取 " + batch.length + " 个文件…" : "正在读取文件…", Toast.LENGTH_SHORT).show();
+            new Thread(() -> {
+                int copied = 0;
+                for (Uri uri : batch) if (importSharedUri(uri)) copied++;
+                final int ok = copied;
+                runOnUiThread(() -> {
+                    if (ok == 0) {
+                        Toast.makeText(this, "读取所选文件失败，请重新选择", Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    publishSharedFiles();
+                });
+            }, "red-garden-pick").start();
+            return;
         }
         fileCallback.onReceiveValue(results);
         fileCallback = null;
+    }
+
+    /**
+     * 自己解析选择结果，而不是用 FileChooserParams.parseResult：那个实现只读
+     * clipData 或 data 其中之一，部分提供器两者都给，或把多选塞进 clipData 而
+     * data 为空，逐个来源都收一遍再按 URI 去重更稳。
+     */
+    private Uri[] collectResultUris(int resultCode, Intent data) {
+        if (resultCode != RESULT_OK || data == null) return null;
+        List<Uri> uris = new ArrayList<>();
+        ClipData clip = data.getClipData();
+        if (clip != null) {
+            for (int index = 0; index < clip.getItemCount(); index++) {
+                Uri uri = clip.getItemAt(index).getUri();
+                if (uri != null && !uris.contains(uri)) uris.add(uri);
+            }
+        }
+        Uri single = data.getData();
+        if (single != null && !uris.contains(single)) uris.add(single);
+        if (uris.isEmpty()) return null;
+        return uris.toArray(new Uri[0]);
     }
 
     private boolean isTrustedPage() {

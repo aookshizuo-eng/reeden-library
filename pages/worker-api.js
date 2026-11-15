@@ -19,6 +19,12 @@ const PAN123_CHUNK = 16 * 1024 * 1024;
 const PRIVATE_RED_MAGIC = new Uint8Array([0x52, 0x45, 0x44, 0x10]);
 const PRIVATE_MAX_MANIFEST = 1024 * 1024;
 const PRIVATE_MAX_RESOURCE = 80 * 1024 * 1024;
+// 服务端还要 JSON.parse + 遍历配置里的图片引用，免费版只有 10ms CPU，
+// 所以"服务端映射"保持 1 MB；更大的配置（有的主题 reader_schema 就有 2 MB）
+// 由浏览器先按同一规则映射好，这里只登记字节与哈希，不再解析。
+const PRIVATE_MAX_CONFIG = 1024 * 1024;
+const PRIVATE_MAX_MAPPED_CONFIG = 8 * 1024 * 1024;
+const PRIVATE_MAX_MAPPED_TOTAL = 32 * 1024 * 1024;
 
 // R2 list() returns object keys, so records still need individual reads. Keep
 // those reads bounded but concurrent; serial reads made a library refresh take
@@ -832,17 +838,32 @@ async function sealPrivatePrefix(request, env) {
       changed.set(entry.path, {newPath, newSha, newLength: item.new_length});
     }
     const configByPath = new Map();
+    const configShaByPath = new Map();
     const outputConfigs = [];
+    let mappedTotal = 0;
     for (const item of configs) {
       if (!item || typeof item !== "object" || !byPath.has(item.path)) throw new Error("配置资源路径无效");
       if (!String(item.path).toLowerCase().endsWith(".json")) throw new Error("配置资源不是 JSON");
       const bytes = base64Bytes(item.bytes_base64, `configs ${item.path}`);
-      if (bytes.length > 1024 * 1024) throw new Error(`配置资源过大：${item.path}`);
+      if (item.mapped) {
+        // 浏览器已经改好引用：大 schema 在这里 JSON.parse 会撞 CPU 上限，所以只
+        // 校验形状、登记字节与哈希，映射规则与 mapPrivateRefs 完全一致。
+        if (bytes.length > PRIVATE_MAX_MAPPED_CONFIG) throw new Error(`配置资源过大：${item.path}`);
+        mappedTotal += bytes.length;
+        if (mappedTotal > PRIVATE_MAX_MAPPED_TOTAL) throw new Error("配置资源总量超过处理上限");
+        const sha = String(item.sha256 || "").toLowerCase();
+        if (!/^[a-f0-9]{64}$/.test(sha)) throw new Error(`配置资源 SHA-256 无效：${item.path}`);
+        configByPath.set(item.path, bytes);
+        configShaByPath.set(item.path, sha);
+        continue;
+      }
+      if (bytes.length > PRIVATE_MAX_CONFIG) throw new Error(`配置资源过大：${item.path}（超过 1 MB 的配置需由客户端先映射引用后上传）`);
       let document;
       try { document = JSON.parse(new TextDecoder().decode(bytes)); } catch { throw new Error(`配置资源无法解析：${item.path}`); }
       const mapped = mapPrivateRefs(document, hashReplacements, pathReplacements, extensionReplacements);
       const output = new TextEncoder().encode(JSON.stringify(mapped));
       configByPath.set(item.path, output);
+      configShaByPath.set(item.path, await digestHex(output));
       outputConfigs.push({path: item.path, bytes_base64: base64String(output)});
     }
     const newManifest = cloneJson(manifest);
@@ -860,7 +881,7 @@ async function sealPrivatePrefix(request, env) {
         entry.sha256 = change.newSha;
       } else if (configBytes) {
         entry.length = configBytes.length;
-        entry.sha256 = await digestHex(configBytes);
+        entry.sha256 = configShaByPath.get(sourcePath) || await digestHex(configBytes);
       }
       if (seen.has(entry.path)) throw new Error("重封后的资源路径冲突");
       seen.add(entry.path);

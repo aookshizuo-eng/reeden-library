@@ -83,11 +83,22 @@ if (!app.includes("themeDialog") || !app.includes("function openThemeDialog")) e
 if (!/\.theme-list \{ grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/.test(css)) errors.push("手机端主题网格退回单列，空间利用率不足");
 if (!/\.mobile-tabs \{[^}]*grid-template-columns: repeat\(5/.test(css)) errors.push("site/styles.css 缺少手机底部导航布局");
 if (/\.sidebar\.is-open \{ display: flex; \}/.test(css)) errors.push("手机端又启用了左上角抽屉导航");
-for (const marker of ["function webLoginPan123", "function acceptPan123Tokens", "function nativeAppBridge", "openPan123Login", "onRedGardenPan123Login", "toggleMobileMore", "function ingestSharedFiles", "onRedGardenSharedFiles", "__shared__", "releaseSharedFiles"]) {
+for (const marker of ["function webLoginPan123", "function acceptPan123Tokens", "function nativeAppBridge", "openPan123Login", "onRedGardenPan123Login", "toggleMobileMore", "function ingestSharedFiles", "onRedGardenSharedFiles", "__shared__", "releaseSharedFiles", "function mapLargePrivateConfigs", "function mapPrivateRefsClient", "PRIVATE_CONFIG_INLINE_LIMIT", "mapped: true"]) {
   if (!app.includes(marker)) errors.push(`site/app.js 缺少新交互实现：${marker}`);
 }
 for (const marker of ['class="mobile-tabs"', 'data-tab="themes"', 'id="mobileMore"', 'id="pan123WebLogin"']) {
   if (!html.includes(marker)) errors.push(`site/index.html 缺少手机导航或 123 登录入口：${marker}`);
+}
+// APK 多选：WebView 不可靠地把多个 content URI 交给页面（国产 ROM 只给第一个），
+// 所以多选必须自己复制进 cache 再走 /__shared__ 通道。别退回 parseResult 单来源解析。
+try {
+  const java = await readFile(path.join(root, "android/app/src/main/java/xyz/aookshizuo/reedenlibrary/MainActivity.java"), "utf8");
+  for (const marker of ["collectResultUris", "getClipData()", "red-garden-pick", "publishSharedFiles();"]) {
+    if (!java.includes(marker)) errors.push(`MainActivity 多选导入通道缺失：${marker}`);
+  }
+  if (/parseResult\s*\(resultCode, data\)/.test(java)) errors.push("MainActivity 又用回 parseResult，多选会只剩第一个文件");
+} catch (error) {
+  errors.push(`MainActivity.java 无法读取：${error.message}`);
 }
 const [codecSource] = await Promise.all([readFile(path.join(source, "free_codec.js"), "utf8")]);
 if (!codecSource.includes("options.store")) errors.push("site/free_codec.js 缺少 Stored ZIP 选项，批量下载会重复压缩字体");

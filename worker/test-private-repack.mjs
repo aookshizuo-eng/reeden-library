@@ -114,4 +114,38 @@ assert.equal(assembledTheme.light.backgroundHash, `${newSha}.webp`);
 
 const directoryUnauthorized = await handle(new Request("https://worker.example/api/private/directory", {method: "POST", headers: {Origin: origin, "Content-Type": "application/json"}, body: JSON.stringify({prefix_base64: toBase64(prefix)})}), env);
 assert.equal(directoryUnauthorized.status, 401);
+
+// 大配置（有的主题 reader_schema/*.json 单文件就 2 MB）在免费版里 JSON.parse 会
+// 撞 CPU 上限，改由浏览器映射后以 mapped + sha256 提交；Worker 只登记不改内容。
+const mappedThemeBytes = encoder.encode(JSON.stringify({name: "Test", light: {backgroundImage: "assets/image.webp", backgroundHash: `${newSha}.webp`}}));
+const mappedThemeSha = await imageSha(mappedThemeBytes);
+const mappedSealResponse = await handle(new Request("https://worker.example/api/private/seal", {
+  method: "POST", headers: headers(), body: JSON.stringify({
+    prefix_base64: toBase64(prefix),
+    replacements: [{path: "assets/image.img", old_sha256: oldSha, new_sha256: newSha, new_length: replacement.length, new_extension: "webp"}],
+    configs: [{path: "theme.json", bytes_base64: toBase64(mappedThemeBytes), mapped: true, sha256: mappedThemeSha}],
+  }),
+}), env);
+assert.equal(mappedSealResponse.status, 200);
+const mappedSeal = await mappedSealResponse.json();
+assert.equal(mappedSeal.configs.length, 0, "已映射的配置不应再回传字节，否则等于白传两遍");
+assert.equal(mappedSeal.entries[0].sha256, mappedThemeSha);
+assert.equal(mappedSeal.entries[0].length, mappedThemeBytes.length);
+assert.equal(mappedSeal.entries[0].config, true);
+const mappedPrefix = Buffer.from(mappedSeal.prefix_base64, "base64");
+assert.equal(mappedSeal.total_length, mappedPrefix.length + mappedThemeBytes.length + replacement.length);
+const mappedHeaderLength = new DataView(mappedPrefix.buffer, mappedPrefix.byteOffset, mappedPrefix.byteLength).getUint32(4, false);
+const mappedHeader = JSON.parse(decoder.decode(mappedPrefix.subarray(8, 8 + mappedHeaderLength)));
+const mappedManifest = JSON.parse(decoder.decode(await crypto.subtle.decrypt({name: "AES-GCM", iv: Buffer.from(mappedHeader.manifestNonce, "base64")}, key, mappedPrefix.subarray(8 + mappedHeaderLength))));
+assert.equal(mappedManifest.entries[0].sha256, mappedThemeSha);
+assert.equal(mappedManifest.entries[0].length, mappedThemeBytes.length);
+
+const badMapped = await handle(new Request("https://worker.example/api/private/seal", {
+  method: "POST", headers: headers(), body: JSON.stringify({
+    prefix_base64: toBase64(prefix),
+    replacements: [{path: "assets/image.img", old_sha256: oldSha, new_sha256: newSha, new_length: replacement.length, new_extension: "webp"}],
+    configs: [{path: "theme.json", bytes_base64: toBase64(mappedTheme), mapped: true, sha256: "nope"}],
+  }),
+}), env);
+assert.equal(badMapped.status, 422);
 console.log("private repack worker tests passed");
