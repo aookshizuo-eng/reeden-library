@@ -742,6 +742,15 @@ async function compressPrivateRedLegacy(raw, codec, options = {}) {
 }
 const PAN123_TOKEN_STORAGE_KEY = "reeden-pan123-token";
 const PAN123_FOLDER_STORAGE_KEY = "reeden-pan123-folder";
+// 123 的登录与扫码接口都回 `Access-Control-Allow-Origin: *`，允许任意来源跨域
+// 调用。浏览器直接连 123 时，请求从用户自己的网络出口发出，123 不会把它当成
+// 「海外登录」而强制弹阿里云图形验证码；反过来，同步 Worker 代发时请求从
+// Cloudflare 出口出去，123 按海外 IP 处理并要求验证码——这正是网页端账号密码
+// 登录一直失败的原因。所以浏览器同步模式下优先让浏览器自己直连。
+const PAN123_SIGN_IN_URL = "https://login.123pan.com/api/user/sign_in";
+const PAN123_QR_GENERATE_URL = "https://user.123pan.cn/api/user/qr-code/generate";
+const PAN123_QR_RESULT_URL = "https://user.123pan.cn/api/user/qr-code/result";
+const PAN123_WEB_URL = "https://yun.123pan.cn/";
 function pan123BackupConfig() {
   try { return {token: localStorage.getItem(PAN123_TOKEN_STORAGE_KEY) || "", folder: localStorage.getItem(PAN123_FOLDER_STORAGE_KEY) || "Red-Garden-Backup"}; }
   catch { return {token: "", folder: "Red-Garden-Backup"}; }
@@ -822,6 +831,8 @@ function nativeAppBridge() {
 }
 function pan123TokenSourceLabel(source) {
   const text = String(source || "");
+  if (text === "scan") return "123 云盘扫码";
+  if (text === "password") return "123 云盘账号密码登录";
   if (text.startsWith("localStorage:")) return "网页本地存储";
   if (text.startsWith("sessionStorage:")) return "网页会话存储";
   return "网页 Cookie";
@@ -839,7 +850,10 @@ function acceptPan123Tokens(payload) {
   if (input) input.value = tokens[0].token;
   try { localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, tokens[0].token); } catch {}
   try { navigator.clipboard?.writeText(tokens[0].token)?.catch(() => {}); } catch {}
-  operationMessage(output, `已从${pan123TokenSourceLabel(tokens[0].source)}取回会话（共 ${tokens.length} 个候选），已填入并尝试复制，正在验证…`);
+  const source = String(tokens[0].source || "");
+  operationMessage(output, source === "scan" || source === "password"
+    ? `${pan123TokenSourceLabel(source)}成功，会话已填入并尝试复制，正在验证…`
+    : `已从${pan123TokenSourceLabel(source)}取回会话（共 ${tokens.length} 个候选），已填入并尝试复制，正在验证…`);
   const tryOne = async index => {
     if (!apiBase) {
       operationMessage(output, "已取回会话 Token 并保存。请先在「多设备访问」保存同步 API 地址，再回来点「测试连接」。");
@@ -856,9 +870,28 @@ function acceptPan123Tokens(payload) {
   };
   tryOne(0).catch(() => {});
 }
-// 网页端账号密码登录：浏览器读不到 123 的跨域响应，也不该让用户去开发者工具里
-// 抄 Token，所以这一次登录请求交给同步 Worker 代发（/api/storage/123/login），
-// 只回会话 Token 与昵称。密码不落盘、不写 R2、不写仓库。
+// 浏览器直连 123 官方登录接口。请求从用户自己的网络出口发出，123 不会按
+// 「海外 IP」强制弹阿里云图形验证码；密码只在这一层经过 JS，不进我们的
+// Worker、不写 R2、不落盘。
+async function pan123DirectSignIn(username, password) {
+  const isMail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(username);
+  const body = isMail ? {mail: username, password, type: 2} : {passport: username, password, remember: true};
+  const response = await fetch(PAN123_SIGN_IN_URL, {
+    method: "POST",
+    headers: {"Content-Type": "application/json", platform: "web", "app-version": "3"},
+    body: JSON.stringify(body),
+  });
+  const data = await response.json().catch(() => ({}));
+  const code = Number(data?.code);
+  const token = String(data?.data?.token || "");
+  if (![0, 200].includes(code) || !token) {
+    const detail = String(data?.message || data?.msg || "").trim();
+    throw new Error(detail || `123 登录失败（HTTP ${response.status}）`);
+  }
+  return token;
+}
+// 网页端账号密码登录：优先让浏览器直接连 123 官方登录接口（不会被判成海外
+// IP 而要验证码），失败再退回同步 Worker 代发（本机后端模式没有跨域限制）。
 async function loginPan123Quick(event) {
   event.preventDefault();
   const form = event.currentTarget;
@@ -866,34 +899,44 @@ async function loginPan123Quick(event) {
   const username = String(form.elements.username?.value || "").trim();
   const password = String(form.elements.password?.value || "");
   if (!username || !password) { operationMessage(output, "请填写 123 云盘账号和密码。", true); return; }
-  if (!apiBase) { operationMessage(output, "请先在「多设备访问」保存同步 API 地址与写入 Token：登录请求要经它转发。", true); return; }
   const button = $("#pan123QuickLoginButton");
   if (button) button.disabled = true;
   operationMessage(output, "正在登录 123 云盘…");
   try {
-    const response = await fetch(apiUrl("/api/storage/123/login"), {
-      method: "POST", headers: requestHeaders({"Content-Type": "application/json"}),
-      body: JSON.stringify({username, password}),
-    });
-    const text = await response.text();
-    let data = {}; try { data = text ? JSON.parse(text) : {}; } catch {}
-    if (response.status === 401) throw new Error("同步写入 Token 无效或未保存，请先在「多设备访问」重新保存");
-    if (!response.ok || !data.ok || !data.token) throw new Error(data.error || `HTTP ${response.status}`);
+    let token = "";
+    let directNote = "";
+    try {
+      token = await pan123DirectSignIn(username, password);
+    } catch (error) {
+      directNote = error?.message || "";
+      // 直连不通（扩展拦截、网络受限）时再试 Worker 代发。
+      if (apiBase) {
+        const response = await fetch(apiUrl("/api/storage/123/login"), {
+          method: "POST", headers: requestHeaders({"Content-Type": "application/json"}),
+          body: JSON.stringify({username, password}),
+        });
+        const text = await response.text();
+        let data = {}; try { data = text ? JSON.parse(text) : {}; } catch {}
+        if (response.status === 401) throw new Error("同步写入 Token 无效或未保存，请先在「多设备访问」重新保存");
+        if (response.ok && data.ok && data.token) token = data.token;
+        else directNote = data.error || `HTTP ${response.status}`;
+      }
+    }
+    if (!token) throw new Error(directNote || "123 登录接口没有返回会话");
     // 先把密码从 DOM 里清掉，再保存 Token。
     form.reset();
     const input = $("#pan123BackupToken");
-    if (input) input.value = data.token;
+    if (input) input.value = token;
     try {
-      localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, data.token);
+      localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, token);
       localStorage.setItem(PAN123_FOLDER_STORAGE_KEY, String($("#pan123BackupFolder")?.value || "").trim() || "Red-Garden-Backup");
-      navigator.clipboard?.writeText(data.token)?.catch(() => {});
+      navigator.clipboard?.writeText(token)?.catch(() => {});
     } catch {}
-    const who = data.nickname ? `（${data.nickname}）` : "";
-    operationMessage(output, `已连接 123 云盘${who}。会话已填入输入框并尝试复制到剪贴板；原包会在确认主题时备份到 123，压缩包和预览仍存 R2。`);
     toast("123 云盘已连接");
+    await acceptPan123Tokens([{token, source: "password"}]);
   } catch (error) {
-    const message = error instanceof TypeError ? "暂时无法连接同步 API，请检查网络与地址。" : error.message;
-    operationMessage(output, `123 登录失败：${message}。若提示需要验证码，请改用「网页登录」，或在下方直接粘贴会话 Token。`, true);
+    const message = error instanceof TypeError ? "浏览器没能连上 123 登录接口（可能被扩展或网络拦截）。" : error.message;
+    operationMessage(output, `123 登录失败：${message}。如果提示需要验证码，请改用「扫码连接」，或在下方直接粘贴会话 Token。`, true);
   } finally {
     if (button) button.disabled = false;
   }
@@ -910,7 +953,7 @@ async function webLoginPan123() {
   }
   // 带 noopener 时 window.open 一律返回 null，不能拿返回值判断是否被拦截；
   // 先正常打开再断开 opener 引用，既保留句柄也不会把本页交给对方。
-  const opened = window.open("https://www.123pan.com/", "_blank");
+  const opened = window.open(PAN123_WEB_URL, "_blank");
   if (opened) {
     try { opened.opener = null; } catch {}
     // 浏览器不允许本站读另一个域的 localStorage / cookie，所以登录后没法
@@ -918,7 +961,7 @@ async function webLoginPan123() {
     // 用户已经把 Token 粘进去了，直接接上校验，不再要求多点一次。
     const details = $("#pan123TokenDetails");
     if (details) details.open = true;
-    operationMessage(output, "已打开 123 云盘网页。登录完成后回到本页，会话输入框会自动展开；浏览器不能跨站读取 123 的登录态，请在 123 页面复制会话 Token 后点「从剪贴板粘贴」，或直接用上面的账号密码登录。");
+    operationMessage(output, "已打开 123 云盘网页。浏览器不能跨站读取 123 的登录态，所以这条路上拿不回 Token：请在 123 页面复制会话 Token 后点「从剪贴板粘贴」，或直接用上面的扫码 / 账号密码登录（都由本机浏览器直连 123，不会再被判定成海外登录）。");
     const onBack = () => {
       const input = $("#pan123BackupToken");
       if (!input) return;
@@ -928,7 +971,7 @@ async function webLoginPan123() {
     };
     window.addEventListener("focus", onBack, {once: true});
   } else {
-    operationMessage(output, "没打开新窗口（可能被弹窗拦截）。请手动打开 https://www.123pan.com/ 登录后复制会话 Token。", true);
+    operationMessage(output, `没打开新窗口（可能被弹窗拦截）。请手动打开 ${PAN123_WEB_URL} 登录后复制会话 Token。`, true);
   }
 }
 // 原生登录页回传：payload 是 [{token, source}] 的 JSON 字符串。
@@ -2927,16 +2970,22 @@ function renderStorageSummary(data) {
     $("#credentialState").textContent = syncToken ? "同步写入令牌已填写（仅保存在本机浏览器）。" : "尚未填写同步写入令牌；读取可用，上传会被 Worker 拒绝。";
     $("#pan123CredentialState").textContent = "会话只保存在本机浏览器；测试连接、备份清单与上传由同步 Worker 代转，Token 不写入仓库或 R2。";
     $("#storageForm").hidden = true;
-    // 静态模式没有本机后端，扫码与账号密码登录接口不可用，但网页登录、
-    // Token、测试连接和备份清单都还能用，所以保留说明块、只收起后端面板。
+    // 静态模式没有本机后端，但 123 的登录与扫码接口允许跨域，浏览器可以自己
+    // 直连——请求从用户自己的网络出口发出，不会被 123 判定成「海外登录」而
+    // 强制弹阿里云图形验证码。所以扫码面板在这里照常可用。
     $("#pan123Label").hidden = false;
     $("#pan123Label h2").textContent = "连接 123 云盘";
     const labelNote = $("#pan123Label p:first-of-type");
-    if (labelNote) labelNote.textContent = "可选：123 云盘只备份原始 RED，压缩 RED、字体和预览仍存 R2。会话 Token 只保存在本机浏览器，测试连接、备份清单与上传由同步 Worker 代转。";
+    if (labelNote) labelNote.textContent = "可选：123 云盘只备份原始 RED，压缩 RED、字体和预览仍存 R2。扫码或账号密码登录都由本机浏览器直接连 123 完成，会话 Token 只保存在本机浏览器，测试连接、备份清单与上传由同步 Worker 代转。";
     // 主 WebView 不允许离开本站，这个外链点了也只会被拦下；登录入口在上方面板里。
     const labelLink = $("#pan123Label .download-link");
     if (labelLink) labelLink.hidden = true;
-    $("#pan123Panel").hidden = true;
+    $("#pan123Panel").hidden = false;
+    // 只属于本机后端的子块在这里没有对应实现：Worker 代发登录会被 123 的
+    // 海外风控拦下，后台上传探针也没有对应路由，留着只会点了报错。
+    $("#pan123PasswordDetails").hidden = true;
+    $("#pan123SessionDetails").hidden = true;
+    $("#pan123ProbeBlock").hidden = true;
     return;
   }
   $("#storageForm").hidden = false;
@@ -3654,9 +3703,101 @@ function stopPan123Qr(message = "") {
   pan123QrController?.abort();
   pan123QrController = undefined;
   pan123QrSession = undefined;
-  $("#pan123QrImage").removeAttribute("src");
+  const host = $("#pan123QrHost");
+  if (host) host.innerHTML = "";
   $("#pan123QrCode").hidden = true;
   operationMessage($("#pan123QrStatus"), message);
+}
+// 浏览器本地把扫码内容画成二维码（vendor qrcode-generator，MIT）。
+// 123 的二维码内容就是「落地页 URL + uniID」，用官方那套参数最稳。
+function renderPan123Qr(text) {
+  const host = $("#pan123QrHost");
+  if (!host) return false;
+  try {
+    const factory = window.qrcode;
+    if (typeof factory !== "function") throw new Error("二维码组件没有加载");
+    const qr = factory(0, "M");
+    qr.addData(String(text || ""));
+    qr.make();
+    const count = qr.getModuleCount();
+    const margin = 3;
+    const size = count + margin * 2;
+    let path = "";
+    for (let row = 0; row < count; row++) {
+      for (let col = 0; col < count; col++) {
+        if (qr.isDark(row, col)) path += `M${col + margin} ${row + margin}h1v1h-1z`;
+      }
+    }
+    host.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" role="img" aria-label="123 云盘扫码登录二维码"><rect width="${size}" height="${size}" fill="#fffdf8"/><path d="${path}" fill="#1d1a15"/></svg>`;
+    return true;
+  } catch (error) {
+    host.innerHTML = `<p class="inline-error">二维码渲染失败：${escapeHtml(error.message || error)}</p>`;
+    return false;
+  }
+}
+// 浏览器直连 123 扫码登录：请求从用户自己的网络出口发出，不会被 123 当成
+// 海外 IP 而弹验证码，因此这是浏览器同步模式下唯一不依赖图形验证的登录方式。
+async function startPan123BrowserQr() {
+  const generation = pan123QrGeneration;
+  const status = $("#pan123QrStatus");
+  operationMessage(status, "正在生成登录二维码…");
+  let payload = {};
+  try {
+    const response = await fetch(PAN123_QR_GENERATE_URL, {headers: {platform: "web", "app-version": "3"}});
+    payload = await response.json().catch(() => ({}));
+  } catch {
+    payload = {};
+  }
+  if (generation !== pan123QrGeneration) return;
+  const uniID = String(payload?.data?.uniID || "");
+  const url = String(payload?.data?.url || "");
+  if (Number(payload?.code) !== 0 || !uniID) {
+    operationMessage(status, "二维码暂时无法生成，请稍后重试，或改用账号密码登录。", true);
+    return;
+  }
+  const text = `${url}?env=production&uniID=${encodeURIComponent(uniID)}&source=123pan&type=login`;
+  if (!renderPan123Qr(text)) {
+    operationMessage(status, "二维码渲染失败，请刷新页面后重试，或改用账号密码登录。", true);
+    return;
+  }
+  $("#pan123QrCode").hidden = false;
+  pan123QrSession = { id: uniID, expiresAt: Date.now() + 120000 };
+  operationMessage(status, "用123云盘App或微信扫码并确认。等待扫码…");
+  pan123QrExpiryTimer = setTimeout(() => { stopPan123Qr("二维码已过期，请重新扫码连接。"); updateStorageControls(); }, pan123QrSession.expiresAt - Date.now());
+  pan123QrTimer = setTimeout(() => pollPan123BrowserQr(generation, uniID), 1200);
+}
+async function pollPan123BrowserQr(generation, uniID) {
+  if (generation !== pan123QrGeneration || !uniID) return;
+  if (Date.now() >= (pan123QrSession?.expiresAt || 0)) {
+    stopPan123Qr("二维码已过期，请重新扫码连接。"); updateStorageControls(); return;
+  }
+  // 手机扫码要切到 123 云盘 App，此时 WebView 会短暂隐藏；只放慢轮询，不要中止。
+  if (document.hidden) { pan123QrTimer = setTimeout(() => pollPan123BrowserQr(generation, uniID), 4000); return; }
+  let payload = {};
+  try {
+    const response = await fetch(`${PAN123_QR_RESULT_URL}?uniID=${encodeURIComponent(uniID)}&remember=true&gray=true`, {headers: {platform: "web", "app-version": "3"}});
+    payload = await response.json().catch(() => ({}));
+  } catch {
+    pan123QrTimer = setTimeout(() => pollPan123BrowserQr(generation, uniID), 3000);
+    return;
+  }
+  if (generation !== pan123QrGeneration) return;
+  const code = Number(payload?.code);
+  if (code === 200) {
+    // 200 是 123 扫码成功的约定返回码，会话 Token 就在 data 里。
+    const data = payload?.data || {};
+    const token = String(data.token || data.accessToken || data.access_token || data.Authorization || "");
+    stopPan123Qr("扫码登录成功。");
+    if (token) await acceptPan123Tokens([{token, source: "scan"}]);
+    else operationMessage($("#pan123QrStatus"), "扫码已确认，但没有取回会话 Token，请重新扫码。", true);
+    return;
+  }
+  if (code !== 0) { stopPan123Qr("暂时无法确认扫码状态，请重新扫码连接。"); updateStorageControls(); return; }
+  const loginStatus = Number(payload?.data?.loginStatus);
+  if (loginStatus === 4) { stopPan123Qr("二维码已过期，请重新扫码连接。"); updateStorageControls(); return; }
+  if (loginStatus === 2) { stopPan123Qr("你已在手机上拒绝了这次登录，请重新扫码。"); updateStorageControls(); return; }
+  operationMessage($("#pan123QrStatus"), loginStatus === 1 ? "已扫码，请在手机上确认登录。" : "用123云盘App或微信扫码并确认。等待扫码…");
+  pan123QrTimer = setTimeout(() => pollPan123BrowserQr(generation, uniID), 1200);
 }
 async function startPan123Qr() {
   // 以前这里遇到 document.hidden / 有后台任务就直接 return，手机上点了没反应，
@@ -3664,6 +3805,8 @@ async function startPan123Qr() {
   if (state.operation) { operationMessage($("#pan123QrStatus"), "当前有操作正在进行，完成后再生成二维码。", true); return; }
   if (activeJobs().length) { operationMessage($("#pan123QrStatus"), "后台任务正在处理，完成后再扫码登录。", true); return; }
   stopPan123Qr();
+  // 浏览器同步模式直接连 123：不经过 Worker 就没有「海外 IP 强制验证码」。
+  if (browserSyncEnabled()) { await startPan123BrowserQr(); return; }
   const generation = pan123QrGeneration;
   pan123QrController = new AbortController();
   const requestController = pan123QrController;
@@ -3676,7 +3819,8 @@ async function startPan123Qr() {
     if (generation !== pan123QrGeneration || state.activeView !== "storage") return;
     if (!response.ok || result.ok === false || !result.id || !/^data:image\/[a-z+]+;base64,[a-zA-Z0-9+/=\r\n]+$/i.test(result.image || "")) throw new Error("二维码暂时无法生成，请稍后再试。");
     pan123QrSession = { id: result.id, expiresAt: Date.now() + Math.min(120, Math.max(1, Number(result.expiresIn) || 120)) * 1000 };
-    $("#pan123QrImage").src = result.image;
+    const host = $("#pan123QrHost");
+    if (host) host.innerHTML = `<img id="pan123QrImage" alt="123扫码登录" width="200" height="200" src="${escapeHtml(result.image)}" />`;
     $("#pan123QrCode").hidden = false;
     operationMessage($("#pan123QrStatus"), "用123云盘App或微信扫码并确认。等待扫码…");
     pan123QrExpiryTimer = setTimeout(() => { stopPan123Qr("二维码已过期，请重新扫码连接。"); updateStorageControls(); }, pan123QrSession.expiresAt - Date.now());

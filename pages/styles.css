@@ -429,6 +429,10 @@ h3 { font-size: 14.5px; line-height: 1.35; margin-bottom: 4px; font-weight: 600;
 .qr-login-code { display: grid; gap: 8px; justify-items: start; }
 .qr-login-code[hidden] { display: none; }
 .qr-login-code img { display: block; width: min(200px, 100%); height: auto; background: #fff; border-radius: 8px; }
+/* 浏览器直连扫码时二维码由本机 qrcode.js 画成 SVG，不再是后端返回的位图。 */
+.qr-host { display: block; }
+.qr-host svg { display: block; width: min(200px, 100%); height: auto; background: #fffdf8; border: 1px solid var(--border); border-radius: 8px; padding: 6px; }
+.qr-host .inline-error { margin: 0; }
 .qr-login .operation-status:empty { display: none; }
 .storage-inventory { display: grid; gap: 16px; }
 .inventory-row { display: flex; gap: 20px; justify-content: space-between; align-items: flex-start; }

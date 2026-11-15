@@ -7,7 +7,7 @@ import crypto from "node:crypto";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const source = path.join(root, "site");
 const target = path.join(root, "pages");
-const staticFiles = ["index.html", "app.js", "styles.css", "free_codec.js", "free_codec_worker.js", "FREE_CODEC.md", "opentype.min.js", "omggif.js"];
+const staticFiles = ["index.html", "app.js", "styles.css", "free_codec.js", "free_codec_worker.js", "FREE_CODEC.md", "opentype.min.js", "omggif.js", "qrcode.js"];
 const errors = [];
 const hash = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
 
@@ -40,7 +40,7 @@ for (const marker of ["function fontPreviewMarkup", "function loadFontPreviewFac
 for (const id of ["fontList", "fontCount", "fontEmpty", "themeAuthorFilter", "downloadSelectedTheme", "downloadSelectedFont", "downloadSelectedAsset", "queueForLater", "resumeStagedJobs", "pan123BackupToken", "verifyPan123Backup", "listPan123Backup", "verifyPan123Write", "pan123BackupList", "autoResumeQueue", "compressionPresetGroup", "compressionCustomFields", "compressionQuality", "compressionMaxEdge", "compressionQualityDown", "compressionQualityUp", "compressionQualityValue", "compressionGifColors", "compressionReader", "compressionIconLossless", "reviewProgress", "reviewProgressTitle", "reviewProgressCount", "reviewProgressBar", "reviewProgressStage", "reviewProgressCurrent", "cleanupDialog", "cleanupList", "cleanupConfirm", "cleanupCancel", "cleanupSelectAll", "cleanupSummary", "localCleanupEnabled", "localCleanupHint", "closeCleanupDialog", "themeDensity", "themeSearchInput", "themeAuthorFilter", "themeDialog", "themeDialogBody", "closeThemeDialog", "pan123WebLogin", "pan123WebLoginHint", "pan123QuickLogin", "pan123QuickLoginButton", "pan123PasteToken", "mobileMore", "moreRuntimeMode", "moreJobCount", "themeCategoryFilter", "pendingList", "bulkCategoryTheme", "bulkCategoryDialog", "bulkCategoryPicks", "bulkCategoryInput", "bulkCategoryApply", "bulkCategoryAdd", "closeBulkCategory", "bulkCategoryCancel"]) {
   if (!html.includes(`id=\"${id}\"`)) errors.push(`页面结构回归检查失败：缺少 #${id}`);
 }
-for (const file of ["app.js", "free_codec.js", "free_codec_worker.js", "omggif.js", "opentype.min.js"]) {
+for (const file of ["app.js", "free_codec.js", "free_codec_worker.js", "omggif.js", "opentype.min.js", "qrcode.js"]) {
   const result = spawnSync(process.execPath, ["--check", path.join(source, file)], {encoding: "utf8"});
   if (result.status !== 0) errors.push(`${file} 语法检查失败：${(result.stderr || result.stdout).trim()}`);
 }
@@ -158,6 +158,20 @@ for (const marker of ["function pathExtensionSuffix", "const effectiveExtension 
   if (!workerApi.includes(marker)) errors.push(`pages/worker-api.js 缺少加密包槽位保名实现：${marker}`);
 }
 if (!css.includes(".bulk-hint")) errors.push("site/styles.css 缺少 .bulk-hint，批量按钮的原因提示没有样式");
+
+// 123 云盘登录回归：账号密码登录曾经交给同步 Worker 代发，请求从 Cloudflare
+// 出口出去，123 判定「海外登录」并强制弹阿里云图形验证码，网页端因此永远
+// 连不上。现在改为浏览器直连 123（这些接口都允许任意来源跨域），并补上
+// 浏览器直连扫码，让不依赖图形验证的路径也能走通。
+for (const marker of ["PAN123_SIGN_IN_URL", "PAN123_QR_GENERATE_URL", "PAN123_QR_RESULT_URL", "function pan123DirectSignIn", "function renderPan123Qr", "function startPan123BrowserQr", "function pollPan123BrowserQr", "async function loginPan123Quick"]) {
+  if (!app.includes(marker)) errors.push(`site/app.js 缺少 123 浏览器直连登录实现：${marker}`);
+}
+if (!app.includes('"https://login.123pan.com/api/user/sign_in"') || !app.includes('"https://user.123pan.cn/api/user/qr-code/generate"')) errors.push("site/app.js 的 123 直连接口地址不对");
+if (!html.includes('src="./qrcode.js"')) errors.push("site/index.html 未加载 qrcode.js，浏览器直连扫码画不出二维码");
+if (!html.includes('id="pan123QrHost"')) errors.push("site/index.html 缺少 #pan123QrHost，扫码二维码没有落点");
+if (!html.includes('id="pan123ProbeBlock"')) errors.push("site/index.html 缺少 #pan123ProbeBlock");
+if (!app.includes('$("#pan123ProbeBlock").hidden = true;')) errors.push("site/app.js 未在浏览器同步模式下隐藏后台上传探针");
+if (!(await readFile(path.join(source, "qrcode.js"), "utf8")).includes("var qrcode = function()")) errors.push("site/qrcode.js 不是预期的 vendor（qrcode-generator），扫码会画不出二维码");
 
 const urlArg = process.argv.find(value => value.startsWith("--url="));
 const liveUrl = (urlArg ? urlArg.slice("--url=".length) : process.env.REEDEN_CHECK_URL || "").replace(/\/+$/, "");
