@@ -1133,7 +1133,12 @@ async function loginPan123(request, env, fetchImpl = fetch) {
   const code = Number(data?.code);
   const token = String(data?.data?.token || "");
   if (![0, 200].includes(code) || !token) {
-    return json({ok: false, error: String(data?.message || `123 登录失败（HTTP ${response.status}）`), code}, 422, request, env);
+    // Worker 代发时请求从 Cloudflare 出口出去，123 多半按「海外登录」处理并
+    // 要求图形验证码，所以这里的失败几乎都不是账号密码本身的问题。说明白，
+    // 好让用户改走浏览器直连或扫码。
+    const detail = String(data?.message || "").trim();
+    const error = detail || "123 没有接受这次登录。Worker 代发使用海外出口 IP，123 通常会要求图形验证码——请改用网页端的「扫码连接」或账号密码浏览器直连登录。";
+    return json({ok: false, error, code}, 422, request, env);
   }
   // 顺手取昵称，前端就能只说「已连接 xxx」，不必把文件清单铺出来。
   let nickname = "";

@@ -892,8 +892,10 @@ async function pan123DirectSignIn(username, password) {
   const token = String(data?.data?.token || "");
   if (![0, 200].includes(code) || !token) {
     const detail = String(data?.message || data?.msg || "").trim();
-    if (detail) throw new Error(detail);
-    throw new Error("123 没有接受这次登录：账号或密码不正确，或该账号需要短信验证码。若密码登录一直不过，请改用「扫码连接」。");
+    const error = new Error(detail || "123 没有接受这次登录：账号或密码不正确，或该账号需要短信验证码。若密码登录一直不过，请改用「扫码连接」。");
+    // 123 已经明确拒绝这次登录，再拿 Worker 的海外出口重试一次只会更糟。
+    error.rejected = true;
+    throw error;
   }
   return token;
 }
@@ -915,6 +917,9 @@ async function loginPan123Quick(event) {
     try {
       token = await pan123DirectSignIn(username, password);
     } catch (error) {
+      // 123 明确拒绝（账号/密码/二次验证）时不再回退：Worker 代发用的是
+      // Cloudflare 出口 IP，123 会按海外登录要求图形验证码，重试只会更糟。
+      if (error?.rejected) throw error;
       directNote = error?.message || "";
       // 直连不通（扩展拦截、网络受限）时再试 Worker 代发。
       if (apiBase) {
