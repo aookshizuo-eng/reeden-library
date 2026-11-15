@@ -30,12 +30,14 @@ Android APK 加载 `https://aookshizuo-eng.github.io/reeden-library/`，它来�
 
 `pages/worker-api.js`（由 `pages/_worker.js` 挂载，R2 绑定 `R2_ASSETS`）是 Cloudflare Pages 正在使用的同步接口；`worker/worker.js` 是同一实现的可单独部署入口（R2 绑定 `ASSETS`）。接口包含内容寻址对象读写、共享对象安全的删除（`DELETE /api/objects/staging/<sha>.<ext>` 只允许删暂存副本，库内对象走记录删除）、分类更新、持久化任务（`/api/jobs`）、加密目录 `/api/private/directory`、前缀重封 `/api/private/seal`、兼容旧客户端的 `/api/private/repack`，可选的原包备份 `/api/backup/123`、只读连接校验 `/api/backup/123/verify`、只读备份清单 `/api/backup/123/list`，以及流式批量下载 `/api/download?kind=font&ids=...`（`&probe=1` 只返回文件清单，不读取对象字节）。Worker 不持有 123 会话，浏览器也拿不到服务端私有格式密钥。
 
+R2 对象键只保留可读名：`compressed/少女心事-压缩.red`、`originals/少女心事-原包.red`、`previews/少女心事-预览.jpg`、`fonts/浪漫融化在银河里.ttf`。SHA-256 不再写进文件名——浏览器上传时通过 `X-Content-SHA256` 请求头声明，Worker 校验一致后写进对象自定义元数据 `sha256`。同名但内容不同时自动加 `-2`、`-3`，内容相同则复用同一个对象。**改动前写入的对象仍带 `~<sha>` 后缀，接口继续可读可删，不迁移也能正常使用**；重新上传一次即可换成干净名字。
+
 不要将 `SYNC_WRITE_TOKEN`、R2 Access Key、Secret Access Key、`REEDEN_SECRET_KEY` 或 123 会话提交到 GitHub。
 
 ## Android APK
 
 `android/` 是一个轻量 WebView 壳：它把同一份 Pages 前端打进 APK，并保留 GitHub Pages origin，因此手机和电脑填写同一个 R2 Worker 后共用同一套主题、字体和预览库。APK 需要联网访问 R2；它不会把 R2 密钥或 123 会话打包进去。
 
-没有 Android Studio 时也可以用 `android/build-apk.sh` 手动打包：脚本使用 `android/toolchain/` 下的 JDK 17、build-tools 35 和 platform 35（华为/腾讯镜像均可下载）依次跑 aapt2 → javac → d8 → zipalign → apksigner，产出 `android/build/red-garden-1.1.0.apk`，签名为仓库里的 debug keystore。`android/toolchain/` 与 `android/build/` 已在 `.gitignore` 中，不要提交。
+没有 Android Studio 时也可以用 `android/build-apk.sh` 手动打包：脚本使用 `android/toolchain/` 下的 JDK 17、build-tools 35 和 platform 35（华为/腾讯镜像均可下载）依次跑 aapt2 → javac → d8 → zipalign → apksigner，产出 `android/build/red-garden-1.1.1.apk`，签名为仓库里的 debug keystore。`android/toolchain/` 与 `android/build/` 已在 `.gitignore` 中，不要提交。
 
 推送仓库后，在 GitHub Actions 运行 **Build Red Garden Android APK**，下载构建产物 `red-garden-android-debug` 里的 `app-debug.apk`。这是 debug 签名包，适合个人安装；如果公开分发，需要换成自己的 release keystore。

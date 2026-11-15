@@ -52,7 +52,7 @@ function corsHeaders(request, env) {
   return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET,HEAD,PUT,POST,PATCH,DELETE,OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization,Content-Type,Content-Length,X-Pan123-Token,X-Pan123-Folder,X-Pan123-Filename,X-Pan123-Etag",
+    "Access-Control-Allow-Headers": "Authorization,Content-Type,Content-Length,X-Content-SHA256,X-Pan123-Token,X-Pan123-Folder,X-Pan123-Filename,X-Pan123-Etag",
     "Access-Control-Max-Age": "600",
     Vary: "Origin",
   };
@@ -123,18 +123,25 @@ function objectSpec(pathname) {
   if (dot <= 0) return null;
   const base = filename.slice(0, dot);
   const ext = filename.slice(dot + 1).toLowerCase();
+  // Two key shapes are valid. Older objects end in "~<sha>" (or are a bare
+  // "<sha>") because the digest used to sit in the path. New objects are just
+  // "<source name>" and carry the digest in X-Content-SHA256 and in object
+  // metadata, so the R2 dashboard reads like a folder of themes.
   const separator = base.lastIndexOf("~");
-  const sha = (separator >= 0 ? base.slice(separator + 1) : base).toLowerCase();
-  const label = separator >= 0 ? objectLabel(base.slice(0, separator)) : "";
-  if (sha.length !== 64 || !SHA256.test(sha)) return null;
+  const tail = (separator >= 0 ? base.slice(separator + 1) : base).toLowerCase();
+  const legacy = tail.length === 64 && SHA256.test(tail);
+  // A "~" only ever came from the old separator, so a stray one is malformed.
+  if (separator >= 0 && !legacy) return null;
+  const label = objectLabel(legacy ? (separator >= 0 ? base.slice(0, separator) : "") : base);
+  if (!legacy && !label) return null;
   if ((kind === "compressed" || kind === "originals") && ext !== "red") return null;
   if (kind === "previews" && ext !== "jpg") return null;
   if (kind === "records" && ext !== "json") return null;
   if (kind === "fonts" && !SAFE_EXT.has(ext)) return null;
   if (kind === "staging" && !STAGING_EXT.has(ext)) return null;
   if (kind === "assets" && !new Set(["svg", "html"]).has(ext)) return null;
-  const key = label ? `${kind}/${label}~${sha}.${ext}` : `${kind}/${sha}.${ext}`;
-  return {kind, sha, ext, label, filename: label ? `${label}~${sha}.${ext}` : `${sha}.${ext}`, key};
+  const name = label ? (legacy ? `${label}~${tail}` : label) : tail;
+  return {kind, sha: legacy ? tail : null, ext, label, filename: `${name}.${ext}`, key: `${kind}/${name}.${ext}`};
 }
 
 function maxUpload(env) {
@@ -378,9 +385,29 @@ async function putObject(request, env, spec) {
   const data = await request.arrayBuffer();
   if (data.byteLength > maxUpload(env)) return json({error: "上传文件超过大小限制"}, 413, request, env);
   const actual = await digestHex(data);
-  if (actual !== spec.sha) return json({error: "SHA-256 与对象路径不一致", actual}, 400, request, env);
-  await env.ASSETS.put(spec.key, data, {httpMetadata: {contentType: contentType(spec)}});
-  return json({ok: true, key: spec.key, sha256: actual, bytes: data.byteLength}, 201, request, env);
+  // The digest is no longer part of the key, so integrity comes from the
+  // declared header (legacy keys still declare it in the path).
+  const declared = String(request.headers.get("X-Content-SHA256") || "").toLowerCase();
+  if (declared && declared !== actual) return json({error: "内容与声明的 SHA-256 不一致", actual}, 400, request, env);
+  if (spec.sha && spec.sha !== actual) return json({error: "SHA-256 与对象路径不一致", actual}, 400, request, env);
+  const key = await resolveObjectKey(env, spec, actual);
+  await env.ASSETS.put(key, data, {httpMetadata: {contentType: contentType(spec)}, customMetadata: {sha256: actual}});
+  const filename = key.slice(spec.kind.length + 1);
+  return json({ok: true, key, filename, sha256: actual, bytes: data.byteLength}, 201, request, env);
+}
+// A readable key is not unique on its own: two themes can share a name, and a
+// re-compressed pack must not silently replace the previous one. Reuse the
+// existing object when the bytes are identical, otherwise suffix -2, -3 ...
+async function resolveObjectKey(env, spec, digest) {
+  if (spec.sha) return spec.key;
+  const head = key => (typeof env.ASSETS.head === "function" ? env.ASSETS.head(key) : env.ASSETS.get(key));
+  for (let index = 1; index <= 40; index++) {
+    const key = `${spec.kind}/${index === 1 ? spec.label : `${spec.label}-${index}`}.${spec.ext}`;
+    const existing = await head(key);
+    if (!existing) return key;
+    if (existing.customMetadata?.sha256 === digest) return key;
+  }
+  return `${spec.kind}/${spec.label}-${Date.now()}.${spec.ext}`;
 }
 
 async function getObject(request, env, spec) {

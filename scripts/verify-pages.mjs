@@ -64,9 +64,12 @@ if (!workerApi.includes("function headerText") || !workerApi.includes('headerTex
 if (!workerApi.includes("function deleteStagingObject") || !workerApi.includes('spec.kind === "staging" && request.method === "DELETE"')) errors.push("pages/worker-api.js 缺少暂存文件删除，处理完的原始副本会永久占用 R2");
 // Readable R2 keys and live job detail: the dashboard used to show only
 // SHA-256 hashes, and job records dropped the "current file" field.
-if (!workerApi.includes("function objectLabel") || !workerApi.includes("~${sha}")) errors.push("pages/worker-api.js 未保留可读文件名，R2 里又会只剩哈希");
-if (!workerApi.includes('"stage", "current"')) errors.push("pages/worker-api.js 的 updateJob 丢弃 current，后台任务看不出在传哪个文件");
+if (!workerApi.includes("function objectLabel") || !workerApi.includes("function resolveObjectKey")) errors.push("pages/worker-api.js 未保留可读文件名或重名处理，R2 里又会只剩哈希");
+if (!workerApi.includes('request.headers.get("X-Content-SHA256")') || !workerApi.includes("customMetadata: {sha256: actual}")) errors.push("pages/worker-api.js 未把 SHA-256 移到请求头与对象元数据，上传将无法校验完整性");
+if (!workerApi.includes("X-Content-SHA256,X-Pan123-Token")) errors.push("pages/worker-api.js 的 CORS 未放行 X-Content-SHA256，浏览器上传会被预检拦下");
 if (!app.includes("function objectLabel") || !app.includes("objectFileName")) errors.push("site/app.js 缺少可读对象名生成");
+if (!app.includes('"X-Content-SHA256": sha')) errors.push("site/app.js 上传时未声明内容摘要，Worker 无法校验");
+if (!workerApi.includes('"stage", "current"')) errors.push("pages/worker-api.js 的 updateJob 丢弃 current，后台任务看不出在传哪个文件");
 if (!app.includes("-原包") || !app.includes("-压缩")) errors.push("site/app.js 未给原包/压缩包加可读后缀");
 if (!app.includes("revealTransferProgress")) errors.push("site/app.js 未在确认后滚动到本批进度面板");
 const [codecSource] = await Promise.all([readFile(path.join(source, "free_codec.js"), "utf8")]);

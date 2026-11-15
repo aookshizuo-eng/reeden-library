@@ -3,14 +3,20 @@ import {createHash} from "node:crypto";
 import {handle, __test} from "./worker.js";
 
 class MemoryObject {
-  constructor(bytes, metadata) { this.bytes = bytes; this.httpMetadata = metadata; }
+  constructor(bytes, options = {}) {
+    this.bytes = bytes;
+    this.size = bytes.length;
+    this.httpMetadata = options.httpMetadata;
+    this.customMetadata = options.customMetadata || {};
+  }
   get body() { return new Response(this.bytes).body; }
   async text() { return new TextDecoder().decode(this.bytes); }
 }
 class MemoryR2 {
   constructor() { this.items = new Map(); }
-  async put(key, data, options = {}) { this.items.set(key, new MemoryObject(new Uint8Array(data), options.httpMetadata)); }
+  async put(key, data, options = {}) { this.items.set(key, new MemoryObject(new Uint8Array(data), options)); }
   async get(key) { return this.items.get(key) || null; }
+  async head(key) { return this.items.get(key) || null; }
   async delete(key) { this.items.delete(key); }
   async list({prefix, cursor, limit}) {
     const keys = [...this.items.keys()].filter(key => key.startsWith(prefix)).sort();
@@ -39,6 +45,27 @@ assert.equal(labeledSpec.label, "图标-压缩");
 assert.equal(labeledSpec.key, `assets/图标-压缩~${svgSha}.svg`);
 assert.equal(__test.objectSpec(`/api/objects/assets/${encodeURIComponent(`坏~../~${svgSha}.svg`)}`), null);
 assert.equal(__test.objectSpec(`/api/objects/assets/${encodeURIComponent("名字~1234.svg")}`), null);
+// New keys are just the readable name; the digest rides in X-Content-SHA256.
+const plainSpec = __test.objectSpec(`/api/objects/compressed/${encodeURIComponent("少女心事-压缩.red")}`);
+assert.equal(plainSpec.sha, null);
+assert.equal(plainSpec.key, "compressed/少女心事-压缩.red");
+assert.equal(__test.objectSpec(`/api/objects/assets/${encodeURIComponent("~x.svg")}`), null);
+const plainPath = `/api/objects/assets/${encodeURIComponent("图标-压缩.svg")}`;
+const plainPut = await handle(new Request(`https://worker.example${plainPath}`, {method: "PUT", headers: headers({"Content-Type": "image/svg+xml", "X-Content-SHA256": svgSha}), body: svg}), env);
+assert.equal(plainPut.status, 201);
+assert.equal((await plainPut.json()).filename, "图标-压缩.svg");
+assert.equal((await env.ASSETS.get("assets/图标-压缩.svg")).customMetadata.sha256, svgSha);
+// Identical bytes reuse the same key instead of piling up copies.
+const repeat = await handle(new Request(`https://worker.example${plainPath}`, {method: "PUT", headers: headers({"Content-Type": "image/svg+xml", "X-Content-SHA256": svgSha}), body: svg}), env);
+assert.equal((await repeat.json()).filename, "图标-压缩.svg");
+// A different pack with the same name must not overwrite the first one.
+const otherSvg = encoder.encode('<svg xmlns="http://www.w3.org/2000/svg"><circle cx="6" cy="6" r="3"/></svg>');
+const otherSha = await sha256(otherSvg);
+const clash = await handle(new Request(`https://worker.example${plainPath}`, {method: "PUT", headers: headers({"Content-Type": "image/svg+xml", "X-Content-SHA256": otherSha}), body: otherSvg}), env);
+assert.equal((await clash.json()).filename, "图标-压缩-2.svg");
+// A declared digest that does not match the body is rejected.
+const mismatch = await handle(new Request(`https://worker.example${plainPath}`, {method: "PUT", headers: headers({"Content-Type": "image/svg+xml", "X-Content-SHA256": otherSha}), body: svg}), env);
+assert.equal(mismatch.status, 400);
 const put = await handle(new Request(`https://worker.example/api/objects/assets/${svgSha}.svg`, {method: "PUT", headers: headers({"Content-Type": "image/svg+xml"}), body: svg}), env);
 assert.equal(put.status, 201);
 const read = await handle(new Request(`https://worker.example/api/objects/assets/${svgSha}.svg`, {headers: {Origin: origin}}), env);

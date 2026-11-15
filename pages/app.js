@@ -699,9 +699,10 @@ async function browserCodec() {
   if (!codec?.inspectContainer || !codec?.sha256Hex || !codec?.md5Hex || !codec?.compressImage || !codec?.extractPrivatePreviewImages) throw new Error("浏览器处理器未加载，请刷新页面后重试");
   return codec;
 }
-// R2 keys keep the source name in front of the SHA-256 so the Cloudflare
-// dashboard reads like a folder of themes instead of a wall of hashes.  `~` is
-// the separator because it is stripped from every label.
+// R2 keys keep the source name so the Cloudflare dashboard reads like a folder
+// of themes instead of a wall of hashes. The digest is no longer part of the
+// name: it travels in the X-Content-SHA256 header and lands in object metadata,
+// and the Worker appends -2, -3 when two packs share a name.
 function objectLabel(value) {
   const text = String(value || "")
     .replace(/[\\/:*?"<>|~]+/g, "-")
@@ -713,13 +714,13 @@ function objectLabel(value) {
 }
 function objectFileName(sha, extension, label) {
   const safe = objectLabel(label);
-  return safe ? `${safe}~${sha}.${extension}` : `${sha}.${extension}`;
+  return safe ? `${safe}.${extension}` : `${sha}.${extension}`;
 }
 async function uploadBrowserObject(kind, sha, extension, body, contentType, label = "") {
   const path = `/api/objects/${encodeURIComponent(kind)}/${encodeURIComponent(objectFileName(sha, extension, label))}`;
   const request = (method) => fetch(apiUrl(path), {
     method,
-    headers: requestHeaders({ "Content-Type": contentType || "application/octet-stream" }),
+    headers: requestHeaders({ "Content-Type": contentType || "application/octet-stream", "X-Content-SHA256": sha }),
     body,
   });
   // PUT is the canonical R2 object method. A few WebView proxies and older
@@ -740,6 +741,11 @@ async function uploadBrowserObject(kind, sha, extension, body, contentType, labe
     const detail = data.error || data.message || responseText.trim().slice(0, 240);
     throw new Error(`上传失败（${response.status}）${detail ? `：${detail}` : ""}`);
   }
+  // The Worker may rename the object to avoid a name clash, so keep whatever
+  // filename it actually stored; later reads and deletes must hit that object.
+  let stored = null;
+  try { stored = await response.json(); } catch {}
+  if (stored?.filename) return `/api/objects/${encodeURIComponent(kind)}/${encodeURIComponent(stored.filename)}`;
   return path;
 }
 async function uploadBrowserRecord(record, codec) {
