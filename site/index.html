@@ -61,10 +61,10 @@
               <div class="drop-zone" id="themeDropZone" tabindex="0" role="button" aria-label="拖入 RED 主题文件">
                 <span class="drop-icon">↓</span><strong>把 RED 主题拖到这里</strong><span>支持批量拖入 .red 文件</span><small>也可以点击选择文件</small>
               </div>
-              <div class="ingest-copy"><h2 id="ingestTitle">加入待确认主题</h2><p>整批识别后，按名称和作者显示疑似重复与预览。确认所选后，在当前设备压缩、保存并同步。</p><div class="ingest-actions"><button class="primary-button" id="chooseThemes">选择 RED 文件</button><button class="secondary-button" id="chooseThemeFolder">选择主题文件夹</button><button class="text-button" id="indexThemeFolder">索引已有文件夹</button><input id="themeInput" type="file" accept=".red" multiple hidden /><input id="themeFolderInput" type="file" accept=".red" webkitdirectory multiple hidden /><input id="existingThemeFolderInput" type="file" accept=".red" webkitdirectory multiple hidden /></div><p class="ingest-note">日间素材优先；普通主题由当前设备压缩；加密主题由当前设备压缩图片后交给同步 Worker 或电脑本地服务认证重封。没有可用处理端时会明确提示并保留原包。</p></div>
+              <div class="ingest-copy"><h2 id="ingestTitle">加入待确认主题</h2><p>整批识别后，按名称和作者显示疑似重复与预览。确认所选后，在当前设备压缩、保存并同步。</p><div class="ingest-actions"><button class="primary-button" id="chooseThemes">选择 RED 文件</button><button class="secondary-button" id="chooseThemeFolder">选择主题文件夹</button><button class="text-button" id="indexThemeFolder">索引已有文件夹</button><input id="themeInput" type="file" accept=".red" multiple hidden /><input id="themeFolderInput" type="file" accept=".red" webkitdirectory multiple hidden /><input id="existingThemeFolderInput" type="file" accept=".red" webkitdirectory multiple hidden /></div><p class="ingest-note">日间素材优先；普通主题由当前设备压缩；加密主题由当前设备压缩图片后交给同步 Worker 认证重封。没有可用处理端时会明确提示并保留原包。</p></div>
             </section>
             <section class="compression-panel" aria-labelledby="compressionTitle">
-              <div class="compression-copy"><h2 id="compressionTitle">RED 图片压缩</h2><p>选择主题并确认后，在当前设备压缩图片、重新封包，再生成书架与书封预览。完成后按存储设置同步。</p><p class="field-help">透明图片保留透明度，动画保留原样；整包没有变小时保留原字节。加密 RED 的明文图片在手机和电脑都可先压缩；同步 Worker 或电脑本地服务负责认证清单、更新哈希并重新封包。</p></div>
+              <div class="compression-copy"><h2 id="compressionTitle">RED 图片压缩</h2><p>选择主题并确认后，在当前设备压缩图片、重新封包，再生成书架与书封预览。完成后按存储设置同步。</p><p class="field-help">透明图片保留透明度，动画保留原样；整包没有变小时保留原字节。加密 RED 的明文图片在手机和电脑都可先压缩；同步 Worker 负责认证清单、更新哈希并重新封包。</p></div>
               <div class="compression-controls" id="compressionPresetGroup" role="radiogroup" aria-label="压缩方案"><label class="preset-card"><input type="radio" name="compressionPreset" value="balanced" /><span class="preset-body"><strong>最高性价比</strong><span>静态图保留原尺寸，普通图片用 94% 画质 WebP，底栏在无损与有损结果里取更小的一张。GIF 保留尺寸、帧数和播放节奏，只合并非常接近的颜色。</span></span></label><label class="preset-card"><input type="radio" name="compressionPreset" value="max" checked /><span class="preset-body"><strong>最大压缩</strong><span>底栏 384 px，启动图、阅读背景与书架底 2560 px，其余静态图 1600 px，只缩小超过上限的图片；90% 画质 WebP，底栏逐张比较无损与有损。GIF 尺寸帧数不变，合并更多近似颜色。</span></span></label><label class="preset-card"><input type="radio" name="compressionPreset" value="custom" /><span class="preset-body"><strong>自选模式</strong><span>自己定编码方式、画质、长边上限和 GIF 处理，适合已知素材尺寸或想精确控制体积的主题。</span></span></label><div class="compression-custom" id="compressionCustomFields" hidden>
                 <fieldset class="custom-group"><legend>静态图片编码</legend>
                   <label class="custom-choice"><input type="radio" name="compressionCodec" value="webp" checked /><span><strong>高画质 WebP</strong><small>有损编码，体积最小，画质可调。</small></span></label>
@@ -89,6 +89,11 @@
           <section class="review-area" id="reviewArea" hidden>
             <div class="section-heading"><div><h2>待确认并压缩</h2><p>确认后压缩图片并重新封包；加密主题保持清单、权限和资源哈希有效。同步 Worker 不可用时会保留原包并说明原因。</p></div><span class="review-count" id="reviewCount">0</span></div>
             <div class="bulk-toolbar" id="reviewToolbar"><label class="select-label"><input type="checkbox" id="selectAllReview" />全选</label><span class="selection-count" id="reviewSelectedCount">已选 0 项</span><button class="primary-button" id="commitSelectedThemes" type="button" disabled>确认所选并压缩保存</button><span class="bulk-status" id="reviewBatchStatus" role="status"></span></div>
+            <div class="transfer-progress review-progress" id="reviewProgress" aria-live="polite" hidden>
+              <div class="transfer-progress-head"><strong id="reviewProgressTitle">正在处理</strong><span id="reviewProgressCount">0 / 0</span></div>
+              <progress id="reviewProgressBar" max="100" value="0" aria-label="本批主题处理进度"></progress>
+              <div class="transfer-progress-meta"><span id="reviewProgressStage">等待开始</span><span id="reviewProgressCurrent"></span></div>
+            </div>
             <p class="compression-plan" id="compressionPlan" role="status"></p>
             <div id="reviewList" class="review-list"></div>
           </section>

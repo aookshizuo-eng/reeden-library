@@ -81,6 +81,7 @@ public final class MainActivity extends Activity {
 
     private void configureWebView(WebView view) {
         WebView.setWebContentsDebuggingEnabled(false);
+        view.setBackgroundColor(0xFFF7F9FA);
         view.getSettings().setJavaScriptEnabled(true);
         view.getSettings().setDomStorageEnabled(true);
         view.getSettings().setDatabaseEnabled(true);
@@ -89,6 +90,11 @@ public final class MainActivity extends Activity {
         view.getSettings().setBuiltInZoomControls(false);
         view.getSettings().setDisplayZoomControls(false);
         view.getSettings().setMediaPlaybackRequiresUserGesture(true);
+        // The layout is already responsive; letting the system font scale blow it
+        // up (or force-dark the light theme) is what made the phone view look
+        // broken, so pin both to the web app's own settings.
+        view.getSettings().setTextZoom(100);
+        if (Build.VERSION.SDK_INT >= 33) view.getSettings().setAlgorithmicDarkeningAllowed(false);
         CookieManager.getInstance().setAcceptCookie(true);
 
         view.setWebViewClient(new WebViewClient() {

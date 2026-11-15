@@ -359,7 +359,11 @@ button:disabled { cursor: not-allowed; opacity: .65; }
 .job-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .job-card h3 { margin: 0 0 4px; font-size: 15px; font-weight: 500; }
 .job-meta { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-.job-progress { display: block; width: 100%; height: 6px; margin-top: 14px; border: 0; border-radius: 3px; overflow: hidden; appearance: none; accent-color: var(--accent); background: var(--raised); }
+.job-progress-row { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
+.job-progress { display: block; width: 100%; height: 6px; margin-top: 0; border: 0; border-radius: 3px; overflow: hidden; appearance: none; accent-color: var(--accent); background: var(--raised); }
+.job-percent { flex: none; min-width: 36px; color: var(--muted); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+.job-items { margin: 6px 0 0; color: var(--faint); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.review-progress { margin: 0 0 14px; }
 .job-progress::-webkit-progress-bar { background: var(--raised); }
 .job-progress::-webkit-progress-value { background: var(--accent); }
 .job-progress::-moz-progress-bar { background: var(--accent); }
@@ -452,6 +456,26 @@ button:disabled { cursor: not-allowed; opacity: .65; }
   .app-footer span { display: block; margin-bottom: 4px; }
   .modal-compare { grid-template-columns: 1fr; }
   .compare-previews img { height: 170px; }
+  /* Phone layout: toolbars and filter rows used to squeeze four controls into
+     one line, so labels collapsed into narrow columns. Stack them instead. */
+  .bulk-toolbar { display: grid; grid-template-columns: 1fr 1fr; align-items: center; gap: 8px 10px; }
+  .bulk-toolbar > .select-label { grid-column: 1 / 2; }
+  .bulk-toolbar > .selection-count { grid-column: 2 / 3; justify-self: end; }
+  .bulk-toolbar > button { width: 100%; grid-column: auto; }
+  .bulk-toolbar > button:last-of-type, .bulk-toolbar > .bulk-status { grid-column: 1 / -1; }
+  .section-heading { flex-direction: column; align-items: stretch; gap: 10px; }
+  .section-actions { align-items: stretch; }
+  .section-actions .asset-search { width: 100%; }
+  .section-actions .asset-search select { flex: 1; min-width: 0; }
+  #jobsView .title-row .text-button { align-self: flex-start; min-height: 40px; padding: 0 14px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--raised); }
+  #jobsView .form-actions { flex-wrap: wrap; gap: 8px; }
+  #jobsView .form-actions button { flex: 1 1 45%; min-height: 44px; }
+  #jobsView .form-actions .queue-later-label { flex: 1 1 100%; }
+  #jobsStatus { margin: 12px 0 4px; }
+  .review-progress { margin-bottom: 12px; }
+  .job-progress-row { margin-top: 12px; }
+  .job-percent { min-width: 34px; }
+  .theme-preview .preview-open, .theme-preview .preview-empty { aspect-ratio: 4 / 3; }
 }
 
 @media (max-width: 900px) {

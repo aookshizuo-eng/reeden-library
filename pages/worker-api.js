@@ -98,26 +98,43 @@ function checkWriteToken(request, env) {
   return header === `Bearer ${expected}`;
 }
 
+// Object keys carry the source name so the R2 dashboard is readable:
+// `compressed/Muiii - 雪一片一片~<sha256>.red`.  The SHA-256 is still the last
+// segment, so integrity checks and content addressing keep working, and the
+// legacy `<sha>.red` layout still resolves for objects uploaded earlier.
+function objectLabel(value) {
+  const text = String(value || "")
+    .replace(/[\\/:*?"<>|~]+/g, "-")
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^[.\s-]+|[.\s-]+$/g, "")
+    .trim();
+  return text.slice(0, 80).replace(/[.\s]+$/, "");
+}
 function objectSpec(pathname) {
   const match = pathname.match(/^\/api\/objects\/([^/]+)\/([^/]+)$/);
   if (!match) return null;
-  const [, kind, filename] = match;
+  const [, kind, rawFilename] = match;
   if (!KINDS.has(kind)) return null;
-  const suffix = kind === "fonts" ? filename.match(/^([a-f0-9]{64})\.([a-z0-9]+)$/i) :
-    kind === "assets" ? filename.match(/^([a-f0-9]{64})\.(svg|html)$/i) :
-    kind === "staging" ? filename.match(/^([a-f0-9]{64})\.([a-z0-9]+)$/i) :
-    filename.match(/^([a-f0-9]{64})\.(red|jpg|json)$/i);
-  if (!suffix || suffix[1].length !== 64) return null;
-  const sha = suffix[1].toLowerCase();
-  const ext = suffix[2].toLowerCase();
-  if (!SHA256.test(sha)) return null;
+  let filename;
+  try { filename = decodeURIComponent(rawFilename); } catch { return null; }
+  if (!filename || filename.includes("/") || filename.includes("\\") || filename.includes("..")) return null;
+  const dot = filename.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const base = filename.slice(0, dot);
+  const ext = filename.slice(dot + 1).toLowerCase();
+  const separator = base.lastIndexOf("~");
+  const sha = (separator >= 0 ? base.slice(separator + 1) : base).toLowerCase();
+  const label = separator >= 0 ? objectLabel(base.slice(0, separator)) : "";
+  if (sha.length !== 64 || !SHA256.test(sha)) return null;
   if ((kind === "compressed" || kind === "originals") && ext !== "red") return null;
   if (kind === "previews" && ext !== "jpg") return null;
   if (kind === "records" && ext !== "json") return null;
   if (kind === "fonts" && !SAFE_EXT.has(ext)) return null;
   if (kind === "staging" && !STAGING_EXT.has(ext)) return null;
   if (kind === "assets" && !new Set(["svg", "html"]).has(ext)) return null;
-  return {kind, sha, ext, filename, key: `${kind}/${sha}.${ext}`};
+  const key = label ? `${kind}/${label}~${sha}.${ext}` : `${kind}/${sha}.${ext}`;
+  return {kind, sha, ext, label, filename: label ? `${label}~${sha}.${ext}` : `${sha}.${ext}`, key};
 }
 
 function maxUpload(env) {
@@ -887,7 +904,10 @@ async function updateJob(request, env, id) {
   try { patch = await request.json(); } catch { return json({error: "任务更新不是有效 JSON"}, 400, request, env); }
   let job;
   try { job = JSON.parse(await object.text()); } catch { return json({error: "任务记录损坏"}, 409, request, env); }
-  for (const key of ["title", "stage", "status", "result", "error"]) {
+  // `current` carries the item being processed right now (theme/font name);
+  // without it the job list only showed "0 / 1" and users could not tell what
+  // the device was actually working on.
+  for (const key of ["title", "stage", "current", "status", "result", "error"]) {
     if (patch[key] !== undefined) job[key] = typeof patch[key] === "string" ? patch[key].slice(0, 2000) : patch[key];
   }
   for (const key of ["completed", "failed", "total"]) {

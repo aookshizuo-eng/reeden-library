@@ -6,3 +6,5 @@ worker/.wrangler/
 .wrangler/
 cloudflare-pages/
 pages/.wrangler/
+android/toolchain/
+android/build/

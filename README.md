@@ -36,4 +36,6 @@ Android APK 加载 `https://aookshizuo-eng.github.io/reeden-library/`，它来�
 
 `android/` 是一个轻量 WebView 壳：它把同一份 Pages 前端打进 APK，并保留 GitHub Pages origin，因此手机和电脑填写同一个 R2 Worker 后共用同一套主题、字体和预览库。APK 需要联网访问 R2；它不会把 R2 密钥或 123 会话打包进去。
 
+没有 Android Studio 时也可以用 `android/build-apk.sh` 手动打包：脚本使用 `android/toolchain/` 下的 JDK 17、build-tools 35 和 platform 35（华为/腾讯镜像均可下载）依次跑 aapt2 → javac → d8 → zipalign → apksigner，产出 `android/build/red-garden-1.1.0.apk`，签名为仓库里的 debug keystore。`android/toolchain/` 与 `android/build/` 已在 `.gitignore` 中，不要提交。
+
 推送仓库后，在 GitHub Actions 运行 **Build Red Garden Android APK**，下载构建产物 `red-garden-android-debug` 里的 `app-debug.apk`。这是 debug 签名包，适合个人安装；如果公开分发，需要换成自己的 release keystore。

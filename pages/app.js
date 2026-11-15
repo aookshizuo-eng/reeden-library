@@ -699,8 +699,24 @@ async function browserCodec() {
   if (!codec?.inspectContainer || !codec?.sha256Hex || !codec?.md5Hex || !codec?.compressImage || !codec?.extractPrivatePreviewImages) throw new Error("浏览器处理器未加载，请刷新页面后重试");
   return codec;
 }
-async function uploadBrowserObject(kind, sha, extension, body, contentType) {
-  const path = `/api/objects/${encodeURIComponent(kind)}/${encodeURIComponent(sha)}.${extension}`;
+// R2 keys keep the source name in front of the SHA-256 so the Cloudflare
+// dashboard reads like a folder of themes instead of a wall of hashes.  `~` is
+// the separator because it is stripped from every label.
+function objectLabel(value) {
+  const text = String(value || "")
+    .replace(/[\\/:*?"<>|~]+/g, "-")
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^[.\s-]+|[.\s-]+$/g, "")
+    .trim();
+  return text.slice(0, 80).replace(/[.\s]+$/, "");
+}
+function objectFileName(sha, extension, label) {
+  const safe = objectLabel(label);
+  return safe ? `${safe}~${sha}.${extension}` : `${sha}.${extension}`;
+}
+async function uploadBrowserObject(kind, sha, extension, body, contentType, label = "") {
+  const path = `/api/objects/${encodeURIComponent(kind)}/${encodeURIComponent(objectFileName(sha, extension, label))}`;
   const request = (method) => fetch(apiUrl(path), {
     method,
     headers: requestHeaders({ "Content-Type": contentType || "application/octet-stream" }),
@@ -1331,12 +1347,18 @@ async function sendCloudJobPatch(patch, id = activeCloudJob) {
     });
   } catch {}
 }
-async function createCloudJob(title, total) {
+async function createCloudJob(title, total, items = []) {
   if (suppressCloudJob || !browserSyncEnabled() || !syncToken) return;
   try {
     const response = await fetch(apiUrl("/api/jobs"), {
       method: "POST", headers: requestHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({kind: "upload", title, total, device: /Android|iPhone|iPad/i.test(navigator.userAgent) ? "mobile" : "desktop"}),
+      body: JSON.stringify({
+        kind: "upload", title, total,
+        // The queue record keeps the batch names so another device (or the
+        // job list) can show what is inside the batch, not just "0 / 1".
+        items: (Array.isArray(items) ? items : []).map(String).filter(Boolean).slice(0, 100),
+        device: /Android|iPhone|iPad/i.test(navigator.userAgent) ? "mobile" : "desktop",
+      }),
       keepalive: true,
     });
     if (!response.ok) return;
@@ -1359,32 +1381,44 @@ function persistJobProgress(patch) {
 }
 function updateTransferProgress(patch = {}) {
   Object.assign(transferState, patch);
-  const panel = $("#transferProgress");
-  if (!panel) return;
   const total = Math.max(0, Number(transferState.total) || 0);
   const completed = Math.max(0, Math.min(total || Number.MAX_SAFE_INTEGER, Number(transferState.completed) || 0));
   const percent = total ? Math.round((completed / total) * 100) : 0;
-  const title = $("#transferProgressTitle");
-  const count = $("#transferProgressCount");
-  const bar = $("#transferProgressBar");
-  const stage = $("#transferProgressStage");
-  const current = $("#transferProgressCurrent");
-  if (title) title.textContent = transferState.title || "正在处理";
-  if (count) count.textContent = `${completed} / ${total}${transferState.failed ? ` · 失败 ${transferState.failed}` : ""}`;
-  if (bar) bar.value = percent;
-  if (stage) stage.textContent = transferState.stage || "等待开始";
-  if (current) current.textContent = transferState.current || "";
-  panel.hidden = false;
-  panel.classList.toggle("is-error", transferState.failed > 0);
-  panel.classList.toggle("is-complete", !transferState.active && total > 0);
-  persistJobProgress({status: transferState.active ? "running" : "completed", stage: transferState.stage || "等待处理",
-    current: transferState.current, completed: transferState.completed, failed: transferState.failed, total});
+  const stageText = transferState.stage || "等待开始";
+  const currentText = transferState.current || "";
+  const countText = `${completed} / ${total}${transferState.failed ? ` · 失败 ${transferState.failed}` : ""}`;
+  const paint = (prefix, visible) => {
+    const title = $(`#${prefix}Title`);
+    const count = $(`#${prefix}Count`);
+    const bar = $(`#${prefix}Bar`);
+    const stage = $(`#${prefix}Stage`);
+    const current = $(`#${prefix}Current`);
+    if (title) title.textContent = transferState.title || "正在处理";
+    if (count) count.textContent = countText;
+    if (bar) bar.value = percent;
+    if (stage) stage.textContent = stageText;
+    if (current) current.textContent = currentText;
+    const panel = $(`#${prefix}`);
+    if (panel) { panel.hidden = !visible; panel.classList.toggle("is-error", transferState.failed > 0); panel.classList.toggle("is-complete", !transferState.active && total > 0); }
+  };
+  // The reviewed batch sits near the bottom of the import view, so its own
+  // panel is painted as well; otherwise the only feedback was in 后台任务.
+  paint("transferProgress", true);
+  paint("reviewProgress", transferState.active || (Boolean(transferState.title) && Boolean($("#reviewProgress") && !$("#reviewArea").hidden)));
+  persistJobProgress({status: transferState.active ? "running" : "completed", stage: stageText,
+    current: currentText, completed: transferState.completed, failed: transferState.failed, total});
 }
-function beginTransferProgress(title, total) {
+function revealTransferProgress() {
+  const panel = $("#reviewProgress");
+  if (!panel || panel.hidden) return;
+  try { panel.scrollIntoView({block: "nearest", behavior: "smooth"}); } catch { panel.scrollIntoView(); }
+}
+function beginTransferProgress(title, total, items = []) {
   activeCloudJob = null; cloudJobPatch = null; clearTimeout(cloudJobTimer);
   Object.assign(transferState, { active: true, title, total: Math.max(0, Number(total) || 0), completed: 0, failed: 0, stage: "准备处理", current: "" });
   updateTransferProgress();
-  createCloudJob(title, total).catch(() => {});
+  revealTransferProgress();
+  createCloudJob(title, total, items).catch(() => {});
 }
 function transferStage(stage, current = "") {
   updateTransferProgress({ active: true, stage, current });
@@ -1816,23 +1850,47 @@ function jobTitle(job) {
   if (job.action === "commit-themes") return "主题入库";
   if (job.action === "sync-all") return "全部资产同步";
   if (job.action === "archive-probe") return "123 备份验证";
+  const explicit = String(job.title || "").trim();
+  if (explicit) return explicit;
   return job.kind === "font" ? "字体同步" : job.kind === "asset" ? "收藏同步" : "主题同步";
 }
 function jobStatus(job) {
   return { queued: "等待处理", running: "正在处理", completed: "已完成", partial: "部分失败", failed: "处理失败" }[job.status] || "等待处理";
 }
+function jobItemNames(job) {
+  const items = Array.isArray(job.items) ? job.items.map(value => String(value || "").trim()).filter(Boolean) : [];
+  return items.length ? items : Array.isArray(job.source_keys) ? job.source_keys.map(String).filter(Boolean) : [];
+}
 function jobCard(job) {
   const total = Math.max(0, Number(job.total) || 0);
   const completed = Math.min(total, Math.max(0, Number(job.completed) || 0));
+  const percent = total ? Math.round((completed / total) * 100) : 0;
   const failed = Array.isArray(job.failed) ? job.failed : [];
   const active = ["queued", "running"].includes(job.status);
   const retrying = activeJobs().some(item => (item.parent_id || item.retry_of) === job.id);
-  // A finished job's own result is more informative than a raw counter, e.g.
-  // "1 个主题已自动压缩并入库" instead of "0 项成功 · 0 项跳过".
-  const detail = active && job.current
-    ? `正在处理：${typeof job.current === "string" ? job.current : job.current.name || "当前文件"}`
-    : (job.result ? String(job.result).slice(0, 180) : `${Number(job.succeeded) || 0} 项成功 · ${Number(job.skipped) || 0} 项跳过 · ${failed.length} 项失败`);
-  return `<article class="job-card" data-job-id="${escapeHtml(job.id)}"><div class="job-card-head"><div><h3>${jobTitle(job)}</h3><span class="job-meta">${escapeHtml(jobStatus(job))} · 已处理 ${completed} / ${total} 项</span></div>${failed.length && !active ? `<button class="secondary-button retry-job" data-retry-job="${escapeHtml(job.id)}" ${state.operation || retrying ? "disabled" : ""}>${retrying ? "已加入重试" : "重试失败项"}</button>` : ""}</div><progress class="job-progress" max="${Math.max(1,total)}" value="${completed}" aria-label="${jobTitle(job)}进度"></progress><p class="job-detail ${failed.length && !active ? "is-error" : ""}">${escapeHtml(detail)}</p>${failed.length ? `<details class="job-errors"><summary>${failed.length} 项失败详情</summary><ul>${failed.map(item => `<li><strong>${escapeHtml(item.name || item.id || "文件")}</strong><span>${escapeHtml(item.error || "处理失败")}</span></li>`).join("")}</ul></details>` : ""}</article>`;
+  const names = jobItemNames(job);
+  const currentName = typeof job.current === "string" ? job.current.trim() : String(job.current?.name || "").trim();
+  const stage = String(job.stage || "").trim();
+  // While a job runs, the useful information is "which file, which step,
+  // how far". The old card only had a counter, so a 4-theme batch looked
+  // identical to a stuck job with no name attached.
+  let detail;
+  if (active) {
+    const position = currentName ? ` ${Math.min(total || 1, completed + 1)}/${total || 1}` : "";
+    const subject = currentName
+      ? `${currentName}`
+      : names.length === 1 ? names[0] : names.length ? `${names.slice(0, 2).join("、")}${names.length > 2 ? ` 等 ${names.length} 个` : ""}` : "";
+    if (job.status === "queued" && !currentName) detail = `已进入队列${subject ? `：${subject}` : ""}，等待本设备继续处理`;
+    else detail = [`正在处理${position}${subject ? `：${subject}` : ""}`, stage && stage !== "等待处理" ? stage : ""].filter(Boolean).join(" · ");
+  } else {
+    // A finished job's own result is more informative than a raw counter, e.g.
+    // "1 个主题已自动压缩并入库" instead of "0 项成功 · 0 项跳过".
+    detail = job.result ? String(job.result).slice(0, 180) : `${Number(job.succeeded) || 0} 项成功 · ${Number(job.skipped) || 0} 项跳过 · ${failed.length} 项失败`;
+  }
+  const itemsLine = active && names.length > 1
+    ? `<p class="job-items">本批包含：${escapeHtml(names.slice(0, 6).join("、"))}${names.length > 6 ? ` 等 ${names.length} 个` : ""}</p>`
+    : "";
+  return `<article class="job-card" data-job-id="${escapeHtml(job.id)}"><div class="job-card-head"><div><h3>${escapeHtml(jobTitle(job))}</h3><span class="job-meta">${escapeHtml(jobStatus(job))} · 已处理 ${completed} / ${total} 项</span></div>${failed.length && !active ? `<button class="secondary-button retry-job" data-retry-job="${escapeHtml(job.id)}" ${state.operation || retrying ? "disabled" : ""}>${retrying ? "已加入重试" : "重试失败项"}</button>` : ""}</div><div class="job-progress-row"><progress class="job-progress" max="${Math.max(1,total)}" value="${completed}" aria-label="${escapeHtml(jobTitle(job))}进度"></progress><span class="job-percent">${percent}%</span></div><p class="job-detail ${failed.length && !active ? "is-error" : ""}">${escapeHtml(detail)}</p>${itemsLine}${failed.length ? `<details class="job-errors"><summary>${failed.length} 项失败详情</summary><ul>${failed.map(item => `<li><strong>${escapeHtml(item.name || item.id || "文件")}</strong><span>${escapeHtml(item.error || "处理失败")}</span></li>`).join("")}</ul></details>` : ""}</article>`;
 }
 function renderJobs() {
   const active = activeJobs();
@@ -2140,9 +2198,12 @@ async function commitThemes(ids = [...selections.review]) {
     const options = compressionOptions();
     try { sessionStorage.setItem("reeden-compression-options", JSON.stringify(options)); } catch {}
     if (browserSyncEnabled()) {
-      const codec = await browserCodec();
       const selected = state.review.filter(item => chosen.includes(item.staging_id));
-      beginTransferProgress("主题压缩与上传", selected.length);
+      beginTransferProgress("主题压缩与上传", selected.length, selected.map(item => item.info?.source_name || item.info?.name || "主题"));
+      // Loading the codec used to happen before the panel appeared, so the
+      // click looked like it did nothing for a moment.
+      transferStage("加载压缩引擎", "");
+      const codec = await browserCodec();
       let finished = 0;
       const results = await mapConcurrent(selected, 2, async item => {
         const name = item.info?.source_name || item.info?.name || "主题";
@@ -2160,11 +2221,11 @@ async function commitThemes(ids = [...selections.review]) {
           const compressedBytes = result.bytes;
           const originalSha = await codec.sha256Hex(raw);
           transferStage("上传原始主题", name);
-          const originalPath = await uploadBrowserObject("originals", originalSha, "red", raw, "application/octet-stream");
+          const originalPath = await uploadBrowserObject("originals", originalSha, "red", raw, "application/octet-stream", `${name}-原包`);
           const backup = pan123BackupConfig().token ? await backupOriginalTo123(raw, item.info?.source_name || name, codec) : null;
           const assetSha = await codec.sha256Hex(compressedBytes);
           transferStage("上传压缩主题", name);
-          const compressedPath = await uploadBrowserObject("compressed", assetSha, "red", compressedBytes, "application/octet-stream");
+          const compressedPath = await uploadBrowserObject("compressed", assetSha, "red", compressedBytes, "application/octet-stream", `${name}-压缩`);
           let previewPath = "";
           let previewEntries = [];
           try { previewEntries = encrypted ? await codec.extractPrivatePreviewImages(compressedBytes) : await codec.readZipEntries(compressedBytes); } catch { previewEntries = []; }
@@ -2175,7 +2236,7 @@ async function commitThemes(ids = [...selections.review]) {
             const previewBytes = new Uint8Array(await preview.arrayBuffer());
             const previewSha = await codec.sha256Hex(previewBytes);
             transferStage("上传预览和清单", name);
-            previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg");
+            previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg", `${name}-预览`);
             previewDetails = { ...previewDetails, kind: previewCompositionKind(previewEntries), simulation: true, encrypted_source: encrypted };
           }
           if (!preview) transferStage("上传主题清单", name);
@@ -2438,13 +2499,13 @@ async function importFonts(files) {
           const info = await codec.inspectFont(file);
           const bytes = new Uint8Array(await file.arrayBuffer());
           transferStage("上传字体文件", file.name);
-          const fontPath = await uploadBrowserObject("fonts", info.sha256, info.extension, bytes, `font/${info.extension}`);
+          const fontPath = await uploadBrowserObject("fonts", info.sha256, info.extension, bytes, `font/${info.extension}`, file.name.replace(/\.[^.]+$/, ""));
           transferStage("分析字形并生成预览", file.name);
           const analysis = await analyzeFontGlyphs(bytes, file.name, inferFontCategory({family: file.name}));
           let previewPath = "";
           if (analysis.specimen?.length) {
             const previewSha = await codec.sha256Hex(analysis.specimen);
-            previewPath = await uploadBrowserObject("previews", previewSha, "jpg", analysis.specimen, "image/jpeg");
+            previewPath = await uploadBrowserObject("previews", previewSha, "jpg", analysis.specimen, "image/jpeg", `${file.name.replace(/\.[^.]+$/, "")}-预览`);
           }
           transferStage("写入字体清单", file.name);
           const record = await uploadBrowserRecord({
@@ -2528,7 +2589,7 @@ async function importAssets(files) {
           const extension = assetExtension(file);
           const mime = extension === "svg" ? "image/svg+xml" : "text/html; charset=utf-8";
           transferStage("上传收藏文件", file.name);
-          const objectPath = await uploadBrowserObject("assets", hash, extension, bytes, mime);
+          const objectPath = await uploadBrowserObject("assets", hash, extension, bytes, mime, file.name.replace(/\.[^.]+$/, ""));
           let previewPath = "";
           if (extension === "svg") {
             try {
@@ -2538,7 +2599,7 @@ async function importAssets(files) {
               if (previewBytes) {
                 const previewSha = await codec.sha256Hex(previewBytes);
                 transferStage("上传收藏预览", file.name);
-                previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg");
+                previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg", `${file.name.replace(/\.[^.]+$/, "")}-预览`);
               }
             } catch { /* The SVG remains downloadable if thumbnail creation fails. */ }
           }

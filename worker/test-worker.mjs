@@ -31,12 +31,27 @@ const svg = encoder.encode('<svg xmlns="http://www.w3.org/2000/svg"><circle cx="
 const svgSha = await sha256(svg);
 assert.equal(__test.objectSpec(`/api/objects/assets/${svgSha}.svg`).ext, "svg");
 assert.equal(__test.objectSpec(`/api/objects/assets/${svgSha}.js`), null);
+// Readable keys: `<label>~<sha>.<ext>` so the R2 dashboard names objects after
+// the theme instead of a bare hash. Integrity and traversal rules still apply.
+const labeledSpec = __test.objectSpec(`/api/objects/assets/${encodeURIComponent(`图标-压缩~${svgSha}.svg`)}`);
+assert.equal(labeledSpec.sha, svgSha);
+assert.equal(labeledSpec.label, "图标-压缩");
+assert.equal(labeledSpec.key, `assets/图标-压缩~${svgSha}.svg`);
+assert.equal(__test.objectSpec(`/api/objects/assets/${encodeURIComponent(`坏~../~${svgSha}.svg`)}`), null);
+assert.equal(__test.objectSpec(`/api/objects/assets/${encodeURIComponent("名字~1234.svg")}`), null);
 const put = await handle(new Request(`https://worker.example/api/objects/assets/${svgSha}.svg`, {method: "PUT", headers: headers({"Content-Type": "image/svg+xml"}), body: svg}), env);
 assert.equal(put.status, 201);
 const read = await handle(new Request(`https://worker.example/api/objects/assets/${svgSha}.svg`, {headers: {Origin: origin}}), env);
 assert.equal(read.status, 200);
 assert.equal(read.headers.get("Content-Type"), "image/svg+xml");
 assert.deepEqual(new Uint8Array(await read.arrayBuffer()), svg);
+const labeledPath = `/api/objects/assets/${encodeURIComponent(`图标-压缩~${svgSha}.svg`)}`;
+const labeledPut = await handle(new Request(`https://worker.example${labeledPath}`, {method: "PUT", headers: headers({"Content-Type": "image/svg+xml"}), body: svg}), env);
+assert.equal(labeledPut.status, 201);
+assert.equal((await labeledPut.json()).key, `assets/图标-压缩~${svgSha}.svg`);
+const labeledRead = await handle(new Request(`https://worker.example${labeledPath}`, {headers: {Origin: origin}}), env);
+assert.equal(labeledRead.status, 200);
+assert.deepEqual(new Uint8Array(await labeledRead.arrayBuffer()), svg);
 const html = encoder.encode("<!doctype html><title>safe</title><script>window.parent.postMessage('bad','*')</script>");
 const htmlSha = await sha256(html);
 const htmlPut = await handle(new Request(`https://worker.example/api/objects/assets/${htmlSha}.html`, {method: "PUT", headers: headers({"Content-Type": "text/html"}), body: html}), env);
