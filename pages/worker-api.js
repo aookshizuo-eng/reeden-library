@@ -713,8 +713,12 @@ async function updateRecordClassification(request, env, kind, id) {
       let record;
       try { record = JSON.parse(await object.text()); } catch { continue; }
       if (!record || record.kind !== kind || String(record.id) !== String(id)) continue;
+      // 展示名可以在入库后修改。空值表示「不改名」，避免只改作者/分类时把
+      // 原来的标题清掉；文件本身与对象键不动，改的只是库里的展示字段。
+      const displayName = normalizeAssetClassification(payload.name);
       const updated = {
         ...record,
+        ...(displayName ? {name: displayName} : {}),
         author: normalizeAssetClassification(payload.author),
         style: normalizeAssetClassification(payload.style),
         tags: normalizeAssetTags(payload.tags),

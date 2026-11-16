@@ -105,6 +105,12 @@ const listed = await assetList.json();
 assert.equal(listed.records.length, 1);
 assert.equal(listed.records[0].author, "Alice");
 assert.deepEqual(listed.records[0].tags, ["icon"]);
+// 入库后改名：PATCH 带 name 时更新展示名；不带 name 时保留原名。
+const renamed = await handle(new Request("https://worker.example/api/assets/asset-1", {method: "PATCH", headers: headers({"Content-Type": "application/json"}), body: JSON.stringify({name: "Circle 改名", author: "Alice", style: "极简", tags: ["icon"]})}), env);
+assert.equal(renamed.status, 200);
+assert.equal((await renamed.json()).item.name, "Circle 改名");
+const keptName = await handle(new Request("https://worker.example/api/assets/asset-1", {method: "PATCH", headers: headers({"Content-Type": "application/json"}), body: JSON.stringify({author: "Alice", style: "极简", tags: ["icon"]})}), env);
+assert.equal((await keptName.json()).item.name, "Circle 改名");
 // Deletion removes the record and unreferenced objects while preserving an
 // object still referenced by another record.
 const sharedBytes = encoder.encode("shared-object");

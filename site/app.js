@@ -168,17 +168,38 @@ function requestHeaders(headers = {}) {
   if (apiBase && syncToken) result.set("Authorization", `Bearer ${syncToken}`);
   return result;
 }
-const state = { themes: [], fonts: [], assets: [], review: [], pending: [], jobs: [], activeView: "import", themeDensity: "grid", importKind: "theme", themeSearch: "", themeAuthor: "all", themeCategory: "all", assetFilter: "all", assetSearch: "", fontSearch: "", fontFilter: "all", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs"), importAssetIds: readSessionIds("reeden-import-assets") };
+const THEME_PAGE_SIZE = 24;
+const state = { themes: [], fonts: [], assets: [], review: [], pending: [], jobs: [], activeView: "import", themeDensity: "grid", themePage: 1, importKind: "theme", themeSearch: "", themeAuthor: "all", themeCategory: "all", assetFilter: "all", assetSearch: "", fontSearch: "", fontFilter: "all", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs"), importAssetIds: readSessionIds("reeden-import-assets") };
 const selections = { review: new Set(), theme: new Set(), font: new Set(), asset: new Set() };
 // 本地服务模式下「确认上传」是提交后台任务；记住这批 job id，轮询回来时把
 // 进度写进用户眼前那条进度条，而不是让用户只看见一句「已加入后台」。
 const trackedJobIds = new Set();
 const loadedFontFaces = new Set();
+// 启动时先用本机快照恢复存储配置与库记录，这样刷新后按钮状态、已保存的
+// R2/123 设置立即就是对的，不会闪出「尚未配置」让人以为又要重存一次。
+function hydrateLocalSnapshots() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_SNAPSHOT_KEY) || "null");
+    if (saved && saved.data && saved.at) state.storage = saved.data;
+  } catch {}
+  try {
+    const saved = JSON.parse(localStorage.getItem(LIBRARY_CACHE_KEY) || "null");
+    if (saved && saved.at && Date.now() - saved.at < LIBRARY_CACHE_TTL && Array.isArray(saved.records)) {
+      browserLibraryRecordsCache = latestRecords(saved.records);
+      browserLibraryRecordsLoadedAt = saved.at;
+    }
+  } catch {}
+}
 const BROWSER_TASK_CONCURRENCY = 3;
 const BROWSER_RECORD_CACHE_TTL = 15000;
 let browserLibraryRecordsCache;
 let browserLibraryRecordsPromise;
 let browserLibraryRecordsLoadedAt = 0;
+// 刷新/重新打开页面时先用本机快照渲染，避免每次开网页都重新列一遍 R2 记录。
+// 写入后会主动清掉快照，所以多设备之间仍以「手动刷新」为准。
+const STORAGE_SNAPSHOT_KEY = "reeden-storage-snapshot-v1";
+const LIBRARY_CACHE_KEY = "reeden-library-records-v1";
+const LIBRARY_CACHE_TTL = 30 * 60 * 1000;
 let storageDirty = false;
 // /api/storage 至少成功读过一次。之前刷新完页面、配置还没读回来时，
 // browserSyncEnabled() 会是 false，于是上传被当成「本机后端」发到同步 Worker，
@@ -211,6 +232,7 @@ async function mapConcurrent(items, limit, worker) {
 function invalidateBrowserLibraryRecords() {
   browserLibraryRecordsCache = undefined;
   browserLibraryRecordsLoadedAt = 0;
+  try { localStorage.removeItem(LIBRARY_CACHE_KEY); } catch {}
 }
 function readSessionIds(key) {
   try { const value = JSON.parse(sessionStorage.getItem(key) || "[]"); return Array.isArray(value) ? value.filter(id => typeof id === "string") : []; }
@@ -791,8 +813,35 @@ async function backupOriginalTo123(raw, name, codec) {
     return {error: error.message};
   }
 }
-// "测试连接" only lists the 123 root and the configured backup folder. It
-// never creates a folder, uploads a probe file or stores the token on a server.
+// 123 的 /b/api 接口同样返回 Access-Control-Allow-Origin: *，浏览器可以用自己的
+// 网络出口直连。登录已经走直连了，但「测试连接」此前还绕回同步 Worker —— 请求从
+// Cloudflare 出口发出就被 123 当成「海外登录」要求图形验证码，于是扫码/账号密码
+// 明明成功，立刻又被校验判失败。这里把校验也改成浏览器直连，和登录保持同一出口。
+const PAN123_DIRECT_API = "https://www.123pan.cn/b/api";
+async function pan123DirectRequest(token, path, {params = {}, method = "GET", body} = {}) {
+  const url = new URL(PAN123_DIRECT_API + path);
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value));
+  const response = await fetch(url.href, {
+    method,
+    headers: {
+      "Content-Type": "application/json", platform: "web", "app-version": "3",
+      Accept: "application/json", Authorization: `Bearer ${token}`,
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  let data = {};
+  try { data = await response.json(); } catch {}
+  const code = Number(data?.code);
+  if (code === 401 || code === 403 || response.status === 401 || response.status === 403) {
+    const error = new Error("123 会话已过期或被拒绝，请重新登录后再测试");
+    error.rejected = true;
+    throw error;
+  }
+  // /b/api 成功码既有 0 也有 200，两种都要认。
+  if (![0, 200].includes(code)) throw new Error(data?.message || data?.msg || `123 接口拒绝（code ${code || response.status}）`);
+  return data.data && typeof data.data === "object" ? data.data : {};
+}
+// "测试连接" 只读列一下根目录和备份目录，不创建目录、不上传探针、不在服务端留 Token。
 async function verifyPan123Backup() {
   const output = $("#pan123BackupStatus");
   const token = String($("#pan123BackupToken")?.value || "").trim() || pan123BackupConfig().token;
@@ -801,11 +850,22 @@ async function verifyPan123Backup() {
     operationMessage(output, "请先填写 123 云盘会话 Token：在 123 网盘网页 F12 → Network → 任一 /b/api 请求 → 复制 Authorization: Bearer 之后的值。", true);
     return false;
   }
-  if (!apiBase) {
-    operationMessage(output, "请先在「多设备访问」保存同步 API 地址与写入 Token。", true);
-    return false;
-  }
   operationMessage(output, "正在验证 123 云盘会话（只读校验）…");
+  try {
+    // 首选浏览器直连：出口是用户自己的网络，不会被判成海外登录要验证码。
+    const info = await pan123DirectRequest(token, "/user/info");
+    const nickname = String(info.Nickname || info.nickname || info.UserName || info.userName || "");
+    operationMessage(output, `已连接 123 云盘${nickname ? `（${nickname}）` : ""}，备份目录 ${folder}。`);
+    return true;
+  } catch (directError) {
+    // 直连被扩展/网络拦截时，本机后端模式还能退回 Worker 代转；浏览器同步
+    // 模式下 Worker 出口会被 123 判海外，这里就不做无意义的回退，直接说清楚。
+    if (directError?.rejected) { operationMessage(output, directError.message, true); return false; }
+    if (!apiBase || browserSyncEnabled()) {
+      operationMessage(output, `123 云盘连接失败：${directError.message}。若提示验证码，请改用「扫码连接」或粘贴会话 Token。`, true);
+      return false;
+    }
+  }
   try {
     const response = await fetch(apiUrl("/api/backup/123/verify"), {
       method: "POST", headers: requestHeaders({"X-Pan123-Token": token, "X-Pan123-Folder": encodeURIComponent(folder)}),
@@ -1460,17 +1520,51 @@ async function composeThemePreviewBlob(entries, codec) {
   const sampleTone = () => {
     try {
       const sample = document.createElement("canvas");
-      sample.width = 32; sample.height = 32;
+      sample.width = 48; sample.height = 48;
       const sampleContext = sample.getContext("2d", {willReadFrequently: true});
       if (!sampleContext) return null;
-      sampleContext.drawImage(canvas, 0, 0, 32, 32);
-      const data = sampleContext.getImageData(0, 0, 32, 32).data;
+      sampleContext.drawImage(canvas, 0, 0, 48, 48);
+      const data = sampleContext.getImageData(0, 0, 48, 48).data;
       let r = 0, g = 0, b = 0;
-      for (let index = 0; index < data.length; index += 4) { r += data[index]; g += data[index + 1]; b += data[index + 2]; }
+      // 色系识别：只对有彩度、亮度适中的像素统计色相，避免白底/黑底/文字把
+      // 结果带偏。每个色相区间累计“饱和度×亮度”权重，取最重的一档当主色系。
+      const hueBuckets = new Array(12).fill(0);
+      const familyBuckets = new Map();
+      for (let index = 0; index < data.length; index += 4) {
+        const pr = data[index], pg = data[index + 1], pb = data[index + 2];
+        r += pr; g += pg; b += pb;
+        const max = Math.max(pr, pg, pb), min = Math.min(pr, pg, pb);
+        const light = (0.299 * pr + 0.587 * pg + 0.114 * pb) / 255;
+        const sat = max ? (max - min) / max : 0;
+        if (sat < .16 || light < .09 || light > .93) continue;
+        let hue = 0;
+        const delta = max - min;
+        if (delta) {
+          if (max === pr) hue = ((pg - pb) / delta) % 6;
+          else if (max === pg) hue = (pb - pr) / delta + 2;
+          else hue = (pr - pg) / delta + 4;
+          hue *= 60; if (hue < 0) hue += 360;
+        }
+        const weight = sat * Math.min(1, Math.max(.25, light));
+        hueBuckets[Math.min(11, Math.floor(hue / 30))] += weight;
+        const family = hueColorFamily(hue, sat, light);
+        if (family) familyBuckets.set(family, (familyBuckets.get(family) || 0) + weight);
+      }
       const pixels = data.length / 4;
       r /= pixels; g /= pixels; b /= pixels;
       const max = Math.max(r, g, b), min = Math.min(r, g, b);
-      return {light: (0.299 * r + 0.587 * g + 0.114 * b) / 255, saturation: max ? (max - min) / max : 0, warm: r >= b + 8};
+      const dominantHue = hueBuckets.indexOf(Math.max(...hueBuckets));
+      const dominantFamily = familyBuckets.size
+        ? [...familyBuckets].sort((a, b2) => b2[1] - a[1])[0][0]
+        : "";
+      return {
+        light: (0.299 * r + 0.587 * g + 0.114 * b) / 255,
+        saturation: max ? (max - min) / max : 0,
+        warm: r >= b + 8,
+        hue: dominantHue * 30 + 15,
+        hueStrength: Math.max(...hueBuckets),
+        colorFamily: dominantFamily,
+      };
     } catch { return null; }
   };
   const largestImage = images.slice().sort((a, b) => (b.width * b.height) - (a.width * a.height))[0] || null;
@@ -1498,7 +1592,7 @@ async function composeThemePreviewBlob(entries, codec) {
     if (tone) { try { entries.previewTone = tone; } catch {} }
     const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", .86));
     try { entries.previewKind = reader ? "reader" : "single"; } catch {}
-    entries.previewCategory = themeToneCategory(tone, {kind: entries.previewKind});
+    entries.previewCategory = themeToneCategories(tone, {kind: entries.previewKind})[0] || "";
     return blob;
   }
   // 左屏按真实手机比例（9:19.5 ≈ .462）铺满，右栏书架也铺满，两栏之间只留
@@ -1560,7 +1654,7 @@ async function composeThemePreviewBlob(entries, codec) {
   if (finalTone) { try { entries.previewTone = finalTone; } catch {} }
   const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", .86));
   try { entries.previewKind = splash ? "shelf_and_splash" : "shelf_and_reader"; } catch {}
-  entries.previewCategory = themeToneCategory(finalTone, {kind: entries.previewKind});
+  entries.previewCategory = themeToneCategories(finalTone, {kind: entries.previewKind})[0] || "";
   return blob;
 }
 /**
@@ -1892,7 +1986,7 @@ function renderCompressionResults() {
    直觉一致。类别词表存在本地，可以随时增删；每个主题的分类写在记录的
    categories 字段里，跟着同步走。 */
 const THEME_CATEGORY_KEY = "reeden-theme-categories";
-const DEFAULT_THEME_CATEGORIES = ["暖色", "冷色", "暗色", "明亮", "低饱和", "阅读主题"];
+const DEFAULT_THEME_CATEGORIES = ["暖色", "冷色", "暗色", "明亮", "低饱和", "阅读主题", "红色系", "橙色系", "黄色系", "绿色系", "青色系", "蓝色系", "蓝紫系", "紫色系", "粉色系", "灰色系", "黑色系", "白色系"];
 function themeCategoryVocabulary() {
   try {
     const raw = JSON.parse(localStorage.getItem(THEME_CATEGORY_KEY) || "null");
@@ -1905,17 +1999,50 @@ function saveThemeCategoryVocabulary(list) {
   try { localStorage.setItem(THEME_CATEGORY_KEY, JSON.stringify(cleaned)); } catch {}
   return cleaned;
 }
+// 色相 → 色系。中文本地语境里粉/紫单独成系比并进红/蓝更直观。
+function hueColorFamily(hue, saturation = 1, light = .5) {
+  if (saturation < .13) return light > .82 ? "白色系" : light < .24 ? "黑色系" : "灰色系";
+  const h = ((Number(hue) || 0) % 360 + 360) % 360;
+  if (h < 12 || h >= 345) return "红色系";
+  if (h < 38) return "橙色系";
+  if (h < 66) return "黄色系";
+  if (h < 95) return "绿色系";
+  if (h < 165) return "青色系";
+  if (h < 200) return "蓝色系";
+  if (h < 255) return "蓝紫系";
+  if (h < 290) return "紫色系";
+  if (h < 320) return "粉色系";
+  return "红色系";
+}
 function themeToneCategory(tone, previewDetails = {}) {
   if (!tone) return previewDetails.kind === "reader" ? "阅读主题" : "";
-  const light = Number(tone.light) || 0, saturation = Number(tone.saturation) || 0, warm = Boolean(tone.warm);
+  const light = Number(tone.light) || 0, saturation = Number(tone.saturation) || 0;
+  // 有明确主色相时优先给色系，这是用户要的“试着识别色系”；亮度档仍单独保留
+  // 一份（下面 themeCategoryList 会把两者合并），暗色主题一眼能看出来。
+  if (tone.colorFamily && (Number(tone.hueStrength) || 0) > 1.2) return tone.colorFamily;
   if (light < .32) return "暗色";
   if (saturation < .14) return light > .78 ? "明亮" : "低饱和";
-  return warm ? "暖色" : "冷色";
+  return tone.warm ? "暖色" : "冷色";
+}
+function themeToneCategories(tone, previewDetails = {}) {
+  const list = [];
+  const primary = themeToneCategory(tone, previewDetails);
+  if (primary) list.push(primary);
+  if (tone) {
+    const light = Number(tone.light) || 0, saturation = Number(tone.saturation) || 0;
+    if (light < .32 && primary !== "暗色") list.push("暗色");
+    else if (light > .78 && primary !== "明亮" && saturation < .3) list.push("明亮");
+    if (tone.colorFamily && tone.colorFamily !== primary) list.push(tone.colorFamily);
+  }
+  if (previewDetails?.kind === "reader" && !list.includes("阅读主题")) list.push("阅读主题");
+  return list;
 }
 function themeCategoryList(theme) {
   const own = Array.isArray(theme?.categories) ? theme.categories : [];
-  const fallback = theme?.auto_category ? [theme.auto_category] : [];
-  return [...new Set([...own, ...fallback].map(item => String(item || "").trim()).filter(Boolean))];
+  const auto = Array.isArray(theme?.auto_categories) && theme.auto_categories.length
+    ? theme.auto_categories
+    : theme?.auto_category ? [theme.auto_category] : [];
+  return [...new Set([...own, ...auto].map(item => String(item || "").trim()).filter(Boolean))];
 }
 function preferredPreview(light, dark) {
   return {url: light || dark || "", label: light ? "日间" : dark ? "夜间补位" : "暂无预览"};
@@ -2167,8 +2294,6 @@ function updateBulkControls() {
     if (deleteButton) deleteButton.disabled = Boolean(state.operation) || !count;
     const downloadButton = $("#downloadSelected" + kind[0].toUpperCase() + kind.slice(1));
     if (downloadButton) downloadButton.disabled = Boolean(state.operation) || !count;
-    const categoryButton = $("#bulkCategoryTheme");
-    if (categoryButton) categoryButton.disabled = Boolean(state.operation) || !count;
     // Phones pin the bulk bar only while something is selected; otherwise it
     // would eat 96px at the top of every scroll for nothing.
     const bar = $("#" + kind + "Toolbar");
@@ -2193,6 +2318,11 @@ function updateBulkControls() {
   $("#themeToolbar").hidden = !state.themes.length;
   $("#fontToolbar").hidden = !state.fonts.length;
   $("#assetToolbar").hidden = !state.assets.length;
+  // 批量改类别只在主题库出现，状态必须取主题的选中数。之前它写在上面那个
+  // 四种 toolbar 的循环里，被最后一次（asset）的 count 覆盖，所以哪怕选了
+  // 一堆主题、没选收藏时按钮一直是灰的。
+  const bulkCategoryButton = $("#bulkCategoryTheme");
+  if (bulkCategoryButton) bulkCategoryButton.disabled = Boolean(state.operation) || !selections.theme.size;
   const eligible = Object.fromEntries(Object.keys(selections).map(kind => [kind, new Set(selectableIds(kind))]));
   $$("[data-selection]").forEach(input => {
     input.checked = selections[input.dataset.selection].has(input.dataset.id);
@@ -2495,6 +2625,27 @@ async function applyBulkThemeCategories() {
     toast(failed ? `已更新 ${done} 个主题，${failed} 个失败` : `已把类别写入 ${done} 个主题`);
   } finally { setOperation(""); }
 }
+async function saveThemeIdentity(themeId, form) {
+  const theme = state.themes.find(item => String(item.id) === String(themeId));
+  if (!theme || state.operation) return;
+  const fields = new FormData(form);
+  const name = String(fields.get("name") || "").trim();
+  const author = String(fields.get("author") || "").trim();
+  if (!name) { toast("作品名不能为空"); return; }
+  setOperation("theme-identity");
+  try {
+    const result = await api(`/api/themes/${encodeURIComponent(theme.id)}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, author, style: theme.style || "", tags: theme.tags || [], categories: themeCategoryList(theme) }),
+    });
+    Object.assign(theme, result.item || {}, {name});
+    if (browserSyncEnabled()) invalidateBrowserLibraryRecords();
+    renderThemes();
+    openThemeDialog(theme.id);
+    toast("名称与作者已保存");
+  } catch (error) { toast(`保存失败：${error.message}`); }
+  finally { setOperation(""); }
+}
 function openThemeDialog(id) {
   const theme = state.themes.find(item => String(item.id) === String(id));
   const dialog = $("#themeDialog");
@@ -2506,6 +2657,7 @@ function openThemeDialog(id) {
   $("#themeDialogTitle").textContent = theme.name || "未命名主题";
   $("#themeDialogSub").textContent = `${themeAuthorLabel(theme)} · ${previewKind(theme.preview_details)} · ${syncLabel(theme)}`;
   $("#themeDialogBody").innerHTML = `<div class="theme-dialog-preview">${previewImage(preview.url, `${theme.name} ${preview.label} · ${previewKind(theme.preview_details)}`, "", theme.preview_details)}</div>
+    <form class="theme-identity-form" data-theme-identity="${escapeHtml(theme.id)}"><div class="asset-meta-fields"><label>作品名<input name="name" maxlength="200" value="${escapeHtml(theme.name || "")}" placeholder="作品名" /></label><label>作者<input name="author" maxlength="200" value="${escapeHtml(theme.author === "作者未记录" ? "" : (theme.author || ""))}" placeholder="作者，未记录可留空" /></label></div><button class="text-button" type="submit">保存名称与作者</button></form>
     <div class="theme-dialog-details"><dl class="detail-list">
       ${themeDetailRow("压缩结果", compressionSummary(theme))}
       ${themeDetailRow("原始体积", theme.original_size ? formatBytes(theme.original_size) : "")}
@@ -2553,6 +2705,10 @@ function openThemeDialog(id) {
       toast("已从类别词表移除");
     }));
   }
+  $("#themeDialogBody .theme-identity-form")?.addEventListener("submit", event => {
+    event.preventDefault();
+    saveThemeIdentity(theme.id, event.currentTarget);
+  });
   $("#themeDialogSync")?.addEventListener("click", () => { dialog.close(); syncTheme(theme.id); });
   $("#themeDialogRebuild")?.addEventListener("click", () => { dialog.close(); rebuildPreview(theme.id); });
   $("#themeDialogDelete")?.addEventListener("click", () => { dialog.close(); deleteSelectedRecords("theme", [theme.id]); });
@@ -2598,18 +2754,32 @@ function renderThemes() {
   $("#themeCount").textContent = visible.length === state.themes.length ? `${state.themes.length} 个主题` : `${visible.length} / ${state.themes.length} 个主题`;
   $("#themeEmpty").hidden = visible.length > 0;
   $("#themeEmpty h3").textContent = state.themes.length && !visible.length ? "没有匹配的主题" : "还没有已收录主题";
-  $("#themeEmpty p").textContent = state.themes.length && !visible.length ? "换一个主题名称、作者或压缩状态试试。" : "导入一个 `.red` 文件后，这里会显示预览、作者和压缩状态。";
-  list.innerHTML = visible.map(theme => {
+  $("#themeEmpty p").textContent = state.themes.length && !visible.length ? "换一个主题名称或作者试试。" : "导入一个 `.red` 文件后，这里会显示预览和作者。";
+  // 主题多了以后一页滚不到底：每页固定条数，翻页只在当前筛选结果里走。
+  const pageCount = Math.max(1, Math.ceil(visible.length / THEME_PAGE_SIZE));
+  state.themePage = Math.min(Math.max(1, Number(state.themePage) || 1), pageCount);
+  const pageItems = visible.slice((state.themePage - 1) * THEME_PAGE_SIZE, state.themePage * THEME_PAGE_SIZE);
+  const pager = $("#themePagination");
+  if (pager) {
+    pager.hidden = visible.length <= THEME_PAGE_SIZE;
+    $("#themePageInfo").textContent = `第 ${state.themePage} / ${pageCount} 页 · 共 ${visible.length} 个`;
+    $("#themePrevPage").disabled = state.themePage <= 1;
+    $("#themeNextPage").disabled = state.themePage >= pageCount;
+  }
+  list.innerHTML = pageItems.map(theme => {
     const preview = preferredPreview(theme.preview_light_url, theme.preview_dark_url);
-    const resources = theme.resource_summary || [];
-    const roles = [...new Set(resources.map(item => item.role).filter(Boolean))].slice(0, 4);
-    const compressionText = compressionSummary(theme);
-    const roleText = roles.join(" · ");
-    // 卡片只留作品名、作者和一行压缩结果；体积、角色、123 备份、同步与删除
-    // 都收进点击后打开的主题细节弹窗，跟参考站的卡片一样安静。
+    const author = themeAuthorLabel(theme);
+    // 作品名里已经带了作者名（例如「Muiii - 书签 · 日夜」）时不再重复写作者；
+    // 手机上标题和作者之间的空行来自 .item-heading 的最小高度，CSS 里已收紧。
+    const nameIncludesAuthor = author && author !== "作者未记录" && String(theme.name || "").toLocaleLowerCase("zh-CN").includes(author.toLocaleLowerCase("zh-CN"));
+    const authorText = nameIncludesAuthor ? "" : author;
+    const categories = themeCategoryList(theme);
+    const meta = [authorText, ...categories].filter(Boolean);
+    // 卡片只留作品图和一行作者/类别；压缩结果、体积、角色、123 备份、同步与
+    // 删除都收进点击后打开的主题细节弹窗，跟参考站的卡片一样安静。
     return `<article class="theme-card" data-theme-id="${escapeHtml(theme.id)}">
       <div class="theme-preview">${previewImage(preview.url, `${theme.name} ${preview.label} · ${previewKind(theme.preview_details)}`, "", theme.preview_details)}<span class="preview-caption">${escapeHtml(previewKind(theme.preview_details))}</span><button class="theme-more" type="button" data-theme-open="${escapeHtml(theme.id)}" aria-label="查看 ${escapeHtml(theme.name || "未命名主题")} 的主题细节">⋯</button></div>
-      <div class="theme-info"><div class="item-heading">${selectInput("theme", theme.id, `主题 ${theme.name || "未命名主题"}`, isAssetBusy("theme", theme.id))}<button class="theme-title theme-open" type="button" data-theme-open="${escapeHtml(theme.id)}">${escapeHtml(theme.name || "未命名主题")}</button></div><div class="theme-meta"><span class="theme-author">${escapeHtml(themeAuthorLabel(theme))}</span>${themeCategoryList(theme).length ? `<span class="theme-categories">${themeCategoryList(theme).map(category => `<em>${escapeHtml(category)}</em>`).join("")}</span>` : ""}${roleText ? `<span class="theme-roles"> · ${escapeHtml(roleText)}</span>` : ""}</div><p>${compressionText}</p>${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === "string" ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join("；"))}</p>` : ""}</div>
+      <div class="theme-info"><div class="item-heading">${selectInput("theme", theme.id, `主题 ${theme.name || "未命名主题"}`, isAssetBusy("theme", theme.id))}<button class="theme-title theme-open" type="button" data-theme-open="${escapeHtml(theme.id)}">${escapeHtml(theme.name || "未命名主题")}</button></div>${meta.length ? `<div class="theme-meta">${authorText ? `<span class="theme-author">${escapeHtml(authorText)}</span>` : ""}${categories.length ? `<span class="theme-categories">${categories.map(category => `<em>${escapeHtml(category)}</em>`).join("")}</span>` : ""}</div>` : ""}${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === "string" ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join("；"))}</p>` : ""}</div>
     </article>`;
   }).join("");
   $$("[data-theme-open]").forEach(button => button.addEventListener("click", event => { event.stopPropagation(); openThemeDialog(button.dataset.themeOpen); }));
@@ -3047,7 +3217,19 @@ async function loadThemes(force = false) {
   renderThemes();
 }
 async function loadBrowserLibraryRecords(force = false) {
-  const fresh = browserLibraryRecordsCache && Date.now() - browserLibraryRecordsLoadedAt < BROWSER_RECORD_CACHE_TTL;
+  // 本机快照优先：刚打开网页时内存缓存还是空的，但上次会话留下的快照能直接
+  // 命中，省掉一次 R2 记录列举（用户很在意每次开网页都读一次 R2 的流量）。
+  if (!force && !browserLibraryRecordsCache) {
+    try {
+      const saved = JSON.parse(localStorage.getItem(LIBRARY_CACHE_KEY) || "null");
+      if (saved && saved.at && Date.now() - saved.at < LIBRARY_CACHE_TTL && Array.isArray(saved.records)) {
+        browserLibraryRecordsCache = latestRecords(saved.records);
+        browserLibraryRecordsLoadedAt = saved.at;
+      }
+    } catch {}
+  }
+  // 快照命中后不再发起网络读取。想强制刷新时用「刷新」按钮（force=true）。
+  const fresh = browserLibraryRecordsCache && Date.now() - browserLibraryRecordsLoadedAt < LIBRARY_CACHE_TTL;
   if (!force && fresh) return browserLibraryRecordsCache;
   if (!force && browserLibraryRecordsPromise) return browserLibraryRecordsPromise;
   browserLibraryRecordsPromise = (async () => {
@@ -3060,6 +3242,7 @@ async function loadBrowserLibraryRecords(force = false) {
     } while (cursor);
     browserLibraryRecordsCache = latestRecords(records);
     browserLibraryRecordsLoadedAt = Date.now();
+    try { localStorage.setItem(LIBRARY_CACHE_KEY, JSON.stringify({at: browserLibraryRecordsLoadedAt, records: browserLibraryRecordsCache})); } catch {}
     return browserLibraryRecordsCache;
   })();
   try { return await browserLibraryRecordsPromise; }
@@ -3098,6 +3281,7 @@ async function loadStorage() {
   try {
     const data = await api("/api/storage");
     state.storage = data;
+    try { localStorage.setItem(STORAGE_SNAPSHOT_KEY, JSON.stringify({at: Date.now(), data})); } catch {}
     if (data.mode === "browser-local") {
       storageDirty = false;
       renderStorageSummary(data);
@@ -3118,6 +3302,10 @@ async function loadStorage() {
     renderStorageSummary(data);
     updateStorageControls();
     renderReview();
+  } catch (error) {
+    // 网络暂不可达时沿用本机快照中的存储配置，别把已保存的设置「读丢」。
+    if (!state.storage) throw error;
+    renderStorageSummary(state.storage);
   } finally {
     storageReady = true;
     updateBulkControls();
@@ -3264,8 +3452,9 @@ async function analyzeFiles(files) {
           previewDetails = { ...previewDetails, kind: previewCompositionKind(entries) };
         }
         const tone = entries.previewTone || null;
-        const autoCategory = themeToneCategory(tone, previewDetails);
-        const info = { ...identity, source_name: file.name, bytes: raw.length, container_format: inspection.format, compression_supported: inspection.compressionSupported !== false, preview_details: previewDetails, preview_tone: tone, auto_category: autoCategory };
+        const toneCategories = themeToneCategories(tone, previewDetails);
+        const autoCategory = toneCategories[0] || "";
+        const info = { ...identity, source_name: file.name, bytes: raw.length, container_format: inspection.format, compression_supported: inspection.compressionSupported !== false, preview_details: previewDetails, preview_tone: tone, auto_category: autoCategory, auto_categories: toneCategories };
         const duplicateRecords = browserDuplicateCandidates(identity.name, identity.author);
         return { staging_id: `browser-${crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`}`, file, bytes: raw, inspection, info, duplicates: duplicateRecords.map(record => ({ ...record })), preview_urls: { light: previewUrl, dark: "" } };
       });
@@ -3368,7 +3557,9 @@ async function commitThemes(ids = [...selections.review]) {
             kind: "theme", id: `theme-${assetSha.slice(0, 16)}`, name: item.info.name || item.info.source_name, author: item.info.author || "作者未记录",
             sha256: assetSha, original_sha256: originalSha, original_size: raw.length, compressed_size: compressedBytes.length,
             compression_supported: true, status: "browser_compressed", source_name: item.info.source_name,
-            categories: [...new Set([item.info.auto_category, ...(item.info.categories || [])].map(value => String(value || "").trim()).filter(Boolean))],
+            // 色系识别：把主色系 + 明暗/阅读属性一起写进类别，别只存一个 auto_category。
+            categories: [...new Set([...(item.info.auto_categories || [item.info.auto_category]), ...(item.info.categories || [])].map(value => String(value || "").trim()).filter(Boolean))],
+            auto_categories: item.info.auto_categories || (item.info.auto_category ? [item.info.auto_category] : []),
             compressed_url: compressedPath, library_url: compressedPath, preview_light_url: previewPath, preview_dark_url: "", preview_details: previewDetails,
             saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: "", original_url: originalPath,
             original_123: backup && !backup.error ? backup : null, original_123_error: backup?.error || ""
@@ -4619,9 +4810,11 @@ $("#localCleanupEnabled").addEventListener("change", event => {
 });
 refreshCleanupHint();
 $("#refreshThemes").addEventListener("click", () => loadThemes(true));
-$("#themeCategoryFilter")?.addEventListener("change", event => { state.themeCategory = event.target.value; renderThemes(); });
-$("#themeSearchInput").addEventListener("input", event => { state.themeSearch = event.target.value; renderThemes(); });
-$("#themeAuthorFilter").addEventListener("change", event => { state.themeAuthor = event.target.value || "all"; renderThemes(); });
+$("#themeCategoryFilter")?.addEventListener("change", event => { state.themeCategory = event.target.value; state.themePage = 1; renderThemes(); });
+$("#themeSearchInput").addEventListener("input", event => { state.themeSearch = event.target.value; state.themePage = 1; renderThemes(); });
+$("#themeAuthorFilter").addEventListener("change", event => { state.themeAuthor = event.target.value || "all"; state.themePage = 1; renderThemes(); });
+$("#themePrevPage")?.addEventListener("click", () => { if (state.themePage > 1) { state.themePage--; renderThemes(); window.scrollTo({top: ($("#themeList")?.offsetTop || 0) - 90, behavior: "smooth"}); } });
+$("#themeNextPage")?.addEventListener("click", () => { state.themePage++; renderThemes(); window.scrollTo({top: ($("#themeList")?.offsetTop || 0) - 90, behavior: "smooth"}); });
 $("#refreshFonts").addEventListener("click", () => loadFonts(true));
 $("#fontSearchInput").addEventListener("input", event => { state.fontSearch = event.target.value; renderFonts(); });
 $("#refreshAssets").addEventListener("click", () => loadAssets(true));
@@ -4816,8 +5009,8 @@ $("#pan123WebLogin")?.addEventListener("click", webLoginPan123);
   const hint = $("#pan123WebLoginHint");
   if (!hint) return;
   hint.textContent = nativeAppBridge()?.caps?.pan123Login
-    ? "登录请求由同步 Worker 代发，密码不回传、不落盘；遇到验证码时点「改用网页登录」，在应用内登录页完成后再取回会话。"
-    : "登录请求由同步 Worker 代发，密码不回传、不落盘；遇到验证码时点「改用网页登录」，在浏览器登录后复制会话 Token，回到本页点「从剪贴板粘贴」即可。";
+    ? "登录请求由本机浏览器直接连 123，不经过 Worker，不会被判成海外登录要验证码；在应用内登录页完成后会自动取回会话。"
+    : "扫码与账号密码都由本机浏览器直接连 123，不会被判成海外登录要验证码；也可在 123 网页复制会话 Token，回到本页点「从剪贴板粘贴」。";
 })();
 $("#listPan123Backup").addEventListener("click", () => { refreshPan123BackupList(); });
 $("#verifyPan123Write").addEventListener("click", () => { verifyPan123Write(); });
@@ -4834,6 +5027,7 @@ $$('.nav-item').forEach(item => item.addEventListener('click', () => { setView(i
 $$("#themeDensity .density-option").forEach(button => button.addEventListener("click", () => applyThemeDensity(button.dataset.density)));
 restoreThemeDensity();
 const initialView = location.hash.slice(1);
+hydrateLocalSnapshots();
 updateRuntimeMode();
 try {
   const options = JSON.parse(sessionStorage.getItem("reeden-compression-options") || "null");

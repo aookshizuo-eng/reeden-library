@@ -307,6 +307,10 @@ h3 { font-size: 14.5px; line-height: 1.35; margin-bottom: 4px; font-weight: 600;
 .theme-title.theme-open:hover { color: var(--accent); }
 .theme-info .theme-meta { margin-top: 3px; font-size: 11.5px; }
 .theme-info p { color: var(--faint); font-size: 11px; margin: 4px 0 0; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; font-variant-numeric: tabular-nums; }
+/* 主题多时分批显示：翻页控件贴着卡片网格，不打扰上面的筛选工具条 */
+.pagination { display: flex; align-items: center; justify-content: center; gap: 14px; margin: 18px 0 4px; }
+.pagination span { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.pagination .text-button:disabled { opacity: .4; cursor: default; }
 .theme-badges { display: flex; flex-wrap: wrap; gap: 5px; }
 .badge { display: inline-flex; align-items: center; min-height: 20px; padding: 0 7px; background: var(--raised); color: var(--muted); border-radius: 4px; font-size: 10.5px; letter-spacing: .01em; }
 .badge.is-good { background: #e8f1e9; color: #2f5a3f; }
@@ -817,6 +821,9 @@ button:disabled { cursor: not-allowed; opacity: .5; }
   .job-card-head { flex-wrap: wrap; gap: 9px; }
   .job-card-head button { min-height: 38px; }
   .item-heading { min-height: 30px; }
+  /* 主题卡的勾选框浮在图片上，标题行不需要为它留 30px 空档，否则标题和作者之间会空出一行 */
+  .theme-card .item-heading { min-height: 0; }
+  .theme-info .theme-meta { margin-top: 4px; }
   .review-actions { flex-wrap: wrap; }
   .review-actions button { min-height: 40px; }
   .review-top { flex-wrap: wrap; }
