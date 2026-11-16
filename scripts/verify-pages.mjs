@@ -196,17 +196,27 @@ if (liveUrl) {
     if (!records) errors.push("线上 /api/library 没有 records/items 数组");
     else {
       const fonts = records.filter(item => item?.kind === "font");
-      const previewChecks = await Promise.all(fonts.map(async font => {
+      // 逐个检查预览图并对网络错误重试：一次并发 130 个请求会被对端断连接，
+      // 随机报 fetch failed，那是网络抖动不是线上坏了。
+      const previewChecks = [];
+      for (const font of fonts) {
         const source = font.preview_url || font.view_url || font.url;
-        if (!source) return `字体 ${font.id || font.file_name || "未命名"} 没有预览图片或字体文件地址`;
-        if (!font.preview_url) return null;
-        try {
-          const preview = await fetch(new URL(font.preview_url, `${liveUrl}/`));
-          return preview.ok ? null : `字体 ${font.id || font.file_name || "未命名"} 的预览返回 HTTP ${preview.status}`;
-        } catch (error) {
-          return `字体 ${font.id || font.file_name || "未命名"} 的预览检查失败：${error.message}`;
+        if (!source) { previewChecks.push(`字体 ${font.id || font.file_name || "未命名"} 没有预览图片或字体文件地址`); continue; }
+        if (!font.preview_url) continue;
+        let failure = null;
+        for (let attempt = 0; attempt < 3 && !failure; attempt++) {
+          try {
+            const preview = await fetch(new URL(font.preview_url, `${liveUrl}/`));
+            if (preview.ok) { failure = null; break; }
+            failure = `字体 ${font.id || font.file_name || "未命名"} 的预览返回 HTTP ${preview.status}`;
+            if (preview.status < 500) break;
+          } catch (error) {
+            failure = `字体 ${font.id || font.file_name || "未命名"} 的预览检查失败：${error.message}`;
+          }
+          await new Promise(resolve => setTimeout(resolve, 400 * (attempt + 1)));
         }
-      }));
+        if (failure) previewChecks.push(failure);
+      }
       errors.push(...previewChecks.filter(Boolean));
       console.log(`live check: ${records.length} records, ${fonts.length} fonts, ${fonts.filter(item => item.preview_url).length} preview images`);
       // Check the streamed ZIP endpoint without pulling any object bytes.

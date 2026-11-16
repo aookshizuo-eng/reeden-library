@@ -1717,18 +1717,18 @@ async function analyzeFontGlyphs(bytes, fileName, fallbackStyle) {
     else style = "黑体";
     // A visible specimen is generated from the same parsed font, so opening
     // the card later never needs to fetch the original font file again.
-    // 样张要能看清字形：画布收紧、字号放大，宽度不够时按实际字宽自动缩小，
-    // 免得等宽字体的长串被裁掉两边。
+    // 样张要能看清字形：画布收紧到 700x300，字号按实际字宽自动收缩，
+    // 免得等宽字体的长串被裁掉两边；卡片里按高度铺满显示，字形比原来大一圈。
     const specimenText = "Aa 中文 你好 123";
-    const specimenWidth = 840, specimenHeight = 300;
-    let specimenSize = 88;
+    const specimenWidth = 700, specimenHeight = 300;
+    let specimenSize = 84;
     const measured = Number(advanceOf(specimenText, specimenSize)) || 0;
-    if (measured > specimenWidth * 0.92) specimenSize = Math.max(46, Math.floor(specimenSize * specimenWidth * 0.92 / measured));
+    if (measured > specimenWidth * 0.88) specimenSize = Math.max(46, Math.floor(specimenSize * specimenWidth * 0.88 / measured));
     const specimen = renderer(specimenText, specimenSize, specimenWidth, specimenHeight);
     const context = specimen.getContext("2d");
-    context.fillStyle = "#8a94a3"; context.font = "24px sans-serif";
+    context.fillStyle = "#8a94a3"; context.font = "22px sans-serif";
     context.textAlign = "center"; context.textBaseline = "middle";
-    context.fillText(String(fileName || "").slice(0, 60), specimenWidth / 2, specimenHeight - 42);
+    context.fillText(String(fileName || "").slice(0, 60), specimenWidth / 2, specimenHeight - 38);
     const blob = await new Promise(resolve => specimen.toBlob(resolve, "image/jpeg", 0.9));
     fallback.specimen = blob ? new Uint8Array(await blob.arrayBuffer()) : null;
     return {style, source: "glyph", method: fallback.method, error: fallback.error, features, specimen: fallback.specimen};
