@@ -4428,7 +4428,7 @@ function openCleanupDialog(targets, summary) {
       const detail = [target.path && target.path !== target.name ? target.path : "", formatBytes(target.size), target.deletable ? "" : "当前环境不允许网页删除，请手动处理"].filter(Boolean).join(" · ");
       return `<li class="${target.deletable ? "" : "is-locked"}"><label class="check-label"><input type="checkbox" data-cleanup-index="${index}" ${target.deletable ? "checked" : "disabled"} /><span><strong>${escapeHtml(target.name)}</strong><small>${escapeHtml(detail)}</small></span></label></li>`;
     }).join("");
-    $("#cleanupDialogDescription").textContent = deletable.length ? summary : `${summary}。当前环境无法由网页直接删除，请按下面的清单手动删除。`;
+    $("#cleanupDialogDescription").textContent = deletable.length ? summary : `${summary} 当前环境无法由网页直接删除，请按下面的清单手动删除。`;
     const boxes = $$("#cleanupList input[data-cleanup-index]");
     const confirm = $("#cleanupConfirm");
     const finish = value => { if (dialog.open) dialog.close(); resolve(value); };
