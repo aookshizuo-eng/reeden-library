@@ -117,6 +117,8 @@ function saveApiBaseSetting() {
     else localStorage.removeItem(SYNC_TOKEN_STORAGE_KEY);
   } catch {}
   updateRuntimeMode();
+  // 同步地址刚保存完，表单里没有待保存的改动，上传不该再被拦住。
+  if ($("#storageForm").hidden) storageDirty = false;
   // The previous library may belong to another API; never reuse its cached
   // records after the address changes.
   invalidateBrowserLibraryRecords();
@@ -178,6 +180,12 @@ let browserLibraryRecordsCache;
 let browserLibraryRecordsPromise;
 let browserLibraryRecordsLoadedAt = 0;
 let storageDirty = false;
+// /api/storage 至少成功读过一次。之前刷新完页面、配置还没读回来时，
+// browserSyncEnabled() 会是 false，于是上传被当成「本机后端」发到同步 Worker，
+// 直接 404 —— 用户只能手动再保存一次存储设置才恢复。这里记住读取状态，
+// 需要判断同步模式时先等它回来。
+let storageReady = false;
+let storageReadyPromise = null;
 let jobsPollTimer;
 let jobsLoading = false;
 let jobsRevision = "";
@@ -1246,6 +1254,80 @@ function previewRole(name) {
 function isNightAsset(name) {
   return /(^|[._/-])(dark|night|nighttime|darkmode|黑夜|夜间)([._/-]|$)/i.test(String(name || ""));
 }
+/**
+ * Reeden 的日夜两套资源不靠路径名区分：theme_bg、bookshelf_carousel 这类文件名里
+ * 带 light/dark 的能直接看出来，而 reader_schema、custom_splash、cover_gallery、
+ * navbar_pack 的目录名是随机 UUID，日夜归属只写在 theme.json 的 light / dark 块里
+ * （ID 指向 UUID 目录，图片用 MD5 指向具体字节）。这里按「块 → 资源」的绑定关系把
+ * 每条资源归入 light 或 dark，预览时整套只取一套，避免日夜一左一右混排。
+ */
+async function themeModeIndex(entries, codec) {
+  const list = Array.isArray(entries) ? entries : [];
+  const config = list
+    .filter(entry => /(^|\/)theme\.json$/i.test(String(entry?.name || "")))
+    .sort((a, b) => String(a?.name || "").length - String(b?.name || "").length)[0];
+  if (!config?.bytes?.length) return null;
+  let root;
+  try { root = JSON.parse(new TextDecoder().decode(config.bytes)); } catch { return null; }
+  const findBlock = (value, depth = 0) => {
+    if (!value || typeof value !== "object" || depth > 3) return null;
+    if (value.light && value.dark && typeof value.light === "object" && typeof value.dark === "object") return value;
+    for (const child of Object.values(value)) { const found = findBlock(child, depth + 1); if (found) return found; }
+    return null;
+  };
+  const block = findBlock(root);
+  if (!block) return null;
+  const uuidPattern = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+  const uuidSegment = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const md5Pattern = /^[0-9a-f]{32}$/i;
+  const collect = source => {
+    const ids = new Set(), hashes = new Set();
+    const visit = value => {
+      if (typeof value === "string") {
+        const text = value.trim();
+        const uuid = text.match(uuidPattern);
+        if (uuid) ids.add(uuid[0].toLowerCase());
+        else if (md5Pattern.test(text)) hashes.add(text.toLowerCase());
+        return;
+      }
+      if (Array.isArray(value)) { value.forEach(visit); return; }
+      if (value && typeof value === "object") Object.values(value).forEach(visit);
+    };
+    visit(source);
+    return {ids, hashes};
+  };
+  const light = collect(block.light), dark = collect(block.dark);
+  if (!light.ids.size && !light.hashes.size && !dark.ids.size && !dark.hashes.size) return null;
+  const byName = new Map();
+  const assign = (name, mode) => { if (name && !byName.has(name)) byName.set(name, mode); };
+  for (const entry of list) {
+    const name = String(entry?.name || "");
+    if (!name) continue;
+    const segments = name.toLowerCase().split("/");
+    // 1) 目录名是被 light / dark 块引用的 UUID：theme.json 是权威，先听它的
+    for (const segment of segments) {
+      if (!uuidSegment.test(segment)) continue;
+      const id = segment.toLowerCase();
+      if (light.ids.has(id)) { assign(name, "light"); break; }
+      if (dark.ids.has(id)) { assign(name, "dark"); break; }
+    }
+    if (byName.has(name)) continue;
+    // 2) 路径里直接写了 light / dark
+    if (segments.includes("dark")) assign(name, "dark");
+    else if (segments.includes("light")) assign(name, "light");
+  }
+  // 3) 剩下的按 MD5 对上块里的图片引用（压缩后字节会变，这一步主要服务原包）
+  const pending = list.filter(entry => entry?.name && !byName.has(String(entry.name)) && entry.bytes?.length && entry.bytes.length <= 8 * 1024 * 1024);
+  if (pending.length && typeof codec?.md5Hex === "function") {
+    for (const entry of pending.slice(0, 32)) {
+      let hash = "";
+      try { hash = String(await codec.md5Hex(entry.bytes)).toLowerCase(); } catch { continue; }
+      if (light.hashes.has(hash)) assign(String(entry.name), "light");
+      else if (dark.hashes.has(hash)) assign(String(entry.name), "dark");
+    }
+  }
+  return {byName, light, dark};
+}
 async function composeThemePreviewBlob(entries, codec) {
   if (!Array.isArray(entries) || typeof createImageBitmap !== "function") return null;
   const allImages = entries
@@ -1255,8 +1337,20 @@ async function composeThemePreviewBlob(entries, codec) {
   // splash makes the thumbnail look like a broken theme, while filtering all
   // night resources leaves night-only packages blank.  Prefer the complete
   // daytime set whenever it exists, then fall back to the complete night set.
-  const dayImages = allImages.filter(item => !isNightAsset(item.entry.name));
-  const images = dayImages.length ? dayImages : allImages;
+  // 双模式包先用 theme.json 的 light / dark 绑定判定归属：只有文件名带 light/dark
+  // 的条目能靠路径认出来，UUID 目录里的夜间资源必须靠块里的 ID 才能认出来，
+  // 否则就会把日夜两套图一左一右拼在一起。
+  const modeIndex = await themeModeIndex(entries, codec);
+  let images;
+  if (modeIndex) {
+    const lightImages = allImages.filter(item => modeIndex.byName.get(item.entry.name) === "light");
+    const darkImages = allImages.filter(item => modeIndex.byName.get(item.entry.name) === "dark");
+    images = lightImages.length ? lightImages : darkImages.length ? darkImages : allImages.filter(item => !isNightAsset(item.entry.name));
+    if (!images.length) images = allImages;
+  } else {
+    const dayImages = allImages.filter(item => !isNightAsset(item.entry.name));
+    images = dayImages.length ? dayImages : allImages;
+  }
   if (!images.length) return null;
   // Decode once to classify nameless images recovered from encrypted REDs.
   for (const item of images) {
@@ -1623,11 +1717,18 @@ async function analyzeFontGlyphs(bytes, fileName, fallbackStyle) {
     else style = "黑体";
     // A visible specimen is generated from the same parsed font, so opening
     // the card later never needs to fetch the original font file again.
-    const specimen = renderer("Aa 中文 你好 123", 64, 900, 300);
+    // 样张要能看清字形：画布收紧、字号放大，宽度不够时按实际字宽自动缩小，
+    // 免得等宽字体的长串被裁掉两边。
+    const specimenText = "Aa 中文 你好 123";
+    const specimenWidth = 840, specimenHeight = 300;
+    let specimenSize = 88;
+    const measured = Number(advanceOf(specimenText, specimenSize)) || 0;
+    if (measured > specimenWidth * 0.92) specimenSize = Math.max(46, Math.floor(specimenSize * specimenWidth * 0.92 / measured));
+    const specimen = renderer(specimenText, specimenSize, specimenWidth, specimenHeight);
     const context = specimen.getContext("2d");
-    context.fillStyle = "#8a94a3"; context.font = "20px sans-serif";
+    context.fillStyle = "#8a94a3"; context.font = "24px sans-serif";
     context.textAlign = "center"; context.textBaseline = "middle";
-    context.fillText(String(fileName || "").slice(0, 60), 450, 252);
+    context.fillText(String(fileName || "").slice(0, 60), specimenWidth / 2, specimenHeight - 42);
     const blob = await new Promise(resolve => specimen.toBlob(resolve, "image/jpeg", 0.9));
     fallback.specimen = blob ? new Uint8Array(await blob.arrayBuffer()) : null;
     return {style, source: "glyph", method: fallback.method, error: fallback.error, features, specimen: fallback.specimen};
@@ -1992,6 +2093,15 @@ function finishTransferProgress(message, failed = transferState.failed) {
   if (id) sendCloudJobPatch(finalPatch, id);
 }
 function r2Enabled() { return browserSyncEnabled() || state.storage?.library?.provider === "cloudflare_r2"; }
+/**
+ * 存储设置是否真的有「没保存的修改」。
+ * 浏览器同步模式下这张表单是隐藏的，它的字段根本不参与上传，
+ * 这时残留的 storageDirty 不该再拦住上传（那正是「刷新后必须重新保存一次」的老毛病）。
+ */
+function storageSettingsPending() {
+  if (state.storage?.mode === "browser-local") return false;
+  return storageDirty;
+}
 function autoSyncEnabled() { return browserSyncEnabled() || (r2Enabled() && state.storage?.library?.autoSync); }
 function savedToCloud(record) { return record.saved_to_cloud === true || (record.sync_status?.library === "synced" && record.local_status === "cloud_only" && !record.sync_error); }
 function pendingIds() { return state.pending.map(item => item.id); }
@@ -2035,7 +2145,7 @@ function updateBulkControls() {
     const syncCount = [...selections[kind]].filter(id => eligibleIds(kind).includes(id)).length;
     const syncButton = $("#" + buttonId);
     if (syncButton) {
-      const blocked = Boolean(state.operation) || storageDirty || !syncCount || (["theme", "font", "asset"].includes(kind) && !r2Enabled());
+      const blocked = Boolean(state.operation) || !storageReady || storageSettingsPending() || !syncCount || (["theme", "font", "asset"].includes(kind) && !r2Enabled());
       // 禁用态按钮按下去毫无反应，用户只会看到「点不动」。改成「看起来灰着、
       // 点一下就告诉你为什么」，保证每次点击都有反馈；真正的拦截条件仍在
       // 处理函数里逐条校验并给出提示。
@@ -2044,7 +2154,8 @@ function updateBulkControls() {
       syncButton.classList.toggle("is-blocked", blocked);
       // 按钮不可用时必须把原因摆在明面上。
       const reason = state.operation ? "正在处理中，请等当前任务结束"
-        : storageDirty ? "存储设置有未保存的修改，先在「存储设置」保存再上传"
+        : !storageReady ? "正在读取存储配置，请稍候…"
+        : storageSettingsPending() ? "存储设置有未保存的修改，先在「存储设置」保存再上传"
         : !syncCount ? (count ? "所选条目暂时不能上传，请重新勾选" : "先勾选要处理的条目，或点「全选」")
         : (["theme", "font", "asset"].includes(kind) && !r2Enabled()) ? "未连接共享库，先在「存储设置」填写同步 API 地址"
         : "";
@@ -2088,12 +2199,12 @@ function updateBulkControls() {
     input.disabled = Boolean(state.operation) || !eligible[input.dataset.selection].has(input.dataset.id);
     input.closest("article")?.classList.toggle("is-selected", input.checked);
   });
-  $$(".sync-theme, .sync-font, .sync-asset").forEach(button => { const kind = button.classList.contains("sync-font") ? "font" : button.classList.contains("sync-asset") ? "asset" : "theme"; button.disabled = Boolean(state.operation) || !r2Enabled() || storageDirty || button.dataset.completed === "true" || isAssetBusy(kind, button.dataset.id); });
+  $$(".sync-theme, .sync-font, .sync-asset").forEach(button => { const kind = button.classList.contains("sync-font") ? "font" : button.classList.contains("sync-asset") ? "asset" : "theme"; button.disabled = Boolean(state.operation) || !r2Enabled() || storageSettingsPending() || button.dataset.completed === "true" || isAssetBusy(kind, button.dataset.id); });
   $$(".delete-record").forEach(button => { const kind = button.dataset.kind; button.disabled = Boolean(state.operation) || isAssetBusy(kind, button.dataset.id); });
   $$(".commit-theme, .discard-review, .rebuild-preview, #chooseThemes, #chooseThemeFolder, #indexThemeFolder, #addThemeButton, #chooseFonts, #chooseFontFolder, #chooseAssets, #chooseAssetFolder, #addAssetButton, #chooseUnifiedFiles, #chooseUnifiedFolder, #scanButton, #indexExistingCloud, #storageForm button[type='submit']").forEach(button => { button.disabled = Boolean(state.operation); });
   $$(".rebuild-preview").forEach(button => { button.disabled = Boolean(state.operation) || isAssetBusy("theme", button.dataset.id); });
   $("#storageForm button[type='submit']").disabled = Boolean(state.operation) || activeJobs().length > 0;
-  $$(".commit-theme").forEach(button => { button.disabled = Boolean(state.operation) || storageDirty; button.title = storageDirty ? "请先保存存储设置" : ""; });
+  $$(".commit-theme").forEach(button => { button.disabled = Boolean(state.operation) || storageSettingsPending(); button.title = storageSettingsPending() ? "请先保存存储设置" : ""; });
   $$(".retry-job").forEach(button => { button.disabled = Boolean(state.operation) || activeJobs().some(job => (job.parent_id || job.retry_of) === button.dataset.retryJob); });
   $$(".drop-zone").forEach(zone => zone.setAttribute("aria-disabled", String(Boolean(state.operation))));
   updateStorageControls();
@@ -2557,7 +2668,8 @@ function renderPending() {
 async function commitSelection() {
   // 早退必须给出原因：以前这里直接 return，用户只看到按钮「没反应」。
   if (state.operation) { toast("正在处理中，请等当前任务结束后再试"); return; }
-  if (storageDirty) { toast("存储设置有未保存的修改，请先在「存储设置」保存后再上传"); return; }
+  await whenStorageReady();
+  if (storageSettingsPending()) { toast("存储设置有未保存的修改，请先在「存储设置」保存后再上传"); return; }
   const themeIds = state.review.filter(item => selections.review.has(item.staging_id)).map(item => item.staging_id);
   const chosen = state.pending.filter(item => selections.review.has(item.id));
   if (!themeIds.length && !chosen.length) { toast("请先勾选要处理的条目，或点「全选」"); return; }
@@ -2793,7 +2905,9 @@ function jobCard(job) {
   const itemsLine = active && names.length > 1
     ? `<p class="job-items">本批包含：${escapeHtml(names.slice(0, 6).join("、"))}${names.length > 6 ? ` 等 ${names.length} 个` : ""}</p>`
     : "";
-  return `<article class="job-card" data-job-id="${escapeHtml(job.id)}"><div class="job-card-head"><div><h3>${escapeHtml(jobTitle(job))}</h3><span class="job-meta">${escapeHtml(jobStatus(job))} · 已处理 ${completed} / ${total} 项</span></div>${failed.length && !active ? `<button class="secondary-button retry-job" data-retry-job="${escapeHtml(job.id)}" ${state.operation || retrying ? "disabled" : ""}>${retrying ? "已加入重试" : "重试失败项"}</button>` : ""}</div><div class="job-progress-row"><progress class="job-progress" max="${Math.max(1,total)}" value="${completed}" aria-label="${escapeHtml(jobTitle(job))}进度"></progress><span class="job-percent">${percent}%</span></div><p class="job-detail ${failed.length && !active ? "is-error" : ""}">${escapeHtml(detail)}</p>${itemsLine}${failed.length ? `<details class="job-errors"><summary>${failed.length} 项失败详情</summary><ul>${failed.map(item => `<li><strong>${escapeHtml(item.name || item.id || "文件")}</strong><span>${escapeHtml(item.error || "处理失败")}</span></li>`).join("")}</ul></details>` : ""}</article>`;
+  // 统一的删除键：排队中、跑一半、已完成的都能删，不用等任务自己结束。
+  const deleteButton = `<button class="secondary-button delete-job" data-delete-job="${escapeHtml(job.id)}" title="删除这条任务记录，进行中的任务也会被删掉">删除</button>`;
+  return `<article class="job-card" data-job-id="${escapeHtml(job.id)}"><div class="job-card-head"><div><h3>${escapeHtml(jobTitle(job))}</h3><span class="job-meta">${escapeHtml(jobStatus(job))} · 已处理 ${completed} / ${total} 项</span></div><div class="job-card-actions">${failed.length && !active ? `<button class="secondary-button retry-job" data-retry-job="${escapeHtml(job.id)}" ${state.operation || retrying ? "disabled" : ""}>${retrying ? "已加入重试" : "重试失败项"}</button>` : ""}${deleteButton}</div></div><div class="job-progress-row"><progress class="job-progress" max="${Math.max(1,total)}" value="${completed}" aria-label="${escapeHtml(jobTitle(job))}进度"></progress><span class="job-percent">${percent}%</span></div><p class="job-detail ${failed.length && !active ? "is-error" : ""}">${escapeHtml(detail)}</p>${itemsLine}${failed.length ? `<details class="job-errors"><summary>${failed.length} 项失败详情</summary><ul>${failed.map(item => `<li><strong>${escapeHtml(item.name || item.id || "文件")}</strong><span>${escapeHtml(item.error || "处理失败")}</span></li>`).join("")}</ul></details>` : ""}</article>`;
 }
 function renderJobs() {
   const active = activeJobs();
@@ -2814,6 +2928,7 @@ function renderJobs() {
   const batchJobs = state.importThemeJobIds.map(id => state.jobs.find(job => job.id === id)).filter(Boolean);
   $("#themeImportResults").hidden = !batchJobs.length;
   $("#themeImportJobs").innerHTML = batchJobs.map(jobCard).join("");
+  $$(".delete-job").forEach(button => button.addEventListener("click", () => deleteJobRecord(button.dataset.deleteJob)));
   renderCompressionResults();
   renderImportedFonts();
   updateBulkControls();
@@ -2884,6 +2999,33 @@ async function retryJob(id) {
   } catch (error) { toast(error.message); }
   finally { setOperation(""); }
 }
+/**
+ * 统一的任务删除键：排队中、正在跑、已完成的都能删。
+ * Worker 侧已有 DELETE /api/jobs/:id，这里只把本地列表同步掉。
+ */
+async function deleteJobRecord(id) {
+  const jobId = String(id || "");
+  if (!jobId) return;
+  if (state.operation) { toast("正在处理中，请等当前任务结束后再试"); return; }
+  setOperation("job-delete");
+  let failed = false;
+  try {
+    const response = await fetch(apiUrl(`/api/jobs/${encodeURIComponent(jobId)}`), { method: "DELETE", headers: requestHeaders() });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload?.error || `HTTP ${response.status}`);
+    }
+    state.jobs = state.jobs.filter(job => job.id !== jobId);
+    state.importThemeJobIds = state.importThemeJobIds.filter(item => item !== jobId);
+    saveSessionIds("reeden-import-theme-jobs", state.importThemeJobIds);
+    trackedJobIds.delete(jobId);
+    toast("已删除任务");
+  } catch (error) {
+    failed = true;
+    toast(`删除任务失败：${error?.message || error}`);
+  } finally { setOperation(""); }
+  if (!failed) renderJobs();
+}
 function latestRecords(records) {
   // A classification edit writes a new immutable record with the same stable
   // id. Both /api/library and the legacy per-kind endpoints must merge those
@@ -2953,28 +3095,45 @@ async function loadFonts(force = false) {
   renderFonts();
 }
 async function loadStorage() {
-  const data = await api("/api/storage");
-  state.storage = data;
-  if (data.mode === "browser-local") {
+  try {
+    const data = await api("/api/storage");
+    state.storage = data;
+    if (data.mode === "browser-local") {
+      storageDirty = false;
+      renderStorageSummary(data);
+      operationMessage($("#configStatus"), "免费浏览器同步已启用：本设备处理后直接写入共享 R2。", false);
+      updateRuntimeMode();
+      renderReview();
+      updateBulkControls();
+      return;
+    }
+    const form = $("#storageForm");
+    const library = data.library || { provider: "local" };
+    const archive = data.archive || { provider: "local" };
+    const fields = { libraryProvider: library.provider, accountId: library.accountId, endpoint: library.endpoint, bucket: library.bucket, rootPath: library.rootPath, archiveProvider: archive.provider, archiveEndpoint: archive.endpoint, archiveRootPath: archive.rootPath };
+    for (const [key, value] of Object.entries(fields)) form.elements[key].value = value || "";
+    form.elements.autoSync.checked = Boolean(library.autoSync);
+    form.elements.cloudOnly.checked = library.cloudOnly === true;
     storageDirty = false;
     renderStorageSummary(data);
-    operationMessage($("#configStatus"), "免费浏览器同步已启用：本设备处理后直接写入共享 R2。", false);
-    updateRuntimeMode();
+    updateStorageControls();
     renderReview();
+  } finally {
+    storageReady = true;
     updateBulkControls();
-    return;
   }
-  const form = $("#storageForm");
-  const library = data.library || { provider: "local" };
-  const archive = data.archive || { provider: "local" };
-  const fields = { libraryProvider: library.provider, accountId: library.accountId, endpoint: library.endpoint, bucket: library.bucket, rootPath: library.rootPath, archiveProvider: archive.provider, archiveEndpoint: archive.endpoint, archiveRootPath: archive.rootPath };
-  for (const [key, value] of Object.entries(fields)) form.elements[key].value = value || "";
-  form.elements.autoSync.checked = Boolean(library.autoSync);
-  form.elements.cloudOnly.checked = library.cloudOnly === true;
-  storageDirty = false;
-  renderStorageSummary(data);
-  updateStorageControls();
-  renderReview();
+}
+/**
+ * 等存储配置读回来再决定走哪条上传链路。
+ * 刷新后立刻点上传时，旧逻辑会误判成「本机后端模式」把请求发给同步 Worker，
+ * 结果是 404，用户只能再手动保存一次存储设置。
+ */
+function whenStorageReady() {
+  if (storageReady) return Promise.resolve();
+  if (!storageReadyPromise) {
+    storageReadyPromise = loadStorage().catch(() => {}).finally(() => { storageReadyPromise = null; });
+  }
+  return storageReadyPromise;
 }
 function renderStorageSummary(data) {
   if (data.mode === "browser-local") {
@@ -3062,6 +3221,7 @@ async function analyzeFiles(files) {
   if (state.operation) { toast("请等待当前批次处理完成"); return; }
   const valid = [...files].filter(file => file.name.toLowerCase().endsWith(".red"));
   if (!valid.length) { toast("请选择 .red 文件"); return; }
+  await whenStorageReady();
   const body = new FormData(); valid.forEach(file => body.append("file", file, file.name));
   setOperation("analyze");
   toast("正在解析主题和查找疑似重复…");
@@ -3151,7 +3311,8 @@ async function indexExistingFiles(files) {
 async function commitTheme(stagingId) { return commitThemes([stagingId]); }
 async function commitThemes(ids = [...selections.review]) {
   if (state.operation) { toast("正在处理中，请等当前任务结束后再试"); return; }
-  if (storageDirty) { toast("存储设置有未保存的修改，请先在「存储设置」保存后再上传"); return; }
+  await whenStorageReady();
+  if (storageSettingsPending()) { toast("存储设置有未保存的修改，请先在「存储设置」保存后再上传"); return; }
   if (!ids.length) { toast("请先勾选要处理的条目，或点「全选」"); return; }
   const eligible = new Set(eligibleIds("review"));
   const chosen = [...new Set(ids)].filter(id => eligible.has(id));
@@ -3455,8 +3616,9 @@ async function deleteSelectedRecords(kind, ids = [...selections[kind]]) {
 async function syncSelectedAssets(kind, ids = [...selections[kind]]) {
   // 早退都要说明原因，否则按钮看起来就是「按了没反应」。
   if (state.operation) { toast("正在处理中，请等当前任务结束后再试"); return; }
+  await whenStorageReady();
   if (!r2Enabled()) { toast("未连接共享库，请先在「存储设置」填写同步 API 地址"); return; }
-  if (storageDirty) { toast("存储设置有未保存的修改，请先在「存储设置」保存后再同步"); return; }
+  if (storageSettingsPending()) { toast("存储设置有未保存的修改，请先在「存储设置」保存后再同步"); return; }
   if (!ids.length) { toast("请先勾选要处理的条目，或点「全选」"); return; }
   if (browserSyncEnabled()) {
     const output = $(kind === "theme" ? "#themeBatchStatus" : kind === "font" ? "#fontBatchStatus" : "#assetBatchStatus");
@@ -3503,6 +3665,7 @@ async function importFonts(files, options = {}) {
   if (state.operation) { toast("请等待当前批次处理完成"); return; }
   const valid = [...files].filter(file => /\.(ttf|otf|woff2?)$/i.test(file.name));
   if (!valid.length) { toast("请选择 TTF、OTF、WOFF 或 WOFF2 文件"); return; }
+  await whenStorageReady();
   state.importFontIds = [];
   saveSessionIds("reeden-import-fonts", []);
   renderImportedFonts();
@@ -3562,12 +3725,13 @@ async function importFonts(files, options = {}) {
       finishTransferProgress("字体上传完成", failures.length);
       if (!added.length && failures.length) throw failures[0].error;
       state.fonts = [...added, ...state.fonts];
-      state.importFontIds = added.map(font => font.id);
-      saveSessionIds("reeden-import-fonts", state.importFontIds);
+      // 收录成功的字体立刻从首页撤走：内容已经在字体库里，首页只留一句提示。
+      state.importFontIds = [];
+      saveSessionIds("reeden-import-fonts", []);
       renderFonts();
       const failedFiles = new Set(failures.map(item => item.file));
       const succeededFiles = unique.filter(file => !failedFiles.has(file));
-      const message = `已上传 ${added.length} 个字体，重复跳过 ${duplicates} 个${failures.length ? `，失败 ${failures.length} 个` : ""}。`;
+      const message = `已上传 ${added.length} 个字体，重复跳过 ${duplicates} 个${failures.length ? `，失败 ${failures.length} 个` : ""}。已收录，可到字体库查看。`;
       operationMessage(output, message, Boolean(failures.length)); toast(message);
       if (options.deferCleanup) deferredCleanup.push(...succeededFiles);
       else offerLocalCleanup(succeededFiles, `本次 ${succeededFiles.length} 个字体已上传成功，可以删掉本地副本释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
@@ -3576,8 +3740,8 @@ async function importFonts(files, options = {}) {
     operationMessage(output, `查重完成，正在接收 ${unique.length} 个新字体，完成后交给后台…`);
     const body = new FormData(); unique.forEach(file => body.append("file", file, file.name));
     const result = await api("/api/fonts/import?background=1", { method: "POST", body });
-    state.importFontIds = (result.added || []).map(font => font.id);
-    saveSessionIds("reeden-import-fonts", state.importFontIds);
+    state.importFontIds = [];
+    saveSessionIds("reeden-import-fonts", []);
     if (result.job) rememberJob(result.job);
     await loadFonts();
     renderJobs();
@@ -3596,6 +3760,7 @@ async function importAssets(files, options = {}) {
   if (state.operation) { toast("请等待当前批次处理完成"); return; }
   const valid = [...files].filter(file => ["svg", "html", "htm"].includes(assetExtension(file)));
   if (!valid.length) { toast("请选择 SVG、HTML 或 HTM 文件"); return; }
+  await whenStorageReady();
   state.importAssetIds = [];
   saveSessionIds("reeden-import-assets", []);
   renderImportedAssets();
@@ -3657,12 +3822,13 @@ async function importAssets(files, options = {}) {
       finishTransferProgress("收藏上传完成", failures.length);
       if (!added.length && failures.length) throw failures[0].error;
       state.assets = [...added, ...state.assets];
-      state.importAssetIds = added.map(asset => asset.id);
-      saveSessionIds("reeden-import-assets", state.importAssetIds);
+      // 收录成功的收藏同样从首页撤走，收藏库里已经能看到。
+      state.importAssetIds = [];
+      saveSessionIds("reeden-import-assets", []);
       renderAssets(); renderImportedAssets();
       const failedAssetFiles = new Set(failures.map(item => item.file));
       const succeededAssetFiles = unique.filter(item => !failedAssetFiles.has(item.file)).map(item => item.file);
-      const message = `已上传 ${added.length} 个收藏，重复跳过 ${duplicates} 个${failures.length ? `，失败 ${failures.length} 个` : ""}。`;
+      const message = `已上传 ${added.length} 个收藏，重复跳过 ${duplicates} 个${failures.length ? `，失败 ${failures.length} 个` : ""}。已收录，可到收藏库查看。`;
       operationMessage(output, message, Boolean(failures.length)); toast(message);
       if (options.deferCleanup) deferredCleanup.push(...succeededAssetFiles);
       else offerLocalCleanup(succeededAssetFiles, `本次 ${succeededAssetFiles.length} 个收藏已上传成功，可以删掉本地副本释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
@@ -3672,8 +3838,8 @@ async function importAssets(files, options = {}) {
     const body = new FormData();
     unique.forEach(({file}) => body.append("file", file, file.name));
     const result = await api("/api/assets/import?background=1", { method: "POST", body });
-    state.importAssetIds = (result.added || []).map(asset => asset.id);
-    saveSessionIds("reeden-import-assets", state.importAssetIds);
+    state.importAssetIds = [];
+    saveSessionIds("reeden-import-assets", []);
     if (result.job) rememberJob(result.job);
     await loadAssets();
     renderJobs();
@@ -4143,16 +4309,17 @@ function nativeFileBridge() {
   try { return JSON.parse(String(bridge.capability() || "{}"))?.canDelete ? bridge : null; } catch { return null; }
 }
 function supportsDirectoryHandle() { return typeof window.showDirectoryPicker === "function"; }
+function supportsFileHandle() { return typeof window.showOpenFilePicker === "function"; }
 function refreshCleanupHint() {
   const hint = $("#localCleanupHint");
   if (!hint) return;
-  const mode = nativeFileBridge() ? "app" : supportsDirectoryHandle() ? "picker" : "none";
+  const mode = nativeFileBridge() ? "app" : (supportsFileHandle() || supportsDirectoryHandle()) ? "picker" : "none";
   hint.dataset.cleanupMode = mode;
   hint.textContent = mode === "app"
     ? "本机文件删除：可用。上传成功后弹窗询问，删除由应用通过系统文件接口完成，系统可能再确认一次。"
     : mode === "picker"
-      ? "本机文件删除：勾选上面的开关后，「选择文件夹」会申请写入权限，上传成功后弹窗询问是否删掉本地副本；用「选择文件」或拖入的文件只能手动删除。"
-      : "本机文件删除：当前浏览器不允许网页删除本机文件，上传后会提示你手动清理（手机 APK 与桌面 Chrome/Edge 支持自动删除）。";
+      ? "本机文件删除：可用。勾选上面的开关后，「选择文件」和「选择文件夹」都会申请写入权限，上传成功后弹窗询问是否删掉本地副本。"
+      : "本机文件删除：当前浏览器不允许网页删除本机文件，上传后会列出清单让你手动清理（手机 APK 与桌面 Chrome/Edge 支持自动删除）。";
 }
 function registerPickedFiles(items, source = null) {
   const batch = { source, entries: [] };
@@ -4166,6 +4333,7 @@ function registerPickedFiles(items, source = null) {
       size: Number.isFinite(item.size) ? item.size : Number(file.size) || 0,
       path: item.path || file.webkitRelativePath || file.name || "",
       parent: item.parent || null,
+      handle: item.handle || null,
     };
     pickedFileSources.set(file, { batch, entry });
     batch.entries.push(entry);
@@ -4184,6 +4352,31 @@ async function collectDirectoryFiles(handle, prefix = "") {
 }
 // Folder picking has two modes on purpose: the writable directory handle (so a
 // later delete is actually possible) and the plain webkitdirectory input.
+// 单选文件也要能拿到可写句柄：<input type="file"> 只给一份只读快照，
+// 上传成功后网页没法删掉本地副本；showOpenFilePicker 给的是真句柄，可以删。
+async function pickFilesWithAccess(inputId, handler) {
+  const input = $("#" + inputId);
+  if (!input) return;
+  if (!localCleanupEnabled() || !supportsFileHandle()) { input.click(); return; }
+  let handles;
+  try {
+    handles = await window.showOpenFilePicker({ multiple: true, id: `reeden-${inputId}` });
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    toast(`无法申请文件写入权限，改用普通选择：${error?.message || error?.name || "未知原因"}`);
+    input.click();
+    return;
+  }
+  const collected = [];
+  for (const handle of handles || []) {
+    let file;
+    try { file = await handle.getFile(); } catch { continue; }
+    collected.push({ file, handle, name: file.name, size: file.size, path: file.name });
+  }
+  if (!collected.length) { toast("没有选到可用文件"); return; }
+  registerPickedFiles(collected, { files: true });
+  await handler(collected.map(item => item.file));
+}
 async function pickFolderWithAccess(inputId, handler) {
   const input = $("#" + inputId);
   if (!input) return;
@@ -4220,7 +4413,7 @@ function cleanupTargets(files) {
       size: Number.isFinite(entry?.size) ? entry.size : Number(file.size) || 0,
       path: entry?.path || file.webkitRelativePath || file.name || "",
       parent: entry?.parent || null,
-      deletable: Boolean(entry?.parent || bridge),
+      deletable: Boolean(entry?.parent || entry?.handle || bridge),
     });
   }
   return { targets, bridge };
@@ -4235,7 +4428,7 @@ function openCleanupDialog(targets, summary) {
       const detail = [target.path && target.path !== target.name ? target.path : "", formatBytes(target.size), target.deletable ? "" : "当前环境不允许网页删除，请手动处理"].filter(Boolean).join(" · ");
       return `<li class="${target.deletable ? "" : "is-locked"}"><label class="check-label"><input type="checkbox" data-cleanup-index="${index}" ${target.deletable ? "checked" : "disabled"} /><span><strong>${escapeHtml(target.name)}</strong><small>${escapeHtml(detail)}</small></span></label></li>`;
     }).join("");
-    $("#cleanupDialogDescription").textContent = summary;
+    $("#cleanupDialogDescription").textContent = deletable.length ? summary : `${summary}。当前环境无法由网页直接删除，请按下面的清单手动删除。`;
     const boxes = $$("#cleanupList input[data-cleanup-index]");
     const confirm = $("#cleanupConfirm");
     const finish = value => { if (dialog.open) dialog.close(); resolve(value); };
@@ -4270,13 +4463,29 @@ async function removeDirectoryEntry(target) {
   if (permission !== "granted") throw new Error("未获得该文件夹的写入授权");
   await parent.removeEntry(target.name);
 }
+async function removeFileHandle(target) {
+  const handle = target.handle;
+  if (!handle) throw new Error("没有文件句柄");
+  if (typeof handle.queryPermission === "function") {
+    let permission = await handle.queryPermission({ mode: "readwrite" });
+    if (permission !== "granted" && typeof handle.requestPermission === "function") permission = await handle.requestPermission({ mode: "readwrite" });
+    if (permission !== "granted") throw new Error("未获得该文件的写入授权");
+  }
+  if (typeof handle.remove !== "function") throw new Error("当前浏览器不支持用文件句柄删除");
+  await handle.remove();
+}
 async function performLocalCleanup(selected, bridge) {
   const byHandle = selected.filter(target => target.parent);
-  const byNative = selected.filter(target => !target.parent && bridge);
+  const byFileHandle = selected.filter(target => !target.parent && target.handle);
+  const byNative = selected.filter(target => !target.parent && !target.handle && bridge);
   let deleted = 0;
   const failures = [];
   for (const target of byHandle) {
     try { await removeDirectoryEntry(target); deleted++; }
+    catch (error) { failures.push({ name: target.name, reason: error?.message || "删除失败" }); }
+  }
+  for (const target of byFileHandle) {
+    try { await removeFileHandle(target); deleted++; }
     catch (error) { failures.push({ name: target.name, reason: error?.message || "删除失败" }); }
   }
   if (byNative.length) {
@@ -4298,11 +4507,9 @@ async function performLocalCleanup(selected, bridge) {
 async function offerLocalCleanup(files, summary) {
   const { targets } = cleanupTargets(files);
   if (!targets.length) return;
-  if (!targets.some(target => target.deletable)) {
-    refreshCleanupHint();
-    toast(`${targets.length} 个文件已上传，本地副本需手动删除`);
-    return;
-  }
+  // 即使当前环境一个都删不了，也要把清单摆出来：用户至少知道哪些文件已经上传、
+  // 可以自己手动清理，而不是只弹一句提示就消失。
+  if (!targets.some(target => target.deletable)) refreshCleanupHint();
   const { selected, bridge } = await openCleanupDialog(targets, summary);
   if (!selected.length) return;
   const result = await performLocalCleanup(selected, bridge);
@@ -4379,30 +4586,30 @@ async function pullSharedFiles() {
   try { list = String(app.bridge.sharedFiles() || "[]"); } catch { return; }
   await ingestSharedFiles(list);
 }
-$("#chooseThemes").addEventListener("click", () => $("#themeInput").click());$("#chooseThemeFolder").addEventListener("click", () => pickFolderWithAccess("themeFolderInput", analyzeFiles));
+$("#chooseThemes").addEventListener("click", () => pickFilesWithAccess("themeInput", analyzeFiles));$("#chooseThemeFolder").addEventListener("click", () => pickFolderWithAccess("themeFolderInput", analyzeFiles));
 $("#indexThemeFolder").addEventListener("click", () => $("#existingThemeFolderInput").click());
 $("#addThemeButton").addEventListener("click", () => { setView("import"); });
 $("#themeInput").addEventListener("change", async e => { await analyzeFiles(e.target.files); e.target.value = ""; });
 $("#themeFolderInput").addEventListener("change", async e => { await analyzeFiles(e.target.files); e.target.value = ""; });
 $("#existingThemeFolderInput").addEventListener("change", async e => { await indexExistingFiles(e.target.files); e.target.value = ""; });
 setupDropZone($("#themeDropZone"), analyzeFiles);
-$("#themeDropZone").addEventListener("click", () => { if (!state.operation) $("#themeInput").click(); });
-$("#chooseFonts").addEventListener("click", () => $("#fontInput").click());
+$("#themeDropZone").addEventListener("click", () => { if (!state.operation) pickFilesWithAccess("themeInput", analyzeFiles); });
+$("#chooseFonts").addEventListener("click", () => pickFilesWithAccess("fontInput", files => stagePendingFiles(files, "font")));
 $("#chooseFontFolder").addEventListener("click", () => pickFolderWithAccess("fontFolderInput", files => stagePendingFiles(files, "font")));
 $("#fontInput").addEventListener("change", async e => { stagePendingFiles(e.target.files, "font"); e.target.value = ""; });
 $("#fontFolderInput").addEventListener("change", async e => { stagePendingFiles(e.target.files, "font"); e.target.value = ""; });
 setupDropZone($("#fontDropZone"), files => stagePendingFiles(files, "font"));
-$("#fontDropZone").addEventListener("click", () => { if (!state.operation) $("#fontInput").click(); });
-$("#chooseAssets").addEventListener("click", () => $("#assetInput").click());
+$("#fontDropZone").addEventListener("click", () => { if (!state.operation) pickFilesWithAccess("fontInput", files => stagePendingFiles(files, "font")); });
+$("#chooseAssets").addEventListener("click", () => pickFilesWithAccess("assetInput", files => stagePendingFiles(files, "asset")));
 $("#chooseAssetFolder").addEventListener("click", () => pickFolderWithAccess("assetFolderInput", files => stagePendingFiles(files, "asset")));
 $("#assetInput").addEventListener("change", async e => { stagePendingFiles(e.target.files, "asset"); e.target.value = ""; });
 $("#assetFolderInput").addEventListener("change", async e => { stagePendingFiles(e.target.files, "asset"); e.target.value = ""; });
 setupDropZone($("#assetDropZone"), files => stagePendingFiles(files, "asset"));
-$("#assetDropZone").addEventListener("click", () => { if (!state.operation) $("#assetInput").click(); });
+$("#assetDropZone").addEventListener("click", () => { if (!state.operation) pickFilesWithAccess("assetInput", files => stagePendingFiles(files, "asset")); });
 setupDropZone($("#unifiedDropZone"), importUnifiedFiles);
-$("#unifiedDropZone").addEventListener("click", () => { if (!state.operation) $("#unifiedInput").click(); });
+$("#unifiedDropZone").addEventListener("click", () => { if (!state.operation) pickFilesWithAccess("unifiedInput", importUnifiedFiles); });
 $("#unifiedInput").addEventListener("change", async event => { await importUnifiedFiles(event.target.files); event.target.value = ""; });
-$("#chooseUnifiedFiles").addEventListener("click", () => { if (!state.operation) $("#unifiedInput").click(); });
+$("#chooseUnifiedFiles").addEventListener("click", () => { if (!state.operation) pickFilesWithAccess("unifiedInput", importUnifiedFiles); });
 $("#chooseUnifiedFolder").addEventListener("click", () => { if (!state.operation) pickFolderWithAccess("unifiedFolderInput", importUnifiedFiles); });
 $("#unifiedFolderInput").addEventListener("change", async event => { await importUnifiedFiles(event.target.files); event.target.value = ""; });
 $("#localCleanupEnabled").checked = localCleanupEnabled();
@@ -4533,6 +4740,8 @@ document.addEventListener("click", event => {
   if (openView) setView(openView.dataset.openView);
   const retry = event.target.closest("[data-retry-job]");
   if (retry) retryJob(retry.dataset.retryJob);
+  const deleteJob = event.target.closest("[data-delete-job]");
+  if (deleteJob) deleteJobRecord(deleteJob.dataset.deleteJob);
   const button = event.target.closest(".preview-open");
   if (button) showPreview(button);
 });
@@ -4553,7 +4762,11 @@ $("#previewDialog").addEventListener("click", event => {
   if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) event.currentTarget.close();
 });
 $("#storageForm").addEventListener("submit", saveStorage);
-$("#storageForm").addEventListener("input", () => { storageDirty = true; operationMessage($("#configStatus"), "配置有未保存的修改，请先保存再测试或同步。"); updateBulkControls(); });
+$("#storageForm").addEventListener("input", () => {
+  // 浏览器同步模式下这张表单是隐藏的，字段不参与上传，别把上传拦住。
+  if ($("#storageForm").hidden) return;
+  storageDirty = true; operationMessage($("#configStatus"), "配置有未保存的修改，请先保存再测试或同步。"); updateBulkControls();
+});
 $("#storageForm").elements.libraryProvider.addEventListener("change", updateStorageControls);
 $("#storageForm").elements.archiveProvider.addEventListener("change", () => {
   const form = $("#storageForm");

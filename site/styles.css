@@ -376,9 +376,11 @@ h3 { font-size: 14.5px; line-height: 1.35; margin-bottom: 4px; font-weight: 600;
 .font-card { display: grid; grid-template-columns: 1fr; gap: 0; overflow: hidden; padding: 0; align-items: stretch; }
 .font-card-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 34px; padding: 10px 13px 0; }
 .font-card-top > .item-select { flex: 0 0 auto; }
-.font-preview-frame { display: grid; place-items: center; min-height: 124px; margin: 9px 12px 0; overflow: hidden; border: 1px solid var(--rule); border-radius: 7px; background: #fff; color: var(--text); }
-.font-preview-image { display: block; width: 100%; height: 124px; object-fit: contain; background: #fff; }
-.font-preview-fallback { padding: 12px; font-size: 25px; line-height: 1.3; text-align: center; word-break: break-word; }
+/* 字体样张：原来 900x300 的画布缩到 124px 高，字只剩 20 出头，几乎看不出字形。
+   现在画布更紧凑、字号更大，预览框也按画布比例放宽，字形能直接辨认。 */
+.font-preview-frame { display: grid; place-items: center; min-height: 132px; margin: 9px 12px 0; overflow: hidden; border: 1px solid var(--rule); border-radius: 7px; background: #fff; color: var(--text); }
+.font-preview-image { display: block; width: 100%; height: auto; max-height: 150px; object-fit: contain; background: #fff; }
+.font-preview-fallback { padding: 14px; font-size: 32px; line-height: 1.35; text-align: center; word-break: break-word; }
 .font-card-body { min-width: 0; padding: 11px 13px 8px; }
 .font-name { margin: 0; color: var(--text); font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
 .font-meta { display: flex; flex-wrap: wrap; gap: 6px 12px; color: var(--faint); font-size: 11px; margin-top: 5px; }
@@ -514,6 +516,7 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 #jobsStatus { margin: -6px 0 18px; }
 .job-card { padding: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card); }
 .job-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.job-card-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .job-card h3 { margin: 0 0 3px; font-size: 14px; font-weight: 600; }
 .job-meta { color: var(--faint); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .job-progress-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
@@ -786,9 +789,9 @@ button:disabled { cursor: not-allowed; opacity: .5; }
   #assetToolbar:not(.has-selection) > button { display: none; }
 
   .font-list { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
-  .font-preview-frame { min-height: 104px; margin: 8px 10px 0; }
-  .font-preview-image { height: 104px; }
-  .font-preview-fallback { font-size: 21px; padding: 10px; }
+  .font-preview-frame { min-height: 118px; margin: 8px 10px 0; }
+  .font-preview-image { max-height: 134px; }
+  .font-preview-fallback { font-size: 26px; padding: 11px; }
   .font-card-top { padding: 9px 11px 0; }
   .font-card-body { padding: 9px 11px 6px; }
   .font-name { font-size: 13px; }
