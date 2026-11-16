@@ -843,6 +843,10 @@ async function pan123DirectRequest(token, path, {params = {}, method = "GET", bo
 }
 // "测试连接" 只读列一下根目录和备份目录，不创建目录、不上传探针、不在服务端留 Token。
 async function verifyPan123Backup() {
+  // 新设备没有本地存储快照，启动时 state.storage 还是空的。若不等它就绪，
+  // browserSyncEnabled() 会是 false，下面直连失败就错误地回退到 Worker 的
+  // 海外出口，被 123 判「海外登录 / token 不允许」——这正是换电脑登不上的原因。
+  await whenStorageReady();
   const output = $("#pan123BackupStatus");
   const token = String($("#pan123BackupToken")?.value || "").trim() || pan123BackupConfig().token;
   const folder = String($("#pan123BackupFolder")?.value || "").trim() || "Red-Garden-Backup";
@@ -4172,6 +4176,9 @@ async function pollPan123BrowserQr(generation, uniID) {
   pan123QrTimer = setTimeout(() => pollPan123BrowserQr(generation, uniID), 1200);
 }
 async function startPan123Qr() {
+  // 和 verifyPan123Backup 同理：新设备没有存储快照时必须等 storage 就绪，否则
+  // browserSyncEnabled() 为 false，扫码会退回 Worker 海外出口被 123 判海外登录。
+  await whenStorageReady();
   // 以前这里遇到 document.hidden / 有后台任务就直接 return，手机上点了没反应，
   // 也没任何提示。现在只拦真正会冲突的操作，并且把原因写出来。
   if (state.operation) { operationMessage($("#pan123QrStatus"), "当前有操作正在进行，完成后再生成二维码。", true); return; }
