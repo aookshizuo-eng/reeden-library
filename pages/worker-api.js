@@ -676,7 +676,7 @@ async function listRecords(request, env, wantedKind = null) {
     if (!object) return null;
     try {
       const record = JSON.parse(await object.text());
-      if (record && typeof record === "object" && (!wantedKind || record.kind === wantedKind)) return record;
+      if (record && typeof record === "object" && (!wantedKind || record.kind === wantedKind)) return {...record, record_sha256: item.key.match(/^records\/([a-f0-9]{64})\.json$/)?.[1] || record.record_sha256};
     } catch {
       // A malformed record must not prevent the rest of the library loading.
     }
@@ -704,39 +704,44 @@ async function updateRecordClassification(request, env, kind, id) {
   if (!checkWriteToken(request, env)) return json({error: "分类更新接口需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
   let payload;
   try { payload = await request.json(); } catch { return json({error: "分类数据不是有效 JSON"}, 400, request, env); }
-  let cursor;
-  do {
-    const listing = await env.ASSETS.list({prefix: "records/", cursor, limit: MAX_LIST_RECORDS});
-    for (const item of listing.objects || []) {
-      const object = await env.ASSETS.get(item.key);
-      if (!object) continue;
-      let record;
-      try { record = JSON.parse(await object.text()); } catch { continue; }
-      if (!record || record.kind !== kind || String(record.id) !== String(id)) continue;
-      // 展示名可以在入库后修改。空值表示「不改名」，避免只改作者/分类时把
-      // 原来的标题清掉；文件本身与对象键不动，改的只是库里的展示字段。
-      const displayName = normalizeAssetClassification(payload.name);
-      const updated = {
-        ...record,
-        ...(displayName ? {name: displayName} : {}),
-        author: normalizeAssetClassification(payload.author),
-        style: normalizeAssetClassification(payload.style),
-        tags: normalizeAssetTags(payload.tags),
-        // 主题分类：词表在客户端可增删，记录里只存这个主题实际用到的标签。
-        categories: normalizeAssetTags(payload.categories ?? record.categories).map((item) => item.slice(0, 24)),
-        updated_at: new Date().toISOString(),
-      };
-      const bytes = new TextEncoder().encode(JSON.stringify(updated));
-      const sha = await digestHex(bytes);
-      const key = `records/${sha}.json`;
-      await env.ASSETS.put(key, bytes, {httpMetadata: {contentType: "application/json; charset=utf-8"}});
-      if (item.key !== key && typeof env.ASSETS.delete === "function") await env.ASSETS.delete(item.key);
-      updated.record_sha256 = sha;
-      return json({ok: true, item: updated}, 200, request, env);
+  const reference = String(payload.record_sha256 || "");
+  if (reference && !SHA256.test(reference)) return json({error: "记录版本无效，请刷新列表"}, 400, request, env);
+  let target;
+  if (reference) {
+    const key = `records/${reference}.json`;
+    const object = await env.ASSETS.get(key);
+    if (object) {
+      try {
+        const record = JSON.parse(await object.text());
+        if (record.kind === kind && String(record.id) === String(id)) target = {key, record};
+      } catch {}
     }
-    cursor = listing.truncated ? listing.cursor : undefined;
-  } while (cursor);
-  return json({error: "收藏记录不存在"}, 404, request, env);
+    if (!target) return json({error: "这条记录已被其他设备修改，请刷新资源库后重试"}, 409, request, env);
+  } else {
+    // Old clients remain compatible; new clients send the record hash and avoid scanning.
+    const entries = await listAllRecordEntries(env);
+    target = entries.filter(item => item.record.kind === kind && String(item.record.id) === String(id))
+      .sort((a, b) => String(b.record.updated_at || "").localeCompare(String(a.record.updated_at || "")))[0];
+  }
+  if (!target) return json({error: "资源记录不存在"}, 404, request, env);
+  const record = {...target.record};
+  delete record.record_sha256;
+  const displayName = normalizeAssetClassification(payload.name);
+  const updated = {
+    ...record,
+    ...(displayName ? {name: displayName} : {}),
+    ...Object.fromEntries(["author", "style"].filter(key => Object.hasOwn(payload, key)).map(key => [key, normalizeAssetClassification(payload[key])])),
+    tags: normalizeAssetTags(payload.tags ?? record.tags),
+    categories: normalizeAssetTags(payload.categories ?? record.categories).map(item => item.slice(0, 24)),
+    updated_at: new Date().toISOString(),
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(updated));
+  const sha = await digestHex(bytes);
+  const key = `records/${sha}.json`;
+  await env.ASSETS.put(key, bytes, {httpMetadata: {contentType: "application/json; charset=utf-8"}});
+  if (target.key !== key && typeof env.ASSETS.delete === "function") await env.ASSETS.delete(target.key);
+  updated.record_sha256 = sha;
+  return json({ok: true, item: updated}, 200, request, env);
 }
 
 function referencedObjectKeys(value, keys = new Set()) {
@@ -1292,6 +1297,11 @@ export async function handle(request, env) {
     return response("", 204, request, env);
   }
   if (url.pathname === "/healthz" && request.method === "GET") return json({ok: true}, 200, request, env);
+  if (url.pathname === "/api/session" && request.method === "GET") {
+    if (!originAllowed(request, env)) return json({error: "Origin 不在允许列表中"}, 403, request, env);
+    const canWrite = checkWriteToken(request, env);
+    return json({ok: canWrite, canWrite, requiresToken: Boolean(env.SYNC_WRITE_TOKEN)}, canWrite ? 200 : 401, request, env);
+  }
   if (url.pathname === "/api/library" && request.method === "GET") return listRecords(request, env);
   if (url.pathname === "/api/themes" && request.method === "GET") return listRecords(request, env, "theme");
   if (url.pathname === "/api/fonts" && request.method === "GET") return listRecords(request, env, "font");

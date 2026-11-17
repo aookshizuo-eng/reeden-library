@@ -378,7 +378,7 @@ public final class MainActivity extends Activity {
         }
         if (relative.startsWith("/")) relative = relative.substring(1);
         if (relative.isEmpty() || relative.contains("..") || relative.contains("\\")) return null;
-        // The Gradle source set points directly at ../../site, so its files
+        // The Gradle source set points directly at ../../dist, so its files
         // are stored at the root of the APK assets directory.
         String assetName = relative;
         try {

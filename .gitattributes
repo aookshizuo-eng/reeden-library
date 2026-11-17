@@ -1,5 +1,5 @@
 .gitattributes text eol=lf
-# site/ files are copied byte-for-byte into pages/ by scripts/sync-pages.mjs.
+# The Vite build publishes some runtime files from site/ byte-for-byte.
 # Force LF in both Git blobs and working trees: with CRLF blobs on Windows and
 # LF blobs on Linux, verify-pages.mjs passes locally but fails in CI.
 site/*.html text eol=lf
@@ -16,3 +16,7 @@ worker/*.mjs text eol=lf
 # line endings identical on Windows and Linux checkouts.
 *.md text eol=lf
 *.txt text eol=lf
+
+*.jsx text eol=lf
+package*.json text eol=lf
+vite.config.mjs text eol=lf

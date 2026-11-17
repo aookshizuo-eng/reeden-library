@@ -6,6 +6,59 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const API_BASE_STORAGE_KEY = "reeden-api-base";
 const FALLBACK_API_BASE = "https://red-garden-sync.pages.dev";
 const SYNC_TOKEN_STORAGE_KEY = "reeden-sync-write-token";
+async function configCryptoKey(password, salt) {
+  const material = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({name: "PBKDF2", salt, iterations: 210000, hash: "SHA-256"}, material, {name: "AES-GCM", length: 256}, false, ["encrypt", "decrypt"]);
+}
+async function transferDeviceConfig(event) {
+  event.preventDefault();
+  const form = event.currentTarget, status = $("#deviceTransferStatus");
+  const password = form.elements.passphrase.value;
+  if (password.length < 8) { operationMessage(status, "请输入至少 8 位的迁移口令，两台设备使用相同口令。", true); return; }
+  const action = event.submitter?.value;
+  const buttons = [...form.querySelectorAll("button")];
+  buttons.forEach(button => { button.disabled = true; });
+  try {
+    if (action === "export") {
+      const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+      const config = {apiBase, syncToken, pan123: form.elements.include123.checked ? pan123BackupConfig() : null};
+      const key = await configCryptoKey(password, salt);
+      const cipher = await crypto.subtle.encrypt({name: "AES-GCM", iv}, key, new TextEncoder().encode(JSON.stringify(config)));
+      const file = {format: "reeden-device-v1", salt: base64Bytes(salt), iv: base64Bytes(iv), cipher: base64Bytes(new Uint8Array(cipher))};
+      const url = URL.createObjectURL(new Blob([JSON.stringify(file)], {type: "application/json"}));
+      const link = document.createElement("a"); link.href = url; link.download = "reeden-device.encrypted.json"; link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      operationMessage(status, "已导出加密配置。到新设备导入并输入相同口令；口令不会写入文件。");
+    } else {
+      const file = form.elements.configFile.files[0];
+      if (!file || file.size > 262144) throw new Error("请选择本站导出的加密配置（不超过 256 KB）");
+      const data = JSON.parse(await file.text());
+      if (data.format !== "reeden-device-v1") throw new Error("文件不是本站的加密配置");
+      const key = await configCryptoKey(password, bytesFromBase64(data.salt));
+      let plain;
+      try { plain = await crypto.subtle.decrypt({name: "AES-GCM", iv: bytesFromBase64(data.iv)}, key, bytesFromBase64(data.cipher)); }
+      catch { throw new Error("迁移口令不正确或文件已损坏，现有配置未改动"); }
+      const config = JSON.parse(new TextDecoder().decode(plain));
+      const base = normalizeApiBase(config.apiBase);
+      if (!base || typeof config.syncToken !== "string") throw new Error("配置中的同步地址或 Token 无效");
+      localStorage.setItem(API_BASE_STORAGE_KEY, base);
+      localStorage.setItem(SYNC_TOKEN_STORAGE_KEY, config.syncToken);
+      if (config.pan123) {
+        localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, normalizePan123Token(config.pan123.token));
+        localStorage.setItem(PAN123_FOLDER_STORAGE_KEY, String(config.pan123.folder || "Red-Garden-Backup"));
+      }
+      apiBase = base; syncToken = config.syncToken; remoteUnavailable = false; storageReady = false;
+      state.storage = null; browserLibraryRecordsCache = undefined; jobsSnapshotAt = 0;
+      state.themes = []; state.fonts = []; state.assets = []; state.jobs = [];
+      const pan = pan123BackupConfig();
+      $("#pan123BackupToken").value = pan.token; $("#pan123BackupFolder").value = pan.folder;
+      updateRuntimeMode();
+      operationMessage(status, "配置已导入。正在读取这台设备的资源库；123 会话是否有效可单独测试。");
+      await loadLibraryAfterConnection();
+    }
+  } catch (error) { operationMessage(status, error.message, true); }
+  finally { form.elements.passphrase.value = ""; buttons.forEach(button => { button.disabled = false; }); }
+}
 function normalizeApiBase(value) {
   const text = String(value || "").trim().replace(/\/+$/, "");
   if (!text) return "";
@@ -15,12 +68,12 @@ function normalizeApiBase(value) {
     return url.href.replace(/\/$/, "");
   } catch { return ""; }
 }
-let apiBase = normalizeApiBase(window.REEDEN_API_BASE || (() => {
+let apiBase = normalizeApiBase((() => {
   try {
     const saved = localStorage.getItem(API_BASE_STORAGE_KEY) || "";
     return saved.includes("reeden-library-sync.773541521.workers.dev") ? FALLBACK_API_BASE : saved;
   } catch { return ""; }
-})());
+})() || window.REEDEN_API_BASE);
 let syncToken = (() => { try { return localStorage.getItem(SYNC_TOKEN_STORAGE_KEY) || ""; } catch { return ""; } })();
 let remoteUnavailable = false;
 let freeCodecModule;
@@ -28,6 +81,7 @@ let freeCodecModule;
 // and font inspection; free_codec_worker.js runs the CPU-heavy work in a Web
 // Worker pool. Encrypted RED manifests are re-sealed by the sync Worker.
 async function loadFreeCodec() {
+  await window.loadReedenVendor?.("omggif.js");
   if (window.ReedenFreeCodec || window.REEDEN_FREE_CODEC) return window.ReedenFreeCodec || window.REEDEN_FREE_CODEC;
   if (freeCodecModule !== undefined) return freeCodecModule;
   try {
@@ -101,12 +155,15 @@ function markRemoteUnavailable(reason = "") {
   if (status && reason) operationMessage(status, `同步 API 不可用：${reason}。未执行压缩或上传。`, true);
 }
 function saveApiBaseSetting() {
+  if (state.operation) { toast("请等待当前操作完成再切换连接"); return; }
   const input = $("#apiBaseInput");
   const value = String(input?.value || "").trim();
   if (value && !normalizeApiBase(value)) {
     operationMessage($("#apiBaseStatus"), "请输入完整的 HTTP 或 HTTPS API 地址，不要带路径、查询参数或片段。", true);
     return;
   }
+  const oldBase = apiBase;
+  if (!value && apiBase && location.hostname.endsWith(".pages.dev")) { operationMessage($("#apiBaseStatus"), "当前站点已内置 R2 接口，无需清除地址。", true); return; }
   apiBase = normalizeApiBase(value);
   syncToken = String($("#syncTokenInput")?.value || "").trim();
   remoteUnavailable = false;
@@ -115,17 +172,23 @@ function saveApiBaseSetting() {
     else localStorage.removeItem(API_BASE_STORAGE_KEY);
     if (apiBase && syncToken) localStorage.setItem(SYNC_TOKEN_STORAGE_KEY, syncToken);
     else localStorage.removeItem(SYNC_TOKEN_STORAGE_KEY);
-  } catch {}
+  } catch { operationMessage($("#apiBaseStatus"), "浏览器未允许保存设置，关闭页面后配置可能丢失。请允许网站存储。", true); return; }
   updateRuntimeMode();
   // 同步地址刚保存完，表单里没有待保存的改动，上传不该再被拦住。
   if ($("#storageForm").hidden) storageDirty = false;
   // The previous library may belong to another API; never reuse its cached
   // records after the address changes.
-  invalidateBrowserLibraryRecords();
+  if (oldBase !== apiBase) {
+    browserLibraryRecordsCache = undefined;
+    state.themes = []; state.fonts = []; state.assets = []; state.jobs = []; jobsSnapshotAt = 0;
+    state.storage = null;
+    storageReady = false;
+  }
   operationMessage($("#apiBaseStatus"), apiBase ? "已保存同步地址。正在读取共享库…" : "已清除同步地址，当前在本机浏览器内处理。");
   loadLibraryAfterConnection({fromSave: true});
 }
 let libraryLoadGeneration = 0;
+let libraryStarted = false;
 function librarySummary() {
   return `${state.themes.length} 个主题、${state.fonts.length} 个字体、${state.assets.length} 个收藏`;
 }
@@ -142,13 +205,24 @@ async function loadLibraryAfterConnection({fromSave = false} = {}) {
   };
   if (remote) status(fromSave ? "已保存同步地址。正在读取共享库（1/3 存储配置）…" : "正在读取共享库（1/3 存储配置）…");
   try {
+    await restoreDeviceCache();
+    if (state.storage?.mode === "browser-local" && Array.isArray(browserLibraryRecordsCache)) {
+      storageReady = true;
+      renderStorageSummary(state.storage);
+      state.themes = browserLibraryRecordsCache.filter(item => item.kind === "theme");
+      state.fonts = browserLibraryRecordsCache.filter(item => item.kind === "font");
+      state.assets = browserLibraryRecordsCache.filter(item => item.kind === "asset");
+      renderThemes(); renderFonts(); renderAssets();
+    }
     await loadStorage();
     if (!current()) return;
+    libraryStarted = true;
     status("正在读取共享库（2/3 记录清单）…");
     await Promise.all([loadThemes(), loadFonts(), loadAssets(), ...(browserSyncEnabled() ? [] : [loadPendingThemes()])]);
     if (!current()) return;
     status("正在读取共享库（3/3 任务进度）…");
-    await loadJobs();
+    if (state.activeView === "jobs" || activeJobs().length || (autoResumeQueueEnabled() && (!jobsSnapshotAt || Date.now() - jobsSnapshotAt > 300000))) await loadJobs();
+    else renderJobs();
     if (!current()) return;
     const seconds = ((Date.now() - started) / 1000).toFixed(1);
     const jobsFailed = Boolean($("#jobsStatus")?.classList.contains("is-error"));
@@ -159,9 +233,41 @@ async function loadLibraryAfterConnection({fromSave = false} = {}) {
     }
   } catch (error) {
     if (!current()) return;
+    for (const kind of Object.keys(libraryKinds)) {
+      const output = $(`[data-library-status="${kind}"]`);
+      if (!output.hidden) {
+        catalogStatus(kind, `读取失败：${error.message}。可点刷新重试。`, true);
+        $(`#${kind}Count`).textContent = "读取失败";
+      }
+    }
     if (remote) status(`连接共享库失败：${error.message}`, true);
     else toast(`读取本机库失败：${error.message}`);
   }
+}
+let writeAccess = {base: "", token: "", at: 0};
+async function ensureRecordReference(record) {
+  if (record.record_sha256 || !browserSyncEnabled()) return;
+  const records = await loadBrowserLibraryRecords(true);
+  for (const kind of ["theme", "font", "asset"]) {
+    const fresh = new Map(records.filter(item => item.kind === kind).map(item => [item.id, item]));
+    for (const item of state[kind + "s"]) if (fresh.has(item.id)) Object.assign(item, fresh.get(item.id));
+  }
+}
+async function ensureWriteAccess() {
+  if (!apiBase) return true;
+  if (writeAccess.base === apiBase && writeAccess.token === syncToken && Date.now() - writeAccess.at < 300000) return true;
+  const response = await fetchWithReadTimeout(apiUrl("/api/session"), {headers: requestHeaders()}, 10000);
+  if (response.status === 404) return true; // compatible with previous Worker
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.canWrite) {
+    const message = syncToken ? "当前设备的写入 Token 不正确，请导入已有设备的加密配置，或填写正确 Token。" : "这台设备可以浏览，但尚未保存写入 Token。请导入已有设备的加密配置，或在存储设置填写 Token。";
+    operationMessage($("#apiBaseStatus"), message, true);
+    toast(message);
+    throw new Error(message);
+  }
+  writeAccess = {base: apiBase, token: syncToken, at: Date.now()};
+  operationMessage($("#apiBaseStatus"), "写入权限有效；当前设备已连接共享 R2。");
+  return true;
 }
 function requestHeaders(headers = {}) {
   const result = new Headers(headers);
@@ -169,22 +275,93 @@ function requestHeaders(headers = {}) {
   return result;
 }
 const THEME_PAGE_SIZE = 24;
-const state = { themes: [], fonts: [], assets: [], review: [], pending: [], jobs: [], activeView: "import", themeDensity: "grid", themePage: 1, importKind: "theme", themeSearch: "", themeAuthor: "all", themeCategory: "all", assetFilter: "all", assetSearch: "", fontSearch: "", fontFilter: "all", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs"), importAssetIds: readSessionIds("reeden-import-assets") };
+const state = { themes: [], fonts: [], assets: [], review: [], pending: [], jobs: [], activeView: "themes", themeDensity: "grid", importKind: "theme", themeSearch: "", themeAuthor: "all", themeCategory: "all", assetFilter: "all", assetSearch: "", fontSearch: "", fontFilter: "all", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs"), importAssetIds: readSessionIds("reeden-import-assets") };
 const selections = { review: new Set(), theme: new Set(), font: new Set(), asset: new Set() };
 // 本地服务模式下「确认上传」是提交后台任务；记住这批 job id，轮询回来时把
 // 进度写进用户眼前那条进度条，而不是让用户只看见一句「已加入后台」。
 const trackedJobIds = new Set();
 const loadedFontFaces = new Set();
+const recentUploadIds = new Set();
+const recentOnly = {theme: false, font: false, asset: false};
 // 启动时先用本机快照恢复存储配置与库记录，这样刷新后按钮状态、已保存的
 // R2/123 设置立即就是对的，不会闪出「尚未配置」让人以为又要重存一次。
+function deviceDB() {
+  if (!deviceDatabase) deviceDatabase = new Promise((resolve, reject) => {
+    const request = indexedDB.open("reeden-device-v2", 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("snapshots");
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+    request.onblocked = () => reject(new Error("缓存数据库被其他页面占用"));
+  });
+  return deviceDatabase;
+}
+async function readDeviceSnapshot() {
+  const db = await deviceDB();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction("snapshots").objectStore("snapshots").get(apiBase || "local");
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+function saveDeviceSnapshot() {
+  clearTimeout(cacheSaveTimer);
+  cacheSaveTimer = setTimeout(() => {
+    const scope = apiBase || "local";
+    const snapshot = structuredClone({records: browserLibraryRecordsCache, at: browserLibraryRecordsLoadedAt, storage: state.storage, jobs: state.jobs, jobsAt: jobsSnapshotAt});
+    deviceWriteQueue = deviceWriteQueue.catch(() => {}).then(async () => {
+      const db = await deviceDB();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction("snapshots", "readwrite");
+        tx.objectStore("snapshots").put(snapshot, scope);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      });
+    }).catch(() => {
+      try {
+        localStorage.setItem(LIBRARY_CACHE_KEY, JSON.stringify({apiBase, at: snapshot.at, records: snapshot.records}));
+      } catch { cachePersistent = false; }
+      updateCacheInfo();
+    });
+  }, 0);
+}
+async function restoreDeviceCache() {
+  try {
+    const saved = await readDeviceSnapshot();
+    if (saved) {
+      if (Array.isArray(saved.records)) {
+        browserLibraryRecordsCache = latestRecords(saved.records);
+        browserLibraryRecordsLoadedAt = saved.at || 0;
+      }
+      if (saved.storage) state.storage = saved.storage;
+      if (Array.isArray(saved.jobs)) { state.jobs = saved.jobs; jobsSnapshotAt = saved.jobsAt || 0; }
+    }
+  } catch { cachePersistent = false; }
+  updateCacheInfo();
+}
+function updateCacheInfo() {
+  const time = browserLibraryRecordsLoadedAt ? new Date(browserLibraryRecordsLoadedAt).toLocaleString("zh-CN") : "";
+  $$("[data-cache-info]").forEach(el => {
+    el.textContent = !cachePersistent ? "本地缓存不可用；请检查浏览器的存储权限。"
+      : time ? `本机缓存 · ${time} 更新 · 其他设备有新增时点刷新`
+      : "首次连接将读取云端清单，之后优先使用本机缓存。";
+  });
+}
+function updateCachedRecord(record) {
+  const current = browserLibraryRecordsCache || [...state.themes, ...state.fonts, ...state.assets];
+  browserLibraryRecordsCache = latestRecords([...current.filter(item => !(item.kind === record.kind && item.id === record.id)), record]);
+  if (!browserLibraryRecordsLoadedAt) browserLibraryRecordsLoadedAt = Date.now();
+  saveDeviceSnapshot();
+  updateCacheInfo();
+}
 function hydrateLocalSnapshots() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_SNAPSHOT_KEY) || "null");
-    if (saved && saved.data && saved.at) state.storage = saved.data;
+    if (saved && saved.data && saved.at && (!saved.apiBase || saved.apiBase === apiBase)) state.storage = saved.data;
   } catch {}
   try {
     const saved = JSON.parse(localStorage.getItem(LIBRARY_CACHE_KEY) || "null");
-    if (saved && saved.at && Date.now() - saved.at < LIBRARY_CACHE_TTL && Array.isArray(saved.records)) {
+    if (saved && saved.at && (saved.apiBase === apiBase || (!saved.apiBase && !localStorage.getItem(API_BASE_STORAGE_KEY))) && Array.isArray(saved.records)) {
       browserLibraryRecordsCache = latestRecords(saved.records);
       browserLibraryRecordsLoadedAt = saved.at;
     }
@@ -207,6 +384,11 @@ let storageDirty = false;
 // 需要判断同步模式时先等它回来。
 let storageReady = false;
 let storageReadyPromise = null;
+let jobsSnapshotAt = 0;
+let cachePersistent = true;
+let cacheSaveTimer;
+let deviceDatabase;
+let deviceWriteQueue = Promise.resolve();
 let jobsPollTimer;
 let jobsLoading = false;
 let jobsRevision = "";
@@ -289,7 +471,7 @@ function fetchWithReadTimeout(url, request, timeoutMs) {
 }
 async function api(path, options = {}) {
   if (staticHostedWithoutApi()) {
-    throw new Error("当前 APK/静态网页尚未连接同步 Worker；请到“存储设置 → 多设备访问”填写 Worker 地址和同步 Token");
+    throw new Error("当前 APK/静态网页尚未连接同步服务；请到“存储设置 → 多设备访问”填写 Worker 地址和同步 Token");
   }
   if (apiBase && remoteUnavailable) throw new Error("同步 API 不可用，未执行远程操作；请检查同步地址与网络后重试");
   const request = { ...options, headers: requestHeaders(options.headers || {}) };
@@ -321,7 +503,7 @@ async function api(path, options = {}) {
   try { data = responseText ? JSON.parse(responseText) : {}; } catch {}
   if (!response.ok) {
     if (response.status === 401) {
-      throw new Error("同步写入令牌无效或已过期，请到“存储设置”重新保存同步写入 Token；文件本身没有问题。");
+      throw new Error("当前设备缺少正确的写入 Token。请导入已有设备的加密配置或填写正确 Token；重复保存同一个错误 Token 不会恢复权限。");
     }
     if (response.status === 405) {
       const message = "同步地址返回 405：请在“设置 → 多设备访问”填写 Cloudflare Worker 的 workers.dev 地址，而不是 GitHub Pages 网页地址或 Cloudflare 控制台地址；修改 Worker 后还要重新部署。";
@@ -780,7 +962,7 @@ const PAN123_FOLDER_STORAGE_KEY = "reeden-pan123-folder";
 const PAN123_SIGN_IN_URL = "https://login.123pan.com/api/user/sign_in";
 const PAN123_QR_GENERATE_URL = "https://user.123pan.cn/api/user/qr-code/generate";
 const PAN123_QR_RESULT_URL = "https://user.123pan.cn/api/user/qr-code/result";
-const PAN123_WEB_URL = "https://yun.123pan.cn/";
+const PAN123_WEB_URL = "https://www.123pan.com/";
 function pan123BackupConfig() {
   try { return {token: localStorage.getItem(PAN123_TOKEN_STORAGE_KEY) || "", folder: localStorage.getItem(PAN123_FOLDER_STORAGE_KEY) || "Red-Garden-Backup"}; }
   catch { return {token: "", folder: "Red-Garden-Backup"}; }
@@ -818,74 +1000,59 @@ async function backupOriginalTo123(raw, name, codec) {
 // Cloudflare 出口发出就被 123 当成「海外登录」要求图形验证码，于是扫码/账号密码
 // 明明成功，立刻又被校验判失败。这里把校验也改成浏览器直连，和登录保持同一出口。
 const PAN123_DIRECT_API = "https://www.123pan.cn/b/api";
+function normalizePan123Token(value) { return String(value || "").trim().replace(/^Bearer\s+/i, "").trim(); }
+function pan123Failure(error) {
+  if (error?.name === "AbortError") return "连接 123 超时，请检查网络后重试；已保存的会话仍保留。";
+  if (error instanceof TypeError) return "浏览器无法直连 123（网络、扩展或跨域限制）。请使用 123 官方网页登录；重新保存 R2 设置无法解决此问题。";
+  return error?.message || "123 请求未完成";
+}
+async function pan123Fetch(url, options = {}) {
+  const response = await fetch(url, {...options, signal: options.signal || AbortSignal.timeout(15000)});
+  const data = await response.json().catch(() => null);
+  if (!data) throw new Error(`123 返回了无法识别的内容（HTTP ${response.status}），请使用官方网页完成登录验证。`);
+  if (!response.ok) throw new Error(`123 接口 HTTP ${response.status}：${data.message || data.msg || "请求被拒绝"}`);
+  return data;
+}
 async function pan123DirectRequest(token, path, {params = {}, method = "GET", body} = {}) {
   const url = new URL(PAN123_DIRECT_API + path);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value));
-  const response = await fetch(url.href, {
+  const data = await pan123Fetch(url.href, {
     method,
-    headers: {
-      "Content-Type": "application/json", platform: "web", "app-version": "3",
-      Accept: "application/json", Authorization: `Bearer ${token}`,
-    },
+    headers: {"Content-Type": "application/json", platform: "web", "app-version": "3", Accept: "application/json", Authorization: `Bearer ${normalizePan123Token(token)}`},
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  let data = {};
-  try { data = await response.json(); } catch {}
   const code = Number(data?.code);
-  if (code === 401 || code === 403 || response.status === 401 || response.status === 403) {
+  if (code === 401 || code === 403) {
     const error = new Error("123 会话已过期或被拒绝，请重新登录后再测试");
     error.rejected = true;
     throw error;
   }
   // /b/api 成功码既有 0 也有 200，两种都要认。
-  if (![0, 200].includes(code)) throw new Error(data?.message || data?.msg || `123 接口拒绝（code ${code || response.status}）`);
+  if (![0, 200].includes(code)) throw new Error(data?.message || data?.msg || `123 接口拒绝（code ${code}）`);
   return data.data && typeof data.data === "object" ? data.data : {};
 }
 // "测试连接" 只读列一下根目录和备份目录，不创建目录、不上传探针、不在服务端留 Token。
 async function verifyPan123Backup() {
-  // 新设备没有本地存储快照，启动时 state.storage 还是空的。若不等它就绪，
-  // browserSyncEnabled() 会是 false，下面直连失败就错误地回退到 Worker 的
-  // 海外出口，被 123 判「海外登录 / token 不允许」——这正是换电脑登不上的原因。
-  await whenStorageReady();
+  // Independent of R2: never route 123 verification through /api/backup/123/verify.
+  // 换电脑登不上的原因之一：扫码会退回 Worker 海外出口。现在无论存储是否就绪都直连。
   const output = $("#pan123BackupStatus");
-  const token = String($("#pan123BackupToken")?.value || "").trim() || pan123BackupConfig().token;
+  const token = normalizePan123Token($("#pan123BackupToken")?.value || pan123BackupConfig().token);
   const folder = String($("#pan123BackupFolder")?.value || "").trim() || "Red-Garden-Backup";
-  if (!token) {
-    operationMessage(output, "请先填写 123 云盘会话 Token：在 123 网盘网页 F12 → Network → 任一 /b/api 请求 → 复制 Authorization: Bearer 之后的值。", true);
-    return false;
-  }
-  operationMessage(output, "正在验证 123 云盘会话（只读校验）…");
+  if (!token) { operationMessage(output, "尚未登录 123。它是可选备份，不影响 R2 入库。", true); return false; }
+  operationMessage(output, "正在直连 123 验证会话…");
   try {
-    // 首选浏览器直连：出口是用户自己的网络，不会被判成海外登录要验证码。
     const info = await pan123DirectRequest(token, "/user/info");
     const nickname = String(info.Nickname || info.nickname || info.UserName || info.userName || "");
-    operationMessage(output, `已连接 123 云盘${nickname ? `（${nickname}）` : ""}，备份目录 ${folder}。`);
-    return true;
-  } catch (directError) {
-    // 直连被扩展/网络拦截时，本机后端模式还能退回 Worker 代转；浏览器同步
-    // 模式下 Worker 出口会被 123 判海外，这里就不做无意义的回退，直接说清楚。
-    if (directError?.rejected) { operationMessage(output, directError.message, true); return false; }
-    if (!apiBase || browserSyncEnabled()) {
-      operationMessage(output, `123 云盘连接失败：${directError.message}。若提示验证码，请改用「扫码连接」或粘贴会话 Token。`, true);
-      return false;
-    }
-  }
-  try {
-    const response = await fetch(apiUrl("/api/backup/123/verify"), {
-      method: "POST", headers: requestHeaders({"X-Pan123-Token": token, "X-Pan123-Folder": encodeURIComponent(folder)}),
-    });
-    const text = await response.text();
-    let data = {}; try { data = text ? JSON.parse(text) : {}; } catch {}
-    if (response.status === 401) throw new Error("同步写入 Token 无效或未保存，请先在「多设备访问」重新保存");
-    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
-    const who = data.nickname ? `（${data.nickname}）` : "";
-    operationMessage(output, `已连接 123 云盘${who}，备份目录 ${data.folder || "云盘根目录"}。`);
+    localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, token);
+    localStorage.setItem(PAN123_FOLDER_STORAGE_KEY, folder);
+    operationMessage(output, `已连接 123 云盘${nickname ? `（${nickname}）` : ""}，备份目录 ${folder}。会话已保存，无需每次登录。`);
     return true;
   } catch (error) {
-    operationMessage(output, `123 云盘连接失败：${error.message}`, true);
+    operationMessage(output, `123 校验未通过：${pan123Failure(error)}。现有会话未清除。`, true);
     return false;
   }
 }
+
 function pan123InputConfig() {
   return {
     token: String($("#pan123BackupToken")?.value || "").trim() || pan123BackupConfig().token,
@@ -909,13 +1076,13 @@ function pan123TokenSourceLabel(source) {
   if (text.startsWith("sessionStorage:")) return "网页会话存储";
   return "网页 Cookie";
 }
-function acceptPan123Tokens(payload) {
+async function acceptPan123Tokens(payload) {
   let list = [];
   // 原生回传的是 JSON 字符串，浏览器直连拿到的是数组，两种都要收下。
   if (Array.isArray(payload)) list = payload;
   else { try { list = JSON.parse(String(payload || "[]")); } catch { list = []; } }
   if (!Array.isArray(list)) list = [];
-  const tokens = list.filter(item => item && typeof item.token === "string" && item.token);
+  const tokens = list.filter(item => item && typeof item.token === "string" && item.token).slice(0, 2).map(item => ({...item, token: normalizePan123Token(item.token)}));
   const output = $("#pan123BackupStatus");
   if (!tokens.length) {
     operationMessage(output, "登录页里没有找到会话 Token。请确认页面已经显示登录状态，再点一次「取回会话 Token」。", true);
@@ -924,29 +1091,26 @@ function acceptPan123Tokens(payload) {
   const input = $("#pan123BackupToken");
   if (input) input.value = tokens[0].token;
   try { localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, tokens[0].token); } catch {}
-  try { navigator.clipboard?.writeText(tokens[0].token)?.catch(() => {}); } catch {}
+
   const source = String(tokens[0].source || "");
   operationMessage(output, source === "scan" || source === "password"
-    ? `${pan123TokenSourceLabel(source)}成功，会话已填入并尝试复制，正在验证…`
-    : `已从${pan123TokenSourceLabel(source)}取回会话（共 ${tokens.length} 个候选），已填入并尝试复制，正在验证…`);
+    ? `${pan123TokenSourceLabel(source)}成功，会话已保存，正在验证…`
+    : `已从${pan123TokenSourceLabel(source)}取回会话（共 ${tokens.length} 个候选），已保存，正在验证…`);
   const tryOne = async index => {
-    if (!apiBase) {
-      operationMessage(output, "已取回会话 Token 并保存。请先在「多设备访问」保存同步 API 地址，再回来点「测试连接」。");
-      return;
-    }
     if (index >= tokens.length) {
-      operationMessage(output, "取回了会话，但 123 云盘仍未通过校验。请确认登录没有过期，或改用已有会话 Token。", true);
+      // Keep the specific failure from verifyPan123Backup visible.
+      return false;
       return;
     }
     if (input) input.value = tokens[index].token;
     try { localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, tokens[index].token); } catch {}
     if (await verifyPan123Backup()) {
       if (source === "scan" || source === "password") toast(`${pan123TokenSourceLabel(source)}成功`);
-      return;
+      return true;
     }
-    await tryOne(index + 1);
+    return tryOne(index + 1);
   };
-  tryOne(0).catch(() => {});
+  return tryOne(0);
 }
 // 浏览器直连 123 官方登录接口。请求从用户自己的网络出口发出，123 不会按
 // 「海外 IP」强制弹阿里云图形验证码；密码只在这一层经过 JS，不进我们的
@@ -954,12 +1118,9 @@ function acceptPan123Tokens(payload) {
 async function pan123DirectSignIn(username, password) {
   const isMail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(username);
   const body = isMail ? {mail: username, password, type: 2} : {passport: username, password, remember: true};
-  const response = await fetch(PAN123_SIGN_IN_URL, {
-    method: "POST",
-    headers: {"Content-Type": "application/json", platform: "web", "app-version": "3"},
-    body: JSON.stringify(body),
+  const data = await pan123Fetch(PAN123_SIGN_IN_URL, {
+    method: "POST", headers: {"Content-Type": "application/json", platform: "web", "app-version": "3"}, body: JSON.stringify(body),
   });
-  const data = await response.json().catch(() => ({}));
   const code = Number(data?.code);
   const token = String(data?.data?.token || "");
   if (![0, 200].includes(code) || !token) {
@@ -984,41 +1145,19 @@ async function loginPan123Quick(event) {
   if (button) button.disabled = true;
   operationMessage(output, "正在登录 123 云盘…");
   try {
-    let token = "";
-    let directNote = "";
-    try {
-      token = await pan123DirectSignIn(username, password);
-    } catch (error) {
-      // 123 明确拒绝（账号/密码/二次验证）时不再回退：Worker 代发用的是
-      // Cloudflare 出口 IP，123 会按海外登录要求图形验证码，重试只会更糟。
-      if (error?.rejected) throw error;
-      directNote = error?.message || "";
-      // 直连不通（扩展拦截、网络受限）时再试 Worker 代发。
-      if (apiBase) {
-        const response = await fetch(apiUrl("/api/storage/123/login"), {
-          method: "POST", headers: requestHeaders({"Content-Type": "application/json"}),
-          body: JSON.stringify({username, password}),
-        });
-        const text = await response.text();
-        let data = {}; try { data = text ? JSON.parse(text) : {}; } catch {}
-        if (response.status === 401) throw new Error("同步写入 Token 无效或未保存，请先在「多设备访问」重新保存");
-        if (response.ok && data.ok && data.token) token = data.token;
-        else directNote = data.error || `HTTP ${response.status}`;
-      }
-    }
-    if (!token) throw new Error(directNote || "123 登录接口没有返回会话");
+    stopPan123Qr();
+    const token = await pan123DirectSignIn(username, password);
     // 先把密码从 DOM 里清掉，再保存 Token。
     const input = $("#pan123BackupToken");
     if (input) input.value = token;
     try {
       localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, token);
       localStorage.setItem(PAN123_FOLDER_STORAGE_KEY, String($("#pan123BackupFolder")?.value || "").trim() || "Red-Garden-Backup");
-      navigator.clipboard?.writeText(token)?.catch(() => {});
+
     } catch {}
-    toast("123 云盘已连接");
     await acceptPan123Tokens([{token, source: "password"}]);
   } catch (error) {
-    const message = error instanceof TypeError ? "浏览器没能连上 123 登录接口（可能被扩展或网络拦截）。" : error.message;
+    const message = pan123Failure(error);
     const advice = message.includes("扫码连接") ? "" : "如果提示需要验证码，请改用「扫码连接」，或在下方直接粘贴会话 Token。";
     const text = advice ? `${String(message).replace(/[。.]$/, "")}。${advice}` : String(message);
     operationMessage(output, text, true);
@@ -1222,10 +1361,10 @@ async function uploadBrowserObject(kind, sha, extension, body, contentType, labe
     let data = {};
     try { data = responseText ? JSON.parse(responseText) : {}; } catch {}
     if (response.status === 401) {
-      throw new Error("同步写入令牌无效或已过期，请到“存储设置”重新保存同步写入 Token；文件本身没有问题。");
+      throw new Error("当前设备缺少正确的写入 Token。请导入已有设备的加密配置或填写正确 Token；重复保存同一个错误 Token 不会恢复权限。");
     }
     if (response.status === 405) {
-      throw new Error("同步 API 返回 405：请确认填写的是 Worker 地址而不是 Pages 或 Cloudflare 控制台地址，并重新部署最新 Worker");
+      throw new Error("同步 API 返回 405：请确认填写的是带 API 的 Pages 地址或 Worker 地址，而不是 GitHub Pages 或控制台地址，并重新部署最新 Worker");
     }
     const detail = data.error || data.message || responseText.trim().slice(0, 240);
     throw new Error(`上传失败（${response.status}）${detail ? `：${detail}` : ""}`);
@@ -1241,11 +1380,18 @@ async function uploadBrowserRecord(record, codec) {
   // Records are immutable content-addressed objects. Keep a stable asset id
   // and timestamp so a classification edit supersedes its older record.
   if (!record.updated_at) record.updated_at = new Date().toISOString();
+  if (!record.created_at) record.created_at = record.imported_at || record.updated_at;
+  if (!record.imported_at) record.imported_at = new Date().toISOString();
   const bytes = new TextEncoder().encode(JSON.stringify(record));
   const recordSha = await codec.sha256Hex(bytes);
   await uploadBrowserObject("records", recordSha, "json", bytes, "application/json");
   record.record_sha256 = recordSha;
-  invalidateBrowserLibraryRecords();
+  recentUploadIds.add(`${record.kind}:${record.id}`);
+  libraryPage[record.kind] = 1;
+  librarySort[record.kind] = "added";
+  $(`[data-library-sort="${record.kind}"]`).value = "added";
+  updateCachedRecord(record);
+  toast(`已入库：${record.name || record.family || record.file_name || "资源"}`);
   return record;
 }
 function normalizeIdentity(value) {
@@ -2266,13 +2412,17 @@ function updateBulkControls() {
   toolbars.forEach(([kind, checkboxId, countId, buttonId]) => {
     const ids = selectableIds(kind);
     const available = new Set(ids);
+    const matching = kind === "review" ? ids : filterLibrary(kind).map(item => item.id).filter(id => available.has(id));
+    const checkedMatches = matching.filter(id => selections[kind].has(id)).length;
     for (const id of selections[kind]) if (!available.has(id)) selections[kind].delete(id);
     const count = selections[kind].size;
     const checkbox = $("#" + checkboxId);
-    checkbox.checked = ids.length > 0 && count === ids.length;
-    checkbox.indeterminate = count > 0 && count < ids.length;
-    checkbox.disabled = Boolean(state.operation) || !ids.length;
-    $("#" + countId).textContent = `已选 ${count} / ${ids.length} 项`;
+    checkbox.checked = matching.length > 0 && checkedMatches === matching.length;
+    checkbox.indeterminate = checkedMatches > 0 && checkedMatches < matching.length;
+    checkbox.disabled = Boolean(state.operation) || !matching.length;
+    $("#" + countId).textContent = count === checkedMatches ? `已选 ${count} 项` : `已选 ${count} 项（${count - checkedMatches} 项在筛选范围外）`;
+    const clear = $(`[data-clear-selection="${kind}"]`);
+    if (clear) { clear.hidden = !count; clear.disabled = Boolean(state.operation); }
     const syncCount = [...selections[kind]].filter(id => eligibleIds(kind).includes(id)).length;
     const syncButton = $("#" + buttonId);
     if (syncButton) {
@@ -2345,38 +2495,51 @@ function updateBulkControls() {
 }
 function setOperation(operation) { state.operation = operation; updateBulkControls(); }
 function toggleAll(kind, checked) {
-  selections[kind] = new Set(checked ? selectableIds(kind) : []);
+  const available = new Set(selectableIds(kind));
+  const ids = kind === "review" ? available : filterLibrary(kind).map(item => item.id).filter(id => available.has(id));
+  for (const id of ids) {
+    if (checked) selections[kind].add(id);
+    else selections[kind].delete(id);
+  }
   updateBulkControls();
 }
 const viewNames = { import: "导入", themes: "主题库", fonts: "字体库", assets: "收藏库", jobs: "后台任务", storage: "存储设置" };
-function setView(view) {
-  if (!viewNames[view]) view = "import";
+function setView(view, replace = false) {
+  if (!Object.hasOwn(viewNames, view)) view = "themes";
   const changed = state.activeView !== view;
   state.activeView = view;
   if (view !== "storage") stopPan123Qr();
   if (changed) window.scrollTo(0, 0);
-  if (location.hash !== `#${view}`) history.replaceState(null, "", `#${view}`);
+  if (location.hash !== `#${view}`) history[replace ? "replaceState" : "pushState"](null, "", `#${view}`);
   $$("[data-view-panel]").forEach(panel => { panel.hidden = panel.dataset.viewPanel !== view; });
-  $$(".nav-item").forEach(item => item.classList.toggle("is-active", item.dataset.view === view));
+  $$(".nav-item").forEach(item => {
+    const active = item.dataset.view === view;
+    item.classList.toggle("is-active", active);
+    if (active) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
+  });
   // 底部 tab 只有五个入口，后台任务与存储设置归到「更多」。
   const tabFor = ["jobs", "storage"].includes(view) ? "more" : view;
   $$(".mobile-tabs .tab-item").forEach(item => {
     const active = item.dataset.tab === tabFor;
     item.classList.toggle("is-active", active);
+    if (active && item.dataset.tab !== "more") item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
     if (item.dataset.tab === "more") item.setAttribute("aria-expanded", active ? "true" : "false");
   });
   closeMobileMore();
   $("#topbarTitle").textContent = viewNames[view];
+  $("#addThemeButton").hidden = view === "import";
   // During startup the boot sequence already loads storage and then all
   // libraries. Loading here too would race a second, differently-deduplicated
   // request and make the card count flicker between raw and merged records.
-  if (state.storage) {
+  if (state.storage && libraryStarted) {
     if (view === "themes") loadThemes().catch(error => toast(error.message));
     if (view === "fonts") loadFonts().catch(error => toast(error.message));
     if (view === "assets") loadAssets().catch(error => toast(error.message));
   }
-  if (view === "jobs") loadJobs().catch(() => {});
-  if (view === "storage") loadStorage().catch(error => toast(error.message));
+  if (libraryStarted && view === "jobs") loadJobs().catch(() => {});
+  if (libraryStarted && view === "storage") loadStorage().catch(error => toast(error.message));
 }
 function setImportKind(kind) {
   state.importKind = kind;
@@ -2434,7 +2597,7 @@ function renderFontFilters() {
   });
   const categories = fontCategoryOptions();
   if (state.fontFilter !== "all" && !categories.includes(state.fontFilter)) state.fontFilter = "all";
-  container.innerHTML = [`<button class="filter-chip font-filter-chip ${state.fontFilter === "all" ? "is-active" : ""}" type="button" data-font-filter="all">全部 <span>${state.fonts.length}</span></button>`, ...categories.map(category => `<button class="filter-chip font-filter-chip ${state.fontFilter === category ? "is-active" : ""}" type="button" data-font-filter="${escapeHtml(category)}" ${counts.get(category) ? "" : "disabled"}>${escapeHtml(category)} <span>${counts.get(category) || 0}</span></button>`)].join("");
+  container.innerHTML = [`<button class="filter-chip font-filter-chip ${state.fontFilter === "all" ? "is-active" : ""}" type="button" data-font-filter="all" aria-pressed="${state.fontFilter === "all"}">全部 <span>${state.fonts.length}</span></button>`, ...categories.map(category => `<button class="filter-chip font-filter-chip ${state.fontFilter === category ? "is-active" : ""}" type="button" data-font-filter="${escapeHtml(category)}" aria-pressed="${state.fontFilter === category}" ${counts.get(category) ? "" : "disabled"}>${escapeHtml(category)} <span>${counts.get(category) || 0}</span></button>`)].join("");
 }
 function fontClassificationEditor(font) {
   const style = fontCategory(font);
@@ -2482,7 +2645,7 @@ function fontCard(font, imported = false) {
 function themeMatchesSearch(theme) {
   const needle = String(state.themeSearch || "").trim().toLocaleLowerCase("zh-CN");
   if (!needle) return true;
-  return [theme.name, theme.author, theme.file_name, theme.source_name, theme.compression_supported === false ? "加密" : "压缩"].some(value => String(value || "").toLocaleLowerCase("zh-CN").includes(needle));
+  return [theme.name, theme.author, theme.file_name, theme.source_name, ...themeCategoryList(theme), theme.compression_supported === false ? "加密" : "压缩"].some(value => String(value || "").toLocaleLowerCase("zh-CN").includes(needle));
 }
 function themeAuthorLabel(theme) { return String(theme?.author || "").trim() || "作者未记录"; }
 function renderThemeAuthorFilter() {
@@ -2525,11 +2688,13 @@ function themeCategoryEditorMarkup(theme) {
   </div>`;
 }
 async function patchThemeCategories(theme, categories) {
+  await ensureRecordReference(theme);
   const result = await api(`/api/themes/${encodeURIComponent(theme.id)}`, {
     method: "PATCH", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ author: theme.author === "作者未记录" ? "" : theme.author, style: theme.style || "", tags: theme.tags || [], categories }),
+    body: JSON.stringify({ record_sha256: theme.record_sha256, author: theme.author === "作者未记录" ? "" : theme.author, style: theme.style || "", tags: theme.tags || [], categories }),
   });
   Object.assign(theme, result.item || {}, { categories });
+  updateCachedRecord(theme);
   return theme;
 }
 async function saveThemeCategories(themeId, categories) {
@@ -2538,7 +2703,7 @@ async function saveThemeCategories(themeId, categories) {
   setOperation("theme-categories");
   try {
     await patchThemeCategories(theme, categories);
-    if (browserSyncEnabled()) invalidateBrowserLibraryRecords();
+    if (browserSyncEnabled()) saveDeviceSnapshot();
     renderThemes();
     if ($("#themeDialog").open) openThemeDialog(themeId);
     toast("分类已保存");
@@ -2597,11 +2762,10 @@ function openBulkCategoryDialog() {
 }
 function addBulkCategoryFromInput() {
   const input = $("#bulkCategoryInput");
-  const value = String(input?.value || "").trim();
-  if (!value) { toast("先输入类别名"); return; }
-  const vocabulary = themeCategoryVocabulary();
-  if (!vocabulary.includes(value)) saveThemeCategoryVocabulary([...vocabulary, value]);
-  bulkCategorySelection.add(value);
+  const values = splitTags(input?.value);
+  if (!values.length) { toast("先输入类别名"); return; }
+  saveThemeCategoryVocabulary([...new Set([...themeCategoryVocabulary(), ...values])]);
+  values.forEach(value => bulkCategorySelection.add(value));
   if (input) input.value = "";
   renderBulkCategoryPicks();
   updateBulkCategoryApply();
@@ -2623,11 +2787,60 @@ async function applyBulkThemeCategories() {
       if (applyButton) applyButton.textContent = `处理中 ${done + failed + 1}/${targets.length}`;
       try { await patchThemeCategories(theme, next); done++; } catch { failed++; }
     }
-    if (browserSyncEnabled()) invalidateBrowserLibraryRecords();
+    if (browserSyncEnabled()) saveDeviceSnapshot();
     renderThemes();
     dialog?.close();
     toast(failed ? `已更新 ${done} 个主题，${failed} 个失败` : `已把类别写入 ${done} 个主题`);
   } finally { setOperation(""); }
+}
+function splitTags(value) { return [...new Set(String(value || "").split(/[,，;；\n]+/).map(value => value.trim().slice(0, 24)).filter(Boolean))].slice(0, 30); }
+function suggestedTags(record) {
+  const tags = [...(record.auto_categories || []), ...(record.categories || [])];
+  if (record.kind === "font") tags.push(fontCategory(record), String(record.extension || "").toUpperCase());
+  if (record.kind === "asset") tags.push(record.style, String(record.extension || record.asset_type || "").toUpperCase());
+  return [...new Set(tags.filter(Boolean))].slice(0, 30);
+}
+let bulkTagKind = "theme";
+function openBulkTags(kind) {
+  if (!selections[kind].size) { toast("先勾选需要修改的资源"); return; }
+  bulkTagKind = kind;
+  $("#bulkTagForm").reset();
+  $("#bulkTagTitle").textContent = `批量标签 · ${selections[kind].size} 项`;
+  $("#bulkTagStatus").textContent = "自动补标签使用已有类别和格式信息，不读取或上传原文件。";
+  $("#bulkTagDialog").showModal();
+}
+async function applyBulkTags(event) {
+  event.preventDefault();
+  if (state.operation) return;
+  const form = event.currentTarget, kind = bulkTagKind;
+  const mode = form.elements.mode.value, picked = splitTags(form.elements.tags.value);
+  if (mode !== "auto" && !picked.length && mode !== "replace") { toast("请输入标签，用逗号分隔"); return; }
+  const targets = state[kind + "s"].filter(item => selections[kind].has(item.id));
+  setOperation("bulk-tags");
+  const failures = []; let done = 0, skipped = 0;
+  try {
+    await ensureWriteAccess();
+    if (targets[0]) await ensureRecordReference(targets[0]);
+    await mapConcurrent(targets, 3, async record => {
+      const own = record.tags || [];
+      const tags = mode === "replace" ? picked : mode === "remove" ? own.filter(tag => !picked.includes(tag)) : [...new Set([...own, ...(mode === "auto" ? suggestedTags(record) : picked)])].slice(0, 30);
+      if (JSON.stringify(tags) === JSON.stringify(own)) { skipped++; return; }
+      try {
+        const result = await api(`/api/${recordKindPath(kind)}/${encodeURIComponent(record.id)}`, {
+          method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({record_sha256: record.record_sha256, tags}),
+        });
+        Object.assign(record, result.item);
+        updateCachedRecord(record); done++;
+      } catch (error) { failures.push({id: record.id, name: record.name || record.family || record.id, error: error.message}); }
+      $("#bulkTagStatus").textContent = `已保存 ${done} / ${targets.length} 项，失败 ${failures.length} 项…`;
+    });
+    selections[kind] = new Set(failures.map(item => item.id));
+    libraryKinds[kind].render();
+    $("#bulkTagStatus").textContent = `保存 ${done} 项，无需修改 ${skipped} 项。` + failures.map(item => `${item.name}：${item.error}`).join("；");
+    if (!failures.length) $("#bulkTagDialog").close();
+    toast(`标签已保存 ${done} 项，失败 ${failures.length} 项`);
+  } catch (error) { $("#bulkTagStatus").textContent = error.message; }
+  finally { setOperation(""); }
 }
 async function saveThemeIdentity(themeId, form) {
   const theme = state.themes.find(item => String(item.id) === String(themeId));
@@ -2638,12 +2851,14 @@ async function saveThemeIdentity(themeId, form) {
   if (!name) { toast("作品名不能为空"); return; }
   setOperation("theme-identity");
   try {
+    await ensureRecordReference(theme);
     const result = await api(`/api/themes/${encodeURIComponent(theme.id)}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, author, style: theme.style || "", tags: theme.tags || [], categories: themeCategoryList(theme) }),
+      body: JSON.stringify({ record_sha256: theme.record_sha256, name, author, style: theme.style || "", tags: theme.tags || [], categories: themeCategoryList(theme) }),
     });
     Object.assign(theme, result.item || {}, {name});
-    if (browserSyncEnabled()) invalidateBrowserLibraryRecords();
+    updateCachedRecord(theme);
+    if (browserSyncEnabled()) saveDeviceSnapshot();
     renderThemes();
     openThemeDialog(theme.id);
     toast("名称与作者已保存");
@@ -2748,28 +2963,88 @@ function restoreThemeDensity() {
   try { saved = localStorage.getItem(THEME_DENSITY_KEY) || ""; } catch {}
   applyThemeDensity(saved || themeDensityDefault(), false);
 }
+const libraryKinds = {
+  theme: {name: "主题", render: renderThemes, load: loadThemes},
+  font: {name: "字体", render: renderFonts, load: loadFonts},
+  asset: {name: "收藏", render: renderAssets, load: loadAssets},
+};
+const libraryPage = {theme: 1, font: 1, asset: 1};
+const librarySort = {theme: "added", font: "added", asset: "added"};
+const libraryCollator = new Intl.Collator("zh-CN", {numeric: true, sensitivity: "base"});
+function isNewArrival(record) {
+  return recentUploadIds.has(`${record.kind}:${record.id}`) || Date.now() - Date.parse(record.imported_at || record.created_at || "") < 86400000;
+}
+function filterLibrary(kind) {
+  return matchingLibrary(kind).filter(record => !recentOnly[kind] || isNewArrival(record));
+}
+function matchingLibrary(kind) {
+  if (kind === "theme") return state.themes.filter(theme => themeMatchesSearch(theme)
+    && (state.themeAuthor === "all" || themeAuthorLabel(theme) === state.themeAuthor)
+    && (state.themeCategory === "all" || themeCategoryList(theme).includes(state.themeCategory)));
+  if (kind === "font") return state.fonts.filter(fontMatchesSearch).filter(fontMatchesCategory);
+  return state.assets.filter(assetMatchesFilter);
+}
+function catalogStatus(kind, message = "", error = false) {
+  const status = $(`[data-library-status="${kind}"]`);
+  status.hidden = !message;
+  status.textContent = message;
+  status.classList.toggle("is-error", error);
+}
+function catalogPage(kind) {
+  const visible = filterLibrary(kind);
+  const all = state[kind + "s"];
+  const name = libraryKinds[kind].name;
+  const order = librarySort[kind];
+  const label = item => item.name || item.family || item.file_name || "";
+  const bytes = item => Number(item.compressed_size ?? item.bytes ?? item.original_size) || 0;
+  const byName = (a, b) => libraryCollator.compare(label(a), label(b));
+  const updated = item => Date.parse(order === "added" || order === "oldest" ? item.imported_at || item.created_at || item.updated_at || "" : item.updated_at || item.created_at || "") || 0;
+  visible.sort((a, b) => (order === "name" ? 0 : order === "size" ? bytes(b) - bytes(a) : order === "oldest" ? updated(a) - updated(b) : updated(b) - updated(a)) || byName(a, b));
+  const count = $(`#${kind}Count`);
+  const noun = kind === "asset" ? "项收藏" : `个${name}`;
+  count.textContent = visible.length === all.length ? `${all.length} ${noun}` : `${visible.length} / ${all.length} ${noun}`;
+  const empty = $(`#${kind}Empty`);
+  empty.hidden = visible.length > 0;
+  const filtered = all.length > 0;
+  $("h3", empty).textContent = filtered ? `没有匹配的${name}` : `还没有${name}`;
+  $("p", empty).textContent = filtered ? "试试其他关键词，或清除筛选。" : {
+    theme: "导入一个 .red 文件开始。",
+    font: "导入 TTF、OTF、WOFF 或 WOFF2 文件开始。",
+    asset: "导入 SVG 或 HTML 文件开始。",
+  }[kind];
+  $("button", empty).textContent = filtered ? "清除筛选" : "导入文件";
+  const pageCount = Math.max(1, Math.ceil(visible.length / THEME_PAGE_SIZE));
+  const page = libraryPage[kind] = Math.max(1, Math.min(libraryPage[kind], pageCount));
+  try { localStorage.setItem("reeden-browse-v1", JSON.stringify({pages: libraryPage, sort: librarySort, themeSearch: state.themeSearch, themeAuthor: state.themeAuthor, themeCategory: state.themeCategory, fontSearch: state.fontSearch, fontFilter: state.fontFilter, assetSearch: state.assetSearch, assetFilter: state.assetFilter})); } catch {}
+  $(`#${kind}Pagination`).hidden = pageCount === 1;
+  $(`#${kind}PageInfo`).textContent = `第 ${page} / ${pageCount} 页 · 共 ${visible.length} 项`;
+  $(`#${kind}PrevPage`).disabled = page <= 1;
+  $(`#${kind}NextPage`).disabled = page >= pageCount;
+  return visible.slice((page - 1) * THEME_PAGE_SIZE, page * THEME_PAGE_SIZE);
+}
+async function refreshCatalog(kind) {
+  const button = $(`#refresh${kind === "asset" ? "Assets" : kind === "font" ? "Fonts" : "Themes"}`);
+  button.disabled = true;
+  catalogStatus(kind, `正在刷新${libraryKinds[kind].name}…`);
+  try {
+    if (remoteUnavailable) {
+      remoteUnavailable = false;
+      await loadStorage();
+    } else {
+      await whenStorageReady();
+    }
+    await libraryKinds[kind].load(true);
+  } catch (error) {
+    catalogStatus(kind, `刷新失败：${error.message}。请重试。`, true);
+  } finally {
+    button.disabled = false;
+  }
+}
 function renderThemes() {
   const list = $("#themeList");
   renderThemeAuthorFilter();
   renderThemeCategoryFilter();
-  const visible = state.themes.filter(theme => themeMatchesSearch(theme)
-    && (state.themeAuthor === "all" || themeAuthorLabel(theme) === state.themeAuthor)
-    && (state.themeCategory === "all" || themeCategoryList(theme).includes(state.themeCategory)));
-  $("#themeCount").textContent = visible.length === state.themes.length ? `${state.themes.length} 个主题` : `${visible.length} / ${state.themes.length} 个主题`;
-  $("#themeEmpty").hidden = visible.length > 0;
-  $("#themeEmpty h3").textContent = state.themes.length && !visible.length ? "没有匹配的主题" : "还没有已收录主题";
-  $("#themeEmpty p").textContent = state.themes.length && !visible.length ? "换一个主题名称或作者试试。" : "导入一个 `.red` 文件后，这里会显示预览和作者。";
-  // 主题多了以后一页滚不到底：每页固定条数，翻页只在当前筛选结果里走。
-  const pageCount = Math.max(1, Math.ceil(visible.length / THEME_PAGE_SIZE));
-  state.themePage = Math.min(Math.max(1, Number(state.themePage) || 1), pageCount);
-  const pageItems = visible.slice((state.themePage - 1) * THEME_PAGE_SIZE, state.themePage * THEME_PAGE_SIZE);
-  const pager = $("#themePagination");
-  if (pager) {
-    pager.hidden = visible.length <= THEME_PAGE_SIZE;
-    $("#themePageInfo").textContent = `第 ${state.themePage} / ${pageCount} 页 · 共 ${visible.length} 个`;
-    $("#themePrevPage").disabled = state.themePage <= 1;
-    $("#themeNextPage").disabled = state.themePage >= pageCount;
-  }
+  const pageItems = catalogPage("theme");
   list.innerHTML = pageItems.map(theme => {
     const preview = preferredPreview(theme.preview_light_url, theme.preview_dark_url);
     const author = themeAuthorLabel(theme);
@@ -2783,7 +3058,7 @@ function renderThemes() {
     // 删除都收进点击后打开的主题细节弹窗，跟参考站的卡片一样安静。
     return `<article class="theme-card" data-theme-id="${escapeHtml(theme.id)}">
       <div class="theme-preview">${previewImage(preview.url, `${theme.name} ${preview.label} · ${previewKind(theme.preview_details)}`, "", theme.preview_details)}<span class="preview-caption">${escapeHtml(previewKind(theme.preview_details))}</span><button class="theme-more" type="button" data-theme-open="${escapeHtml(theme.id)}" aria-label="查看 ${escapeHtml(theme.name || "未命名主题")} 的主题细节">⋯</button></div>
-      <div class="theme-info"><div class="item-heading">${selectInput("theme", theme.id, `主题 ${theme.name || "未命名主题"}`, isAssetBusy("theme", theme.id))}<button class="theme-title theme-open" type="button" data-theme-open="${escapeHtml(theme.id)}">${escapeHtml(theme.name || "未命名主题")}</button></div>${meta.length ? `<div class="theme-meta">${authorText ? `<span class="theme-author">${escapeHtml(authorText)}</span>` : ""}${categories.length ? `<span class="theme-categories">${categories.map(category => `<em>${escapeHtml(category)}</em>`).join("")}</span>` : ""}</div>` : ""}${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === "string" ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join("；"))}</p>` : ""}</div>
+      <div class="theme-info">${isNewArrival(theme) ? '<span class="arrival-label">新入库</span>' : ""}<div class="item-heading">${selectInput("theme", theme.id, `主题 ${theme.name || "未命名主题"}`, isAssetBusy("theme", theme.id))}<button class="theme-title theme-open" type="button" data-theme-open="${escapeHtml(theme.id)}">${escapeHtml(theme.name || "未命名主题")}</button></div>${meta.length ? `<div class="theme-meta">${authorText ? `<span class="theme-author">${escapeHtml(authorText)}</span>` : ""}${categories.length ? `<span class="theme-categories">${categories.map(category => `<em>${escapeHtml(category)}</em>`).join("")}</span>` : ""}</div>` : ""}${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === "string" ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join("；"))}</p>` : ""}</div>
     </article>`;
   }).join("");
   $$("[data-theme-open]").forEach(button => button.addEventListener("click", event => { event.stopPropagation(); openThemeDialog(button.dataset.themeOpen); }));
@@ -2839,22 +3114,39 @@ function renderPending() {
     toast("已移出待处理");
   }));
 }
+let commitBatchBusy = false;
 async function commitSelection() {
+  if (commitBatchBusy) { toast("整批文件仍在处理，请等待字体和主题全部结束"); return; }
   // 早退必须给出原因：以前这里直接 return，用户只看到按钮「没反应」。
   if (state.operation) { toast("正在处理中，请等当前任务结束后再试"); return; }
   await whenStorageReady();
+  try { await ensureWriteAccess(); } catch { return; }
   if (storageSettingsPending()) { toast("存储设置有未保存的修改，请先在「存储设置」保存后再上传"); return; }
   const themeIds = state.review.filter(item => selections.review.has(item.staging_id)).map(item => item.staging_id);
   const chosen = state.pending.filter(item => selections.review.has(item.id));
   if (!themeIds.length && !chosen.length) { toast("请先勾选要处理的条目，或点「全选」"); return; }
   deferredCleanup.length = 0;
+  commitBatchBusy = true;
   try {
     if (themeIds.length) await commitThemes(themeIds);
     const fonts = chosen.filter(item => item.kind === "font");
     const assets = chosen.filter(item => item.kind === "asset");
-    if (fonts.length) { await importFonts(fonts.map(item => item.file), {deferCleanup: true}); dropPending(fonts); }
-    if (assets.length) { await importAssets(assets.map(item => item.file), {deferCleanup: true}); dropPending(assets); }
+    if (fonts.length) {
+      const options = {deferCleanup: true};
+      await importFonts(fonts.map(item => item.file), options);
+      const failed = new Set(options.failedFiles || []);
+      dropPending(fonts.filter(item => !failed.has(item.file)));
+    }
+    if (assets.length) {
+      const options = {deferCleanup: true};
+      await importAssets(assets.map(item => item.file), options);
+      const failed = new Set(options.failedFiles || []);
+      dropPending(assets.filter(item => !failed.has(item.file)));
+    }
+    const remaining = state.pending.length + state.review.length;
+    operationMessage($("#unifiedImportStatus"), remaining ? `整批处理结束，仍有 ${remaining} 项待处理或失败，已保留在确认区，可重试。` : "整批上传完成，主题和字体已进入各自资源库，可按最新入库查看。", remaining > 0);
   } finally {
+    commitBatchBusy = false;
     if (deferredCleanup.length) {
       const files = [...new Set(deferredCleanup)];
       deferredCleanup.length = 0;
@@ -2893,11 +3185,7 @@ function renderReview() {
 }
 function renderFonts() {
   renderFontFilters();
-  const visible = state.fonts.filter(fontMatchesSearch).filter(fontMatchesCategory);
-  $("#fontCount").textContent = visible.length === state.fonts.length ? `${state.fonts.length} 个字体` : `${visible.length} / ${state.fonts.length} 个字体`;
-  $("#fontEmpty").hidden = visible.length > 0;
-  $("#fontEmpty h3").textContent = state.fonts.length && !visible.length ? "没有匹配的字体" : "还没有字体";
-  $("#fontEmpty p").textContent = state.fonts.length && !visible.length ? "换一个字体名称或分类试试。" : "从单个文件或文件夹开始建立字体索引。";
+  const visible = catalogPage("font");
   $("#fontList").innerHTML = visible.map(font => fontCard(font)).join("");
   $$("#fontList .font-preview-image").forEach(image => {
     image.addEventListener("error", () => recoverFontPreviewImage(image), {once: true});
@@ -2959,11 +3247,13 @@ function assetCard(asset, imported = false) {
 }
 function renderAssets() {
   const list = $("#assetList");
-  const visible = state.assets.filter(assetMatchesFilter);
-  $("#assetCount").textContent = `${state.assets.length} 个收藏`;
-  $("#assetEmpty").hidden = visible.length > 0;
+  const visible = catalogPage("asset");
   list.innerHTML = visible.map(asset => assetCard(asset)).join("");
-  $$(".asset-filters .filter-chip").forEach(button => button.classList.toggle("is-active", button.dataset.assetFilter === state.assetFilter));
+  $$(".asset-filters .filter-chip").forEach(button => {
+    const active = button.dataset.assetFilter === state.assetFilter;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
   $$(".sync-asset").forEach(button => button.addEventListener("click", () => syncAsset(button.dataset.id)));
   $$(".delete-record[data-kind='asset']").forEach(button => button.addEventListener("click", () => deleteSelectedRecords("asset", [button.dataset.id])));
   updateBulkControls();
@@ -2992,6 +3282,7 @@ async function loadAssets(force = false) {
     if (!current || nextTime >= currentTime) latest.set(key, item);
   });
   state.assets = [...latest.values()];
+  catalogStatus("asset");
   renderAssets();
   renderImportedAssets();
 }
@@ -3005,21 +3296,23 @@ async function saveRecordClassification(form) {
   const fields = new FormData(form);
   const next = {
     ...record,
-    author: String(fields.get("author") || "").trim(),
+    author: fields.has("author") ? String(fields.get("author") || "").trim() : record.author || "",
     style: String(fields.get("style") || "").trim(),
-    tags: String(fields.get("tags") || "").split(",").map(tag => tag.trim()).filter(Boolean),
+    tags: splitTags(fields.get("tags")),
     updated_at: new Date().toISOString(),
   };
   setOperation("record-classification");
   try {
+    await ensureRecordReference(record);
     const result = await api(`/api/${recordKindPath(kind)}/${encodeURIComponent(id)}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ author: next.author, style: next.style, tags: next.tags }),
+      body: JSON.stringify({ record_sha256: record.record_sha256, author: next.author, style: next.style, tags: next.tags }),
     });
     Object.assign(next, result.item || result.record || result.asset || {});
-    if (browserSyncEnabled()) invalidateBrowserLibraryRecords();
+    if (browserSyncEnabled()) saveDeviceSnapshot();
     const index = collection.findIndex(item => item.id === id);
     if (index >= 0) collection[index] = next;
+    updateCachedRecord(next);
     if (kind === "theme") renderThemes(); else if (kind === "font") renderFonts(); else renderAssets();
     toast("分类已保存");
   } catch (error) { toast(`分类保存失败：${error.message}`); }
@@ -3140,6 +3433,8 @@ async function loadJobs() {
     const changed = revision !== jobsRevision;
     const hadActive = activeJobs().length > 0;
     state.jobs = items;
+    jobsSnapshotAt = Date.now();
+    saveDeviceSnapshot();
     jobsRevision = revision;
     operationMessage($("#jobsStatus"), browserSyncEnabled()
       ? "免费同步模式：批次队列存在共享 R2，关掉页面不会丢，换一台设备或重开页面会自动继续；图片压缩需要浏览器画布，所以由设备执行。"
@@ -3154,7 +3449,7 @@ async function loadJobs() {
   } catch (error) { operationMessage($("#jobsStatus"), `暂时无法读取后台任务：${error.message}`, true); }
   finally {
     jobsLoading = false;
-    jobsPollTimer = setTimeout(() => loadJobs().catch(() => {}), activeJobs().length ? 1800 : 8000);
+    if (activeJobs().length) jobsPollTimer = setTimeout(() => loadJobs().catch(() => {}), document.hidden ? 15000 : 4000);
   }
 }
 async function retryJob(id) {
@@ -3218,6 +3513,7 @@ function latestRecords(records) {
 async function loadThemes(force = false) {
   const records = browserSyncEnabled() ? await loadBrowserLibraryRecords(force) : latestRecords((await api("/api/themes")).items || []);
   state.themes = records.filter(item => item.kind === "theme" || !item.kind);
+  catalogStatus("theme");
   renderThemes();
 }
 async function loadBrowserLibraryRecords(force = false) {
@@ -3226,16 +3522,17 @@ async function loadBrowserLibraryRecords(force = false) {
   if (!force && !browserLibraryRecordsCache) {
     try {
       const saved = JSON.parse(localStorage.getItem(LIBRARY_CACHE_KEY) || "null");
-      if (saved && saved.at && Date.now() - saved.at < LIBRARY_CACHE_TTL && Array.isArray(saved.records)) {
+      if (saved && saved.at && (saved.apiBase === apiBase || (!saved.apiBase && !localStorage.getItem(API_BASE_STORAGE_KEY))) && Array.isArray(saved.records)) {
         browserLibraryRecordsCache = latestRecords(saved.records);
         browserLibraryRecordsLoadedAt = saved.at;
       }
     } catch {}
   }
   // 快照命中后不再发起网络读取。想强制刷新时用「刷新」按钮（force=true）。
-  const fresh = browserLibraryRecordsCache && Date.now() - browserLibraryRecordsLoadedAt < LIBRARY_CACHE_TTL;
+  const fresh = Array.isArray(browserLibraryRecordsCache);
   if (!force && fresh) return browserLibraryRecordsCache;
-  if (!force && browserLibraryRecordsPromise) return browserLibraryRecordsPromise;
+  if (browserLibraryRecordsPromise) return browserLibraryRecordsPromise;
+  const scope = apiBase;
   browserLibraryRecordsPromise = (async () => {
     const records = [];
     let cursor = "";
@@ -3244,9 +3541,11 @@ async function loadBrowserLibraryRecords(force = false) {
       records.push(...(data.items || data.records || []));
       cursor = data.cursor || "";
     } while (cursor);
+    if (scope !== apiBase) throw new Error("连接已切换，旧库读取结果已忽略");
     browserLibraryRecordsCache = latestRecords(records);
     browserLibraryRecordsLoadedAt = Date.now();
-    try { localStorage.setItem(LIBRARY_CACHE_KEY, JSON.stringify({at: browserLibraryRecordsLoadedAt, records: browserLibraryRecordsCache})); } catch {}
+    saveDeviceSnapshot();
+    updateCacheInfo();
     return browserLibraryRecordsCache;
   })();
   try { return await browserLibraryRecordsPromise; }
@@ -3279,13 +3578,20 @@ async function discardReview(id) {
 async function loadFonts(force = false) {
   const records = browserSyncEnabled() ? await loadBrowserLibraryRecords(force) : latestRecords((await api("/api/fonts")).items || []);
   state.fonts = records.filter(item => item.kind === "font").map(font => ({ ...font, style: String(font.style || "").trim() || inferFontCategory(font) }));
+  catalogStatus("font");
   renderFonts();
 }
-async function loadStorage() {
+function loadStorage(force = false) {
+  if (storageReadyPromise) return storageReadyPromise;
+  if (!force && state.storage && storageReady) return Promise.resolve();
+  storageReadyPromise = fetchStorage().finally(() => { storageReadyPromise = null; });
+  return storageReadyPromise;
+}
+async function fetchStorage() {
   try {
     const data = await api("/api/storage");
     state.storage = data;
-    try { localStorage.setItem(STORAGE_SNAPSHOT_KEY, JSON.stringify({at: Date.now(), data})); } catch {}
+    try { localStorage.setItem(STORAGE_SNAPSHOT_KEY, JSON.stringify({apiBase, at: Date.now(), data})); } catch {}
     if (data.mode === "browser-local") {
       storageDirty = false;
       renderStorageSummary(data);
@@ -3322,10 +3628,7 @@ async function loadStorage() {
  */
 function whenStorageReady() {
   if (storageReady) return Promise.resolve();
-  if (!storageReadyPromise) {
-    storageReadyPromise = loadStorage().catch(() => {}).finally(() => { storageReadyPromise = null; });
-  }
-  return storageReadyPromise;
+  return loadStorage();
 }
 function renderStorageSummary(data) {
   if (data.mode === "browser-local") {
@@ -3334,7 +3637,7 @@ function renderStorageSummary(data) {
     $("#storageHint").textContent = "浏览器本地处理 · 多设备共享 R2";
     $("#storageState").textContent = "免费浏览器同步已启用";
     $("#credentialState").textContent = syncToken ? "同步写入令牌已填写（仅保存在本机浏览器）。" : "尚未填写同步写入令牌；读取可用，上传会被 Worker 拒绝。";
-    $("#pan123CredentialState").textContent = "会话只保存在本机浏览器；测试连接、备份清单与上传由同步 Worker 代转，Token 不写入仓库或 R2。";
+    $("#pan123CredentialState").textContent = "会话只保存在本机浏览器；登录和测试连接由浏览器直连；备份上传由同步 Worker 代转，Token 不写入仓库或 R2。";
     $("#storageForm").hidden = true;
     // 静态模式没有本机后端，但 123 的登录与扫码接口允许跨域，浏览器可以自己
     // 直连——请求从用户自己的网络出口发出，不会被 123 判定成「海外登录」而
@@ -3342,7 +3645,7 @@ function renderStorageSummary(data) {
     $("#pan123Label").hidden = false;
     $("#pan123Label h2").textContent = "连接 123 云盘";
     const labelNote = $("#pan123Label p:first-of-type");
-    if (labelNote) labelNote.textContent = "可选：123 云盘只备份原始 RED，压缩 RED、字体和预览仍存 R2。扫码或账号密码登录都由本机浏览器直接连 123 完成，会话 Token 只保存在本机浏览器，测试连接、备份清单与上传由同步 Worker 代转。";
+    if (labelNote) labelNote.textContent = "可选：123 云盘只备份原始 RED，压缩 RED、字体和预览仍存 R2。扫码或账号密码登录都由本机浏览器直接连 123 完成，会话 Token 只保存在本机浏览器，登录和测试连接由浏览器直连；备份上传由同步 Worker 代转。";
     // 主 WebView 不允许离开本站，这个外链点了也只会被拦下；登录入口在上方面板里。
     const labelLink = $("#pan123Label .download-link");
     if (labelLink) labelLink.hidden = true;
@@ -3857,10 +4160,12 @@ async function rebuildPreview(themeId) {
   finally { setOperation(""); }
 }
 async function importFonts(files, options = {}) {
+  await window.loadReedenVendor?.("opentype.min.js");
   if (state.operation) { toast("请等待当前批次处理完成"); return; }
   const valid = [...files].filter(file => /\.(ttf|otf|woff2?)$/i.test(file.name));
   if (!valid.length) { toast("请选择 TTF、OTF、WOFF 或 WOFF2 文件"); return; }
   await whenStorageReady();
+  try { await ensureWriteAccess(); } catch { return; }
   state.importFontIds = [];
   saveSessionIds("reeden-import-fonts", []);
   renderImportedFonts();
@@ -3917,6 +4222,7 @@ async function importFonts(files, options = {}) {
       });
       const added = uploaded.filter(item => !item?.error);
       const failures = uploaded.filter(item => item?.error);
+      options.failedFiles = failures.map(item => item.file);
       finishTransferProgress("字体上传完成", failures.length);
       if (!added.length && failures.length) throw failures[0].error;
       state.fonts = [...added, ...state.fonts];
@@ -3944,7 +4250,7 @@ async function importFonts(files, options = {}) {
     const message = `已加入 ${result.added?.length || 0} 个新字体，重复跳过 ${duplicates + (result.skipped?.length || 0)} 个。${result.job ? "同步已交给后台，可以离开此页。" : ""}${warning ? ` ${warning}` : ""}`;
     operationMessage(output, message, Boolean(warning));
     toast(message);
-  } catch (error) { operationMessage(output, `字体导入失败：${error.message}`, true); toast(error.message); }
+  } catch (error) { options.failedFiles ||= valid; operationMessage(output, `字体导入失败：${error.message}`, true); toast(error.message); }
   finally { setOperation(""); }
 }
 function assetExtension(file) {
@@ -3956,6 +4262,7 @@ async function importAssets(files, options = {}) {
   const valid = [...files].filter(file => ["svg", "html", "htm"].includes(assetExtension(file)));
   if (!valid.length) { toast("请选择 SVG、HTML 或 HTM 文件"); return; }
   await whenStorageReady();
+  try { await ensureWriteAccess(); } catch { return; }
   state.importAssetIds = [];
   saveSessionIds("reeden-import-assets", []);
   renderImportedAssets();
@@ -4014,6 +4321,7 @@ async function importAssets(files, options = {}) {
       });
       const added = uploaded.filter(item => !item?.error);
       const failures = uploaded.filter(item => item?.error);
+      options.failedFiles = failures.map(item => item.file);
       finishTransferProgress("收藏上传完成", failures.length);
       if (!added.length && failures.length) throw failures[0].error;
       state.assets = [...added, ...state.assets];
@@ -4042,7 +4350,7 @@ async function importAssets(files, options = {}) {
     const message = `已加入 ${result.added?.length || 0} 个收藏，重复跳过 ${duplicates + (result.skipped?.length || 0)} 个。${result.job ? "同步已交给后台，可以离开此页。" : ""}${warning ? ` ${warning}` : ""}`;
     operationMessage(output, message, Boolean(warning));
     toast(message);
-  } catch (error) { operationMessage(output, `收藏导入失败：${error.message}`, true); toast(error.message); }
+  } catch (error) { options.failedFiles ||= valid; operationMessage(output, `收藏导入失败：${error.message}`, true); toast(error.message); }
   finally { setOperation(""); }
 }
 async function saveStorage(event) {
@@ -4062,7 +4370,7 @@ async function saveStorage(event) {
     await api("/api/storage/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     form.elements.accessKeyId.value = "";
     form.elements.secretAccessKey.value = "";
-    await loadStorage();
+    await loadStorage(true);
     operationMessage($("#configStatus"), "配置已保存。请测试连接，再读取已有库或同步资产。");
     toast("存储配置已保存");
   } catch (error) { operationMessage($("#configStatus"), error.message, true); } finally { setOperation(""); }
@@ -4117,27 +4425,30 @@ async function startPan123BrowserQr() {
   const generation = pan123QrGeneration;
   const status = $("#pan123QrStatus");
   operationMessage(status, "正在生成登录二维码…");
+  await window.loadReedenVendor?.("qrcode.js");
   let payload = {};
   try {
-    const response = await fetch(PAN123_QR_GENERATE_URL, {headers: {platform: "web", "app-version": "3"}});
-    payload = await response.json().catch(() => ({}));
-  } catch {
-    payload = {};
+    payload = await pan123Fetch(PAN123_QR_GENERATE_URL, {headers: {platform: "web", "app-version": "3"}});
+  } catch (error) {
+    operationMessage(status, pan123Failure(error), true);
+    return;
   }
   if (generation !== pan123QrGeneration) return;
   const uniID = String(payload?.data?.uniID || "");
   const url = String(payload?.data?.url || "");
-  if (Number(payload?.code) !== 0 || !uniID) {
+  if (![0, 200].includes(Number(payload?.code)) || !uniID || !/^https:\/\//.test(url)) {
     operationMessage(status, "二维码暂时无法生成，请稍后重试，或改用账号密码登录。", true);
     return;
   }
-  const text = `${url}?env=production&uniID=${encodeURIComponent(uniID)}&source=123pan&type=login`;
+  const qrUrl = new URL(url);
+  Object.entries({env: "production", uniID, source: "123pan", type: "login"}).forEach(([key, value]) => qrUrl.searchParams.set(key, value));
+  const text = qrUrl.href;
   if (!renderPan123Qr(text)) {
     operationMessage(status, "二维码渲染失败，请刷新页面后重试，或改用账号密码登录。", true);
     return;
   }
   $("#pan123QrCode").hidden = false;
-  pan123QrSession = { id: uniID, expiresAt: Date.now() + 120000 };
+  pan123QrSession = { browser: true, id: uniID, errors: 0, expiresAt: Date.now() + 120000 };
   operationMessage(status, "用123云盘App或微信扫码并确认。等待扫码…");
   pan123QrExpiryTimer = setTimeout(() => { stopPan123Qr("二维码已过期，请重新扫码连接。"); updateStorageControls(); }, pan123QrSession.expiresAt - Date.now());
   pan123QrTimer = setTimeout(() => pollPan123BrowserQr(generation, uniID), 1200);
@@ -4151,15 +4462,16 @@ async function pollPan123BrowserQr(generation, uniID) {
   if (document.hidden) { pan123QrTimer = setTimeout(() => pollPan123BrowserQr(generation, uniID), 4000); return; }
   let payload = {};
   try {
-    const response = await fetch(`${PAN123_QR_RESULT_URL}?uniID=${encodeURIComponent(uniID)}&remember=true&gray=true`, {headers: {platform: "web", "app-version": "3"}});
-    payload = await response.json().catch(() => ({}));
-  } catch {
+    payload = await pan123Fetch(`${PAN123_QR_RESULT_URL}?uniID=${encodeURIComponent(uniID)}&remember=true&gray=true`, {headers: {platform: "web", "app-version": "3"}});
+  } catch (error) {
+    if (generation !== pan123QrGeneration) return;
+    if (++pan123QrSession.errors >= 2) { stopPan123Qr(pan123Failure(error)); return; }
     pan123QrTimer = setTimeout(() => pollPan123BrowserQr(generation, uniID), 3000);
     return;
   }
   if (generation !== pan123QrGeneration) return;
   const code = Number(payload?.code);
-  if (code === 200) {
+  if ((code === 200 || code === 0) && (payload?.data?.token || payload?.data?.accessToken || payload?.data?.access_token || payload?.data?.Authorization)) {
     // 200 是 123 扫码成功的约定返回码，会话 Token 就在 data 里。
     const data = payload?.data || {};
     const token = String(data.token || data.accessToken || data.access_token || data.Authorization || "");
@@ -4168,7 +4480,7 @@ async function pollPan123BrowserQr(generation, uniID) {
     else operationMessage($("#pan123QrStatus"), "扫码已确认，但没有取回会话 Token，请重新扫码。", true);
     return;
   }
-  if (code !== 0) { stopPan123Qr("暂时无法确认扫码状态，请重新扫码连接。"); updateStorageControls(); return; }
+  if (![0, 200].includes(code)) { stopPan123Qr("暂时无法确认扫码状态，请重新扫码连接。"); updateStorageControls(); return; }
   const loginStatus = Number(payload?.data?.loginStatus);
   if (loginStatus === 4) { stopPan123Qr("二维码已过期，请重新扫码连接。"); updateStorageControls(); return; }
   if (loginStatus === 2) { stopPan123Qr("你已在手机上拒绝了这次登录，请重新扫码。"); updateStorageControls(); return; }
@@ -4178,6 +4490,7 @@ async function pollPan123BrowserQr(generation, uniID) {
 async function startPan123Qr() {
   // 和 verifyPan123Backup 同理：新设备没有存储快照时必须等 storage 就绪，否则
   // browserSyncEnabled() 为 false，扫码会退回 Worker 海外出口被 123 判海外登录。
+  if (apiBase) { stopPan123Qr(); try { await startPan123BrowserQr(); } catch (error) { operationMessage($("#pan123QrStatus"), pan123Failure(error), true); } return; }
   await whenStorageReady();
   // 以前这里遇到 document.hidden / 有后台任务就直接 return，手机上点了没反应，
   // 也没任何提示。现在只拦真正会冲突的操作，并且把原因写出来。
@@ -4353,6 +4666,7 @@ function setupDropZone(element, onFiles) {
   element.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); element.click(); } });
 }
 async function queueFilesForLater(fileList) {
+  try { await whenStorageReady(); await ensureWriteAccess(); } catch { return; }
   if (state.operation) { toast("请等待当前批次处理完成"); return; }
   const valid = [...(fileList || [])].filter(file => /\.(red|ttf|otf|woff2?|svg|html?)$/i.test(String(file.name || "")));
   if (!valid.length) { toast("没有可暂存的受支持文件"); return; }
@@ -4703,7 +5017,7 @@ async function performLocalCleanup(selected, bridge) {
 // the caller keeps its operation lock release path, and a dismissed dialog just
 // leaves the files on disk.
 async function offerLocalCleanup(files, summary) {
-  const { targets } = cleanupTargets(files);
+  const { targets } = cleanupTargets(files.filter(file => !file.archivePath));
   if (!targets.length) return;
   // 即使当前环境一个都删不了，也要把清单摆出来：用户至少知道哪些文件已经上传、
   // 可以自己手动清理，而不是只弹一句提示就消失。
@@ -4714,11 +5028,43 @@ async function offerLocalCleanup(files, summary) {
   if (result.failures.length) toast(`已删除 ${result.deleted} 个本地文件，${result.failures.length} 个失败：${result.failures[0].name}（${result.failures[0].reason}）`);
   else toast(`已删除 ${result.deleted} 个本地文件`);
 }
+async function expandImportArchives(files) {
+  const result = [], errors = [];
+  let extracted = 0;
+  for (const file of files) {
+    if (!/\.zip$/i.test(file.name)) { result.push(file); continue; }
+    operationMessage($("#unifiedImportStatus"), `正在本机读取 ZIP：${file.name}…`);
+    try {
+      if (file.size > 256 * 1024 * 1024) throw new Error("ZIP 超过 256 MB，请拆分后导入");
+      const codec = await loadFreeCodec();
+      const entries = await codec.readZipEntries(new Uint8Array(await file.arrayBuffer()), {standardZip: true,
+        filter: name => !name.startsWith("__MACOSX/") && !name.split("/").some(part => part.startsWith(".")) && /\.(red|ttf|otf|woff2?)$/i.test(name),
+      });
+      for (const entry of entries) {
+        const item = new File([entry.bytes], entry.name.split("/").pop(), {lastModified: file.lastModified});
+        Object.defineProperty(item, "archivePath", {value: `${file.name}/${entry.name}`});
+        result.push(item);
+        extracted++;
+      }
+      if (!entries.length) errors.push(`${file.name}：没有找到字体或 RED 文件`);
+    } catch (error) { errors.push(`${file.name}：${error.message}`); }
+  }
+  if (extracted || errors.length) {
+    const text = [extracted ? `ZIP 已在本机提取 ${extracted} 个字体/主题；原 ZIP 保留，等待确认上传。` : "", ...errors].filter(Boolean).join(" ");
+    operationMessage($("#archiveImportStatus"), text, errors.length > 0);
+  }
+  return result;
+}
 async function importUnifiedFiles(fileList) {
   if (state.operation) { toast("请等待当前批次处理完成"); return; }
-  if (!resumingStaged && $("#queueForLater")?.checked) { await queueFilesForLater(fileList); return; }
+  let expanded;
+  setOperation("zip-extract");
+  try { expanded = await expandImportArchives([...(fileList || [])]); }
+  finally { setOperation(""); }
+  if (!expanded.length) return;
+  if (!resumingStaged && $("#queueForLater")?.checked) { await queueFilesForLater(expanded); return; }
   const groups = { theme: [], font: [], asset: [] }, unsupported = [];
-  for (const file of [...(fileList || [])]) {
+  for (const file of expanded) {
     const extension = String(file.name || "").toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] || "";
     if (extension === "red") groups.theme.push(file);
     else if (["ttf", "otf", "woff", "woff2"].includes(extension)) groups.font.push(file);
@@ -4816,15 +5162,69 @@ $("#localCleanupEnabled").addEventListener("change", event => {
   toast(event.target.checked ? "已开启：选择文件夹时申请写入权限，上传成功后再询问是否删除" : "已关闭本地文件清理，上传后不会询问删除");
 });
 refreshCleanupHint();
-$("#refreshThemes").addEventListener("click", () => loadThemes(true));
-$("#themeCategoryFilter")?.addEventListener("change", event => { state.themeCategory = event.target.value; state.themePage = 1; renderThemes(); });
-$("#themeSearchInput").addEventListener("input", event => { state.themeSearch = event.target.value; state.themePage = 1; renderThemes(); });
-$("#themeAuthorFilter").addEventListener("change", event => { state.themeAuthor = event.target.value || "all"; state.themePage = 1; renderThemes(); });
-$("#themePrevPage")?.addEventListener("click", () => { if (state.themePage > 1) { state.themePage--; renderThemes(); window.scrollTo({top: ($("#themeList")?.offsetTop || 0) - 90, behavior: "smooth"}); } });
-$("#themeNextPage")?.addEventListener("click", () => { state.themePage++; renderThemes(); window.scrollTo({top: ($("#themeList")?.offsetTop || 0) - 90, behavior: "smooth"}); });
-$("#refreshFonts").addEventListener("click", () => loadFonts(true));
-$("#fontSearchInput").addEventListener("input", event => { state.fontSearch = event.target.value; renderFonts(); });
-$("#refreshAssets").addEventListener("click", () => loadAssets(true));
+$("#themeCategoryFilter").addEventListener("change", event => { state.themeCategory = event.target.value; libraryPage.theme = 1; renderThemes(); });
+$("#themeAuthorFilter").addEventListener("change", event => { state.themeAuthor = event.target.value || "all"; libraryPage.theme = 1; renderThemes(); });
+for (const [kind, {render}] of Object.entries(libraryKinds)) {
+  const input = $(`#${kind}SearchInput`);
+  const clear = $(`[data-clear-search="${input.id}"]`);
+  const sort = $(`[data-library-sort="${kind}"]`);
+  $(`[data-recent-only="${kind}"]`).addEventListener("change", event => { recentOnly[kind] = event.target.checked; libraryPage[kind] = 1; render(); });
+  const capital = kind[0].toUpperCase() + kind.slice(1);
+  const refreshId = kind === "asset" ? "refreshAssets" : `refresh${capital}s`;
+  $(`#${refreshId}`).addEventListener("click", () => refreshCatalog(kind));
+  let searchTimer;
+  input.addEventListener("input", () => {
+    state[kind + "Search"] = input.value;
+    clear.hidden = !input.value;
+    libraryPage[kind] = 1;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(render, 120);
+  });
+  clear.addEventListener("click", () => {
+    input.value = "";
+    input.dispatchEvent(new Event("input"));
+    input.focus();
+  });
+  sort.addEventListener("change", () => {
+    librarySort[kind] = sort.value;
+    libraryPage[kind] = 1;
+    render();
+  });
+  for (const [direction, delta] of [["Prev", -1], ["Next", 1]]) {
+    $(`#${kind}${direction}Page`).addEventListener("click", () => {
+      libraryPage[kind] += delta;
+      render();
+      input.closest(".view").querySelector("h1").focus({preventScroll: true});
+      window.scrollTo(0, 0);
+    });
+  }
+  $(`[data-clear-selection="${kind}"]`).addEventListener("click", () => {
+    selections[kind].clear();
+    updateBulkControls();
+  });
+  $(`[data-library-empty="${kind}"]`).addEventListener("click", () => {
+    if (!state[kind + "s"].length) { setView("import"); return; }
+    recentOnly[kind] = false; $(`[data-recent-only="${kind}"]`).checked = false;
+    if (kind === "theme") {
+      state.themeAuthor = state.themeCategory = "all";
+    } else {
+      state[kind + "Filter"] = "all";
+    }
+    input.value = "";
+    input.dispatchEvent(new Event("input"));
+    input.focus();
+  });
+}
+document.addEventListener("keydown", event => {
+  if (event.defaultPrevented || event.isComposing || $("dialog[open], #modalBackdrop:not([hidden]), #mobileMore:not([hidden])")) return;
+  const shortcut = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k";
+  const editing = event.target instanceof Element && event.target.closest("input, textarea, select, [contenteditable]");
+  if (!shortcut && (editing || event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey)) return;
+  const search = $("[data-view-panel]:not([hidden]) .library-search input");
+  if (!search) return;
+  event.preventDefault();
+  search.focus();
+});
 $("#selectAllReview").addEventListener("change", event => toggleAll("review", event.target.checked));
 $("#selectAllThemes").addEventListener("change", event => toggleAll("theme", event.target.checked));
 $("#selectAllFonts").addEventListener("change", event => toggleAll("font", event.target.checked));
@@ -4935,7 +5335,13 @@ $$("[data-import-kind]").forEach(button => {
 });
 document.addEventListener("click", event => {
   const fontFilter = event.target.closest("[data-font-filter]");
-  if (fontFilter && !fontFilter.disabled) { state.fontFilter = fontFilter.dataset.fontFilter || "all"; renderFonts(); return; }
+  if (fontFilter && !fontFilter.disabled) {
+    state.fontFilter = fontFilter.dataset.fontFilter || "all";
+    libraryPage.font = 1;
+    renderFonts();
+    $$('.font-filter-chip').find(button => button.dataset.fontFilter === state.fontFilter)?.focus({preventScroll: true});
+    return;
+  }
   const openView = event.target.closest("[data-open-view]");
   if (openView) setView(openView.dataset.openView);
   const retry = event.target.closest("[data-retry-job]");
@@ -4951,8 +5357,7 @@ document.addEventListener("submit", event => {
   const recordForm = event.target.closest("[data-record-form]");
   if (recordForm) { event.preventDefault(); saveRecordClassification(recordForm); }
 });
-$$('[data-asset-filter]').forEach(button => button.addEventListener("click", () => { state.assetFilter = button.dataset.assetFilter || "all"; renderAssets(); }));
-$("#assetSearchInput").addEventListener("input", event => { state.assetSearch = event.target.value; renderAssets(); });
+$$('[data-asset-filter]').forEach(button => button.addEventListener("click", () => { state.assetFilter = button.dataset.assetFilter || "all"; libraryPage.asset = 1; renderAssets(); }));
 $("#addAssetButton").addEventListener("click", () => { setView("import"); });
 $("#closePreviewDialog").addEventListener("click", () => $("#previewDialog").close());
 $("#closeThemeDialog").addEventListener("click", () => $("#themeDialog").close());
@@ -4981,10 +5386,31 @@ $("#stopPan123Qr").addEventListener("click", () => { stopPan123Qr("扫码已取�
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && pan123QrSession) {
     clearTimeout(pan123QrTimer);
-    pan123QrTimer = setTimeout(() => pollPan123Qr(pan123QrGeneration), 600);
+    pan123QrTimer = setTimeout(() => pan123QrSession?.browser ? pollPan123BrowserQr(pan123QrGeneration, pan123QrSession.id) : pollPan123Qr(pan123QrGeneration), 600);
   }
 });
 $("#probePan123").addEventListener("click", probePan123);
+$("#deviceTransferForm").addEventListener("submit", transferDeviceConfig);
+$("#testWriteAccess").addEventListener("click", async event => {
+  const button = event.currentTarget; button.disabled = true; writeAccess.at = 0;
+  try { await ensureWriteAccess(); } catch (error) { operationMessage($("#apiBaseStatus"), error.message, true); }
+  finally { button.disabled = false; }
+});
+for (const id of ["apiBaseInput", "syncTokenInput"]) $(`#${id}`).addEventListener("change", saveApiBaseSetting);
+for (const id of ["pan123BackupToken", "pan123BackupFolder"]) $(`#${id}`).addEventListener("change", () => {
+  try {
+    const token = normalizePan123Token($("#pan123BackupToken").value);
+    localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, token);
+    localStorage.setItem(PAN123_FOLDER_STORAGE_KEY, $("#pan123BackupFolder").value.trim() || "Red-Garden-Backup");
+    operationMessage($("#pan123BackupStatus"), "123 设置已自动保存在当前设备；可点测试连接验证会话。");
+  } catch { operationMessage($("#pan123BackupStatus"), "浏览器阻止保存设置，请允许网站存储。", true); }
+});
+for (const kind of Object.keys(libraryKinds)) {
+  $(`[data-bulk-tags="${kind}"]`).addEventListener("click", () => openBulkTags(kind));
+}
+$("#bulkTagForm").addEventListener("submit", applyBulkTags);
+$("#closeBulkTags").addEventListener("click", () => { if (!state.operation) $("#bulkTagDialog").close(); });
+$("#bulkTagDialog").addEventListener("cancel", event => { if (state.operation) event.preventDefault(); });
 $("#saveApiBase").addEventListener("click", saveApiBaseSetting);
 $("#clearApiBase").addEventListener("click", () => { $("#apiBaseInput").value = ""; saveApiBaseSetting(); });
 (() => {
@@ -5016,8 +5442,8 @@ $("#pan123WebLogin")?.addEventListener("click", webLoginPan123);
   const hint = $("#pan123WebLoginHint");
   if (!hint) return;
   hint.textContent = nativeAppBridge()?.caps?.pan123Login
-    ? "登录请求由本机浏览器直接连 123，不经过 Worker，不会被判成海外登录要验证码；在应用内登录页完成后会自动取回会话。"
-    : "扫码与账号密码都由本机浏览器直接连 123，不会被判成海外登录要验证码；也可在 123 网页复制会话 Token，回到本页点「从剪贴板粘贴」。";
+    ? "登录请求由本机浏览器直接连 123，不经过 Worker，会保留 123 返回的验证提示；在应用内登录页完成后会自动取回会话。"
+    : "扫码与账号密码都由本机浏览器直接连 123，会保留 123 返回的验证提示；也可在 123 网页复制会话 Token，回到本页点「从剪贴板粘贴」。";
 })();
 $("#listPan123Backup").addEventListener("click", () => { refreshPan123BackupList(); });
 $("#verifyPan123Write").addEventListener("click", () => { verifyPan123Write(); });
@@ -5035,6 +5461,20 @@ $$("#themeDensity .density-option").forEach(button => button.addEventListener("c
 restoreThemeDensity();
 const initialView = location.hash.slice(1);
 hydrateLocalSnapshots();
+try {
+  const saved = JSON.parse(localStorage.getItem("reeden-browse-v1") || "null");
+  if (saved) {
+    for (const kind of Object.keys(libraryKinds)) {
+      libraryPage[kind] = Math.max(1, Number(saved.pages?.[kind]) || 1);
+      if (["added", "oldest", "recent", "name", "size"].includes(saved.sort?.[kind])) librarySort[kind] = saved.sort[kind];
+      state[kind + "Search"] = String(saved[kind + "Search"] || "");
+      $(`#${kind}SearchInput`).value = state[kind + "Search"];
+      $(`[data-clear-search="${kind}SearchInput"]`).hidden = !state[kind + "Search"];
+      $(`[data-library-sort="${kind}"]`).value = librarySort[kind];
+    }
+    for (const key of ["themeAuthor", "themeCategory", "fontFilter", "assetFilter"]) state[key] = String(saved[key] || "all");
+  }
+} catch {}
 updateRuntimeMode();
 try {
   const options = JSON.parse(sessionStorage.getItem("reeden-compression-options") || "null");
@@ -5065,11 +5505,11 @@ try {
   }
 } catch {}
 syncCompressionControls();
-setView(viewNames[initialView] ? initialView : "import");
+setView(initialView, true);
 // 分享进入时原生可能先于 app.js 执行完就回调，这里补一次主动拉取（按 id 去重）。
 setTimeout(() => { pullSharedFiles().catch(() => {}); }, 900);
 window.addEventListener("hashchange", () => {
   const view = location.hash.slice(1);
-  if (viewNames[view]) setView(view);
+  setView(view, true);
 });
 loadLibraryAfterConnection().then(() => autoResumeStagedQueue().catch(() => {})).catch(() => {});

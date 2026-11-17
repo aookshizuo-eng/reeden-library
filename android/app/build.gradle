@@ -19,7 +19,7 @@ android {
     // Origin as the desktop/mobile browser.
     sourceSets {
         main {
-            assets.srcDirs = ["../../site"]
+            assets.srcDirs = ["../../dist"]
         }
     }
 

@@ -1,0 +1,98 @@
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+:root {
+  --ground: #f6f5f1;
+  --surface: #fffefa;
+  --raised: #f2f1ec;
+  --active: #e8ebe1;
+  --border: #e4e3da;
+  --rule: #ecebe4;
+  --control: #969b8e;
+  --text: #222720;
+  --muted: #545c50;
+  --faint: #62695e;
+  --accent: #365b45;
+  --accent-deep: #254631;
+  --accent-soft: #e8f0e7;
+  --clay: var(--accent);
+  --sidebar-width: 210px;
+}
+
+html, body { background-image: none; }
+.sheet { margin: 0; border: 0; border-left: 1px solid var(--border); border-radius: 0; overflow: visible; }
+.sidebar { position: sticky; top: 0; align-self: start; min-height: 100svh; padding-inline: 12px; }
+.brand-glyph { background: transparent; color: var(--accent); }
+.brand-mark { font-size: 16px; gap: 5px; }
+.sidebar-note { margin-left: 43px; letter-spacing: 0; }
+.nav-item { border: 0; min-height: 40px; }
+.nav-item.is-active { padding-left: 12px; background: var(--active); }
+.nav-item.is-active svg { color: var(--accent); }
+.nav-item[data-view="import"] { margin-top: 12px; }
+.topbar { position: sticky; top: 0; z-index: 15; flex-shrink: 0; }
+.top-actions > button { min-height: 36px; height: 36px; }
+.crumbs { font-family: var(--font); letter-spacing: 0; }
+.view { width: 100%; max-width: 1500px; margin-inline: auto; }
+.catalog-title { align-items: baseline; padding-bottom: 0; border: 0; margin-bottom: 20px; }
+.catalog-title .lede { margin-bottom: 0; }
+.catalog-title .title-meta { white-space: nowrap; }
+[data-slot="button"] { @apply text-sm font-medium; }
+[data-slot="button"][data-variant="default"] { color: #fffefa; }
+[data-slot="button"][data-variant="ghost"] { color: var(--muted); }
+[data-slot="input"] { @apply text-sm; }
+.catalog-title h1:focus { outline: none; }
+.library-search { max-width: 680px; }
+.library-search input::-webkit-search-cancel-button { display: none; }
+.library-search:has(input:not(:placeholder-shown)) .search-key { display: none; }
+.library-tools {
+  @apply mb-3 mt-3 flex flex-wrap items-center gap-2;
+}
+.catalog-select {
+  @apply min-h-10 min-w-0 max-w-44 rounded-md border px-2.5 text-sm;
+  border-color: var(--border);
+  background-color: var(--surface);
+}
+.library-tools .font-filters, .library-tools .asset-filters { margin: 0; }
+.catalog-status, .startup-error {
+  @apply mb-3 rounded-md border px-3 py-2 text-sm;
+  border-color: var(--border);
+  background: var(--raised);
+  color: var(--muted);
+}
+.startup-error { margin: 12px var(--pad); }
+.catalog-status.is-error, .startup-error { color: var(--danger); }
+:is(.library-area, .font-area, .asset-area) .empty-state { min-height: 170px; padding: 28px 16px; }
+.empty-state button { margin-top: 14px; }
+.catalog-bulk:not(.has-selection) > :is(button, .bundle-toggle, .selection-count, .bulk-hint) { display: none; }
+.catalog-bulk:not(.has-selection) { background: transparent; border-color: transparent; padding-block: 0; padding-inline: 0; margin-bottom: 8px; }
+.catalog-bulk.has-selection { position: sticky; top: 65px; z-index: 9; }
+.catalog-bulk [data-clear-selection] { min-height: 30px; height: 30px; }
+.theme-card { border: 1px solid var(--border); border-radius: var(--radius-card); }
+.theme-card .theme-info { padding: 9px 11px; }
+.theme-card .theme-preview .preview-open, .theme-card .theme-preview .preview-empty { border-radius: var(--radius-card) var(--radius-card) 0 0; }
+.theme-list.is-list .theme-card { padding: 8px; }
+.theme-list.is-list .theme-card .theme-preview .preview-open, .theme-list.is-list .theme-card .theme-preview .preview-empty { border-radius: 6px; }
+@media (max-width: 680px) {
+  .sheet { border: 0; }
+  .topbar { position: fixed; }
+  .catalog-title { display: flex; align-items: baseline; margin-bottom: 12px; gap: 8px; }
+  .catalog-title .title-meta { position: static; margin: 0; }
+  .library-tools { gap: 6px; }
+  .catalog-select { max-width: 135px; }
+  .catalog-bulk:not(.has-selection) { display: flex; }
+  .catalog-bulk.has-selection { top: 56px; }
+  .theme-card .theme-info { padding: 7px; }
+  .search-key { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .theme-card img { transition: none; }
+}
+
+
+.cache-info { color: var(--muted); font-size: 12px; margin: 0 0 10px; }
+#deviceTransferForm, #bulkTagForm { display: grid; gap: 14px; }
+#bulkTagForm label { display: grid; gap: 6px; }
+
+.arrival-label { display: inline-block; color: var(--accent); font-size: 11px; margin-bottom: 3px; }
+.recent-only { font-size: 12px; }

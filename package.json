@@ -1,0 +1,34 @@
+{
+  "name": "reeden-library",
+  "version": "1.0.0",
+  "description": "这是手机和电脑共用的静态前端。它不包含 R2 密钥、123 会话或主题文件。",
+  "scripts": {
+    "dev": "vite --port 8765",
+    "build": "vite build",
+    "preview": "vite preview --port 8765",
+    "verify": "node scripts/verify-pages.mjs",
+    "build:pages": "node scripts/sync-pages.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aookshizuo-eng/reeden-library.git"
+  },
+  "bugs": {
+    "url": "https://github.com/aookshizuo-eng/reeden-library/issues"
+  },
+  "homepage": "https://github.com/aookshizuo-eng/reeden-library#readme",
+  "dependencies": {
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.74.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tailwind-merge": "^3.7.0"
+  },
+  "private": true,
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.5",
+    "tailwindcss": "^4.3.5",
+    "vite": "^6.4.6"
+  }
+}

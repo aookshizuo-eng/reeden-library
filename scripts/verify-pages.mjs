@@ -3,11 +3,11 @@ import path from "node:path";
 import {fileURLToPath} from "node:url";
 import {spawnSync} from "node:child_process";
 import crypto from "node:crypto";
+import {staticFiles} from "../vite.config.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const source = path.join(root, "site");
-const target = path.join(root, "pages");
-const staticFiles = ["index.html", "app.js", "styles.css", "free_codec.js", "free_codec_worker.js", "FREE_CODEC.md", "opentype.min.js", "omggif.js", "qrcode.js"];
+const target = path.join(root, process.argv.includes("--cloudflare") ? "dist-pages" : "dist");
 const errors = [];
 const hash = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
 
@@ -16,28 +16,44 @@ for (const file of staticFiles) {
   const targetPath = path.join(target, file);
   try {
     const [sourceBytes, targetBytes] = await Promise.all([readFile(sourcePath), readFile(targetPath)]);
-    if (hash(sourceBytes) !== hash(targetBytes)) errors.push(`site/${file} 与 pages/${file} 不一致`);
+    if (hash(sourceBytes) !== hash(targetBytes)) errors.push(`site/${file} 与 ${path.basename(target)}/${file} 不一致`);
     // Deploying straight from a Windows working tree used to publish CRLF
     // bytes while GitHub Pages published LF from the Git blob. Both builds
     // worked, but the two production front ends were not byte-identical.
     if (/\.[a-z]+$/i.test(file) && sourceBytes.includes(13)) errors.push(`site/${file} 含 CRLF 行尾；请先统一为 LF 再部署`);
-    if (/\.[a-z]+$/i.test(file) && targetBytes.includes(13)) errors.push(`pages/${file} 含 CRLF 行尾；请先统一为 LF 再部署`);
+    if (/\.[a-z]+$/i.test(file) && targetBytes.includes(13)) errors.push(`${path.basename(target)}/${file} 含 CRLF 行尾；请先统一为 LF 再部署`);
   } catch (error) {
     errors.push(`${file} 无法读取：${error.message}`);
   }
 }
 
 const appPath = path.join(source, "app.js");
-const [app, html, css] = await Promise.all([
+const [app, html, css, ui, entry, emittedHtml] = await Promise.all([
   readFile(appPath, "utf8"),
-  readFile(path.join(source, "index.html"), "utf8"),
+  readFile(path.join(source, "shell.jsx"), "utf8"),
   readFile(path.join(source, "styles.css"), "utf8"),
+  readFile(path.join(source, "ui.jsx"), "utf8"),
+  readFile(path.join(source, "main.jsx"), "utf8"),
+  readFile(path.join(target, "index.html"), "utf8"),
+
 ]);
+const entryAssets = [...emittedHtml.matchAll(/(?:src|href)="\.\/(assets\/[^"]+)"/g)].map(match => match[1]);
+if (!entryAssets.some(file => file.endsWith(".js")) || !entryAssets.some(file => file.endsWith(".css"))) {
+  errors.push("构建产物缺少相对路径的 React 或 CSS 入口");
+}
+await Promise.all(entryAssets.map(file => readFile(path.join(target, file))));
+if (process.argv.includes("--cloudflare")) {
+  for (const file of ["_worker.js", "worker-api.js"]) {
+    const [sourceBytes, outputBytes] = await Promise.all([readFile(path.join(root, "pages", file)), readFile(path.join(target, file))]);
+    if (!sourceBytes.equals(outputBytes)) errors.push(`Cloudflare 构建产物的 ${file} 不是当前版本`);
+  }
+}
+if (!ui.includes('id={`${kind}Pagination`}') || !html.includes('<LibraryPager kind="theme" />')) errors.push("主题分页组件缺失");
 for (const marker of ["function fontPreviewMarkup", "function loadFontPreviewFace", "function recoverFontPreviewImage", "new FontFace(", "font-preview-frame", "font-preview-fallback", "data-font-preview-id", "data-font-id", "function renderFonts",
-  "function analyzeFontGlyphs", "function inkProfile", "window.opentype", "glyph_method", "function downloadSelectedRecords", "function downloadRecordsSeparately", "function fetchDownloadableBytes", "function downloadUrl", "download=1", "name=${encodeURIComponent(safe)}", "navigator.clipboard?.writeText", "已填入并尝试复制", "function pastePan123Token", "navigator.clipboard.readText", "data-bundle", "function renderThemeAuthorFilter", "function compressPrivateRedWithDirectory", "function queueFilesForLater", "function resumeStagedJobs", "function backupOriginalTo123", "function runCodecTask", "function loadLibraryAfterConnection", "function fetchWithReadTimeout", "API_READ_TIMEOUT_MS", "已连接共享库", "function verifyPan123Backup", "换电脑登不上的原因", "扫码会退回 Worker 海外出口", "/api/backup/123/verify", "已连接 123 云盘", "function refreshPan123BackupList", "function verifyPan123Write", "/api/backup/123/list", "123 已备份", "encodeURIComponent(config.folder)", "encodeURIComponent(fileName)", "已用 ${seconds} 秒", "function autoResumeStagedQueue", "reeden-auto-resume-queue", "auto_commit", 'fetch(apiUrl(key), {method: "DELETE"', "function compressionEstimate", "COMPRESSION_PRESET_LABELS", "compressionCustomFields", "customCompressionFactors", "compressionQualityValue", "function offerLocalCleanup", "function performLocalCleanup", "function cleanupTargets", "function nativeFileBridge", "function pickFolderWithAccess", "pickedFileSources", "RedGardenNative", "showDirectoryPicker", "localCleanupEnabled", "function privatePlainIdentity", "function jsonObjectAt", "function indexOfBytes", "function applyThemeDensity", "function restoreThemeDensity", "themeDensityDefault", "reeden-theme-density", "function patchThemeCategories", "function openBulkCategoryDialog", "function applyBulkThemeCategories", "function syncTrackedJobProgress", "trackedJobIds.add(result.job.id)", "const SCREEN_W = 462", "const carouselBox", 'mode === "blur"', "window.addEventListener(\"focus\", onBack", "function themeModeIndex", "function deleteJobRecord", "data-delete-job", "function whenStorageReady", "function pickFilesWithAccess", "showOpenFilePicker", "function storageSettingsPending", "function hydrateLocalSnapshots", "LIBRARY_CACHE_KEY", "function pan123DirectRequest", "THEME_PAGE_SIZE", "function hueColorFamily", "function themeToneCategories", "function saveThemeIdentity", "theme-identity-form", "auto_categories"]) {
+  "function analyzeFontGlyphs", "function inkProfile", "window.opentype", "glyph_method", "function downloadSelectedRecords", "function downloadRecordsSeparately", "function fetchDownloadableBytes", "function downloadUrl", "download=1", "name=${encodeURIComponent(safe)}", "function pastePan123Token", "navigator.clipboard.readText", "data-bundle", "function renderThemeAuthorFilter", "function compressPrivateRedWithDirectory", "function queueFilesForLater", "function resumeStagedJobs", "function backupOriginalTo123", "function runCodecTask", "function loadLibraryAfterConnection", "function fetchWithReadTimeout", "API_READ_TIMEOUT_MS", "已连接共享库", "function verifyPan123Backup", "换电脑登不上的原因", "扫码会退回 Worker 海外出口", "/api/backup/123/verify", "已连接 123 云盘", "function refreshPan123BackupList", "function verifyPan123Write", "/api/backup/123/list", "123 已备份", "encodeURIComponent(config.folder)", "encodeURIComponent(fileName)", "已用 ${seconds} 秒", "function autoResumeStagedQueue", "reeden-auto-resume-queue", "auto_commit", 'fetch(apiUrl(key), {method: "DELETE"', "function compressionEstimate", "COMPRESSION_PRESET_LABELS", "compressionCustomFields", "customCompressionFactors", "compressionQualityValue", "function offerLocalCleanup", "function performLocalCleanup", "function cleanupTargets", "function nativeFileBridge", "function pickFolderWithAccess", "pickedFileSources", "RedGardenNative", "showDirectoryPicker", "localCleanupEnabled", "function privatePlainIdentity", "function jsonObjectAt", "function indexOfBytes", "function applyThemeDensity", "function restoreThemeDensity", "themeDensityDefault", "reeden-theme-density", "function patchThemeCategories", "function openBulkCategoryDialog", "function applyBulkThemeCategories", "function syncTrackedJobProgress", "trackedJobIds.add(result.job.id)", "const SCREEN_W = 462", "const carouselBox", 'mode === "blur"', "window.addEventListener(\"focus\", onBack", "function themeModeIndex", "function deleteJobRecord", "data-delete-job", "function whenStorageReady", "function pickFilesWithAccess", "showOpenFilePicker", "function storageSettingsPending", "function hydrateLocalSnapshots", "LIBRARY_CACHE_KEY", "function pan123DirectRequest", "THEME_PAGE_SIZE", "function hueColorFamily", "function themeToneCategories", "function saveThemeIdentity", "theme-identity-form", "auto_categories", "restoreDeviceCache", "updateCachedRecord", "ensureWriteAccess", "transferDeviceConfig", "expandImportArchives", "applyBulkTags", "record_sha256"]) {
   if (!app.includes(marker)) errors.push(`前端缺少关键回归标记：${marker}`);
 }
-for (const id of ["fontList", "fontCount", "fontEmpty", "themeAuthorFilter", "downloadSelectedTheme", "downloadSelectedFont", "downloadSelectedAsset", "queueForLater", "resumeStagedJobs", "pan123BackupToken", "verifyPan123Backup", "listPan123Backup", "verifyPan123Write", "pan123BackupList", "autoResumeQueue", "compressionPresetGroup", "compressionCustomFields", "compressionQuality", "compressionMaxEdge", "compressionQualityDown", "compressionQualityUp", "compressionQualityValue", "compressionGifColors", "compressionReader", "compressionIconLossless", "reviewProgress", "reviewProgressTitle", "reviewProgressCount", "reviewProgressBar", "reviewProgressStage", "reviewProgressCurrent", "cleanupDialog", "cleanupList", "cleanupConfirm", "cleanupCancel", "cleanupSelectAll", "cleanupSummary", "localCleanupEnabled", "localCleanupHint", "closeCleanupDialog", "themeDensity", "themeSearchInput", "themeAuthorFilter", "themeDialog", "themeDialogBody", "closeThemeDialog", "pan123WebLogin", "pan123WebLoginHint", "pan123QuickLogin", "pan123QuickLoginButton", "pan123PasteToken", "mobileMore", "moreRuntimeMode", "moreJobCount", "themeCategoryFilter", "pendingList", "bulkCategoryTheme", "bulkCategoryDialog", "bulkCategoryPicks", "bulkCategoryInput", "bulkCategoryApply", "bulkCategoryAdd", "closeBulkCategory", "bulkCategoryCancel", "themePagination", "themePrevPage", "themeNextPage", "themePageInfo"]) {
+for (const id of ["fontList", "fontCount", "fontEmpty", "themeAuthorFilter", "downloadSelectedTheme", "downloadSelectedFont", "downloadSelectedAsset", "queueForLater", "resumeStagedJobs", "pan123BackupToken", "verifyPan123Backup", "listPan123Backup", "verifyPan123Write", "pan123BackupList", "autoResumeQueue", "compressionPresetGroup", "compressionCustomFields", "compressionQuality", "compressionMaxEdge", "compressionQualityDown", "compressionQualityUp", "compressionQualityValue", "compressionGifColors", "compressionReader", "compressionIconLossless", "reviewProgress", "reviewProgressTitle", "reviewProgressCount", "reviewProgressBar", "reviewProgressStage", "reviewProgressCurrent", "cleanupDialog", "cleanupList", "cleanupConfirm", "cleanupCancel", "cleanupSelectAll", "cleanupSummary", "localCleanupEnabled", "localCleanupHint", "closeCleanupDialog", "themeDensity", "themeSearchInput", "themeAuthorFilter", "themeDialog", "themeDialogBody", "closeThemeDialog", "pan123WebLogin", "pan123WebLoginHint", "pan123QuickLogin", "pan123QuickLoginButton", "pan123PasteToken", "mobileMore", "moreRuntimeMode", "moreJobCount", "themeCategoryFilter", "pendingList", "bulkCategoryTheme", "bulkCategoryDialog", "bulkCategoryPicks", "bulkCategoryInput", "bulkCategoryApply", "bulkCategoryAdd", "closeBulkCategory", "bulkCategoryCancel"]) {
   if (!html.includes(`id=\"${id}\"`)) errors.push(`页面结构回归检查失败：缺少 #${id}`);
 }
 for (const marker of [".pagination {", ".theme-card .item-heading { min-height: 0; }", ".font-preview-image {"]) {
@@ -55,7 +71,7 @@ for (const script of ["scripts/remote-import.mjs"]) {
 // 压缩引用映射的规则必须三处一致（浏览器 codec / 客户端映射 / Worker 映射）。
 // 这套断言曾抓到「压缩后主题丢失书架背景、阅读背景和轮播图」的真凶，所以它
 // 必须跟着每次部署一起跑，不能只躺在仓库里当一次性脚本。
-for (const script of ["scripts/test-compress-references.mjs"]) {
+for (const script of ["scripts/test-compress-references.mjs", "scripts/test-library-maintenance.mjs"]) {
   const result = spawnSync(process.execPath, [path.join(root, script)], {encoding: "utf8"});
   if (result.status !== 0) errors.push(`${script} 回归测试失败：\n${(result.stdout || result.stderr || "").trim()}`);
 }
@@ -106,8 +122,8 @@ if (/\.sidebar\.is-open \{ display: flex; \}/.test(css)) errors.push("手机端�
 for (const marker of ["function webLoginPan123", "function loginPan123Quick", "function acceptPan123Tokens", "function nativeAppBridge", "openPan123Login", "onRedGardenPan123Login", "toggleMobileMore", "function ingestSharedFiles", "onRedGardenSharedFiles", "__shared__", "releaseSharedFiles", "function mapLargePrivateConfigs", "function mapPrivateRefsClient", "PRIVATE_CONFIG_INLINE_LIMIT", "mapped: true", "function themeToneCategory", "function saveThemeCategories", "themeCategoryFilter", "function stagePendingFiles", "function commitSelection", "pendingList"]) {
   if (!app.includes(marker)) errors.push(`site/app.js 缺少新交互实现：${marker}`);
 }
-for (const marker of ['class="mobile-tabs"', 'data-tab="themes"', 'id="mobileMore"', 'id="pan123WebLogin"', 'placeholder="登录成功后自动填入，也可粘贴会话 Token"']) {
-  if (!html.includes(marker)) errors.push(`site/index.html 缺少手机导航或 123 登录入口：${marker}`);
+for (const marker of ['className="mobile-tabs"', 'data-tab="themes"', 'id="mobileMore"', 'id="pan123WebLogin"', 'placeholder="登录成功后自动填入，也可粘贴会话 Token"']) {
+  if (!html.includes(marker)) errors.push(`site/shell.jsx 缺少手机导航或 123 登录入口：${marker}`);
 }
 // APK 多选：WebView 不可靠地把多个 content URI 交给页面（国产 ROM 只给第一个），
 // 所以多选必须自己复制进 cache 再走 /__shared__ 通道。别退回 parseResult 单来源解析。
@@ -145,7 +161,7 @@ for (const marker of ["codec", "gifColors", "compressReader", "target.codec === 
 for (const marker of ["customCompressionFactors", "compressionQualityValue", "gif_colors", "compress_reader"]) {
   if (!app.includes(marker)) errors.push(`site/app.js 缺少自选压缩面板逻辑：${marker}`);
 }
-if (!html.includes("omggif.js")) errors.push("site/index.html 未加载 omggif.js，GIF 无法重新量化");
+if (!app.includes('loadReedenVendor?.("omggif.js")')) errors.push("React 入口未加载 omggif.js，GIF 无法重新量化");
 if (!(await readFile(path.join(source, "omggif.js"), "utf8")).includes("function GifWriter")) errors.push("site/omggif.js 缺失或被截断");
 if (/convertToBlob\s*&&\s*type === mime/.test(codecSource)) errors.push("site/free_codec.js 又退回同格式编码，PNG/JPEG 不会转 WebP，压缩率会掉回三成");
 
@@ -171,9 +187,9 @@ for (const marker of ["PAN123_SIGN_IN_URL", "PAN123_QR_GENERATE_URL", "PAN123_QR
   if (!app.includes(marker)) errors.push(`site/app.js 缺少 123 浏览器直连登录实现：${marker}`);
 }
 if (!app.includes('"https://login.123pan.com/api/user/sign_in"') || !app.includes('"https://user.123pan.cn/api/user/qr-code/generate"')) errors.push("site/app.js 的 123 直连接口地址不对");
-if (!html.includes('src="./qrcode.js"')) errors.push("site/index.html 未加载 qrcode.js，浏览器直连扫码画不出二维码");
-if (!html.includes('id="pan123QrHost"')) errors.push("site/index.html 缺少 #pan123QrHost，扫码二维码没有落点");
-if (!html.includes('id="pan123ProbeBlock"')) errors.push("site/index.html 缺少 #pan123ProbeBlock");
+if (!app.includes('loadReedenVendor?.("qrcode.js")')) errors.push("React 入口未加载 qrcode.js，浏览器直连扫码画不出二维码");
+if (!html.includes('id="pan123QrHost"')) errors.push("site/shell.jsx 缺少 #pan123QrHost，扫码二维码没有落点");
+if (!html.includes('id="pan123ProbeBlock"')) errors.push("site/shell.jsx 缺少 #pan123ProbeBlock");
 if (!app.includes('$("#pan123ProbeBlock").hidden = true;')) errors.push("site/app.js 未在浏览器同步模式下隐藏后台上传探针");
 if (!(await readFile(path.join(source, "qrcode.js"), "utf8")).includes("var qrcode = function()")) errors.push("site/qrcode.js 不是预期的 vendor（qrcode-generator），扫码会画不出二维码");
 
@@ -182,15 +198,26 @@ const liveUrl = (urlArg ? urlArg.slice("--url=".length) : process.env.REEDEN_CHE
 // Marker checks only prove that some preview-enabled build is live. Use this
 // flag after a UI change to prove the deployed file is exactly this checkout.
 const requireCurrent = process.argv.includes("--require-current");
+const previewLimitArg = process.argv.find(value => value.startsWith("--preview-limit="));
+const previewLimit = previewLimitArg ? Number(previewLimitArg.split("=")[1]) : Infinity;
+if (!(previewLimit >= 0)) throw new Error("--preview-limit 必须是非负数");
 if (liveUrl) {
   const get = async route => {
-    const response = await fetch(`${liveUrl}${route}`);
+    const response = await fetch(`${liveUrl}${route}`, {signal: AbortSignal.timeout(25000)});
     if (!response.ok) throw new Error(`${route} 返回 HTTP ${response.status}`);
     return response;
   };
   try {
     const health = await (await get("/healthz")).json();
     if (health.ok !== true) errors.push("线上 /healthz 没有返回 {ok:true}");
+    if (requireCurrent) {
+      const liveHtml = Buffer.from(await (await get("/")).arrayBuffer());
+      if (!liveHtml.equals(Buffer.from(emittedHtml))) errors.push("线上首页与当前 Vite 构建不一致");
+      for (const file of entryAssets) {
+        const liveAsset = Buffer.from(await (await get(`/${file}`)).arrayBuffer());
+        if (!liveAsset.equals(await readFile(path.join(target, file)))) errors.push(`线上资源 ${file} 与本地不一致`);
+      }
+    }
     const liveAppBytes = Buffer.from(await (await get("/app.js")).arrayBuffer());
     const liveApp = liveAppBytes.toString("utf8");
     if (!liveApp.includes("function fontPreviewMarkup") || !liveApp.includes("font-preview-frame")) errors.push("线上 app.js 仍不是当前字体预览版本");
@@ -203,34 +230,39 @@ if (liveUrl) {
       // 逐个检查预览图并对网络错误重试：一次并发 130 个请求会被对端断连接，
       // 随机报 fetch failed，那是网络抖动不是线上坏了。
       const previewChecks = [];
+      let checkedPreviews = 0;
       for (const font of fonts) {
         const source = font.preview_url || font.view_url || font.url;
         if (!source) { previewChecks.push(`字体 ${font.id || font.file_name || "未命名"} 没有预览图片或字体文件地址`); continue; }
         if (!font.preview_url) continue;
+        if (checkedPreviews >= previewLimit) continue;
+        checkedPreviews++;
         let failure = null;
-        for (let attempt = 0; attempt < 3 && !failure; attempt++) {
+        for (let attempt = 0; attempt < 2; attempt++) {
           try {
-            const preview = await fetch(new URL(font.preview_url, `${liveUrl}/`));
+            const preview = await fetch(new URL(font.preview_url, `${liveUrl}/`), {signal: AbortSignal.timeout(25000)});
             if (preview.ok) { failure = null; break; }
             failure = `字体 ${font.id || font.file_name || "未命名"} 的预览返回 HTTP ${preview.status}`;
             if (preview.status < 500) break;
           } catch (error) {
             failure = `字体 ${font.id || font.file_name || "未命名"} 的预览检查失败：${error.message}`;
           }
-          await new Promise(resolve => setTimeout(resolve, 400 * (attempt + 1)));
+          if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 400));
         }
         if (failure) previewChecks.push(failure);
       }
       errors.push(...previewChecks.filter(Boolean));
-      console.log(`live check: ${records.length} records, ${fonts.length} fonts, ${fonts.filter(item => item.preview_url).length} preview images`);
+      console.log(`live check: ${records.length} records, ${fonts.length} fonts, ${checkedPreviews} preview images checked`);
       // Check the streamed ZIP endpoint without pulling any object bytes.
       const target = fonts[0] || records.find(item => ["theme", "font", "asset"].includes(item?.kind));
-      if (target) {
+      if (target && !process.argv.includes("--skip-download-probe")) {
         const probe = await fetch(`${liveUrl}/api/download?kind=${encodeURIComponent(target.kind)}&ids=${encodeURIComponent(String(target.id))}&probe=1`);
         const result = probe.ok ? await probe.json() : null;
         if (!result?.ok) errors.push(`线上 /api/download 流式打包探测失败：HTTP ${probe.status}`);
         else console.log(`live check: /api/download probe ok (${target.kind}, ${result.count} files)`);
       }
+      const session = await fetch(`${liveUrl}/api/session`, {headers: {Origin: liveUrl}, signal: AbortSignal.timeout(25000)});
+      if (![200, 401].includes(session.status)) errors.push(`线上 /api/session 权限检查失败：HTTP ${session.status}`);
       // Both read-only 123 checks must exist and stay auth-gated.
       for (const route of ["/api/backup/123/verify", "/api/backup/123/list"]) {
         const probe = await fetch(`${liveUrl}${route}`, {method: "POST", headers: {Origin: liveUrl, "X-Pan123-Token": ""}});

@@ -6,7 +6,8 @@ JDK="$TC/jdk-17.0.2"
 BT="$TC/android-15"
 PLATFORM="$TC/android-35/android.jar"
 SRC="$ROOT/android/app/src/main"
-SITE="$ROOT/site"
+SITE="$ROOT/dist"
+npm --prefix "$ROOT" run build
 OUT="$ROOT/android/build"
 export JAVA_HOME="$JDK"
 export PATH="$JDK/bin:$PATH"
@@ -17,7 +18,7 @@ mkdir -p "$OUT/res" "$OUT/gen" "$OUT/classes" "$OUT/dex"
 echo "1/6 aapt2 compile"
 "$BT/aapt2.exe" compile --dir "$SRC/res" -o "$OUT/res/resources.zip"
 
-echo "2/6 aapt2 link (assets from site/)"
+echo "2/6 aapt2 link (assets from dist/)"
 "$BT/aapt2.exe" link \
   -o "$OUT/base.apk" \
   -I "$PLATFORM" \

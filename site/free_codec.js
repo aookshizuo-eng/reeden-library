@@ -147,10 +147,19 @@
     if (hasSignature(bytes.slice(0, 100000), [0x6e, 0x70, 0x54, 0x63])) return "九宫格资源保留原样";
     return "";
   }
-  async function inflateRaw(bytes) {
+  async function inflateRaw(bytes, maxBytes = Infinity) {
     if (typeof root.DecompressionStream !== "function") throw new FreeCodecError("当前浏览器没有 deflate 解压能力，无法读取 RED ZIP", "zip_decompress_unavailable");
     const stream = new Blob([bytes]).stream().pipeThrough(new root.DecompressionStream("deflate-raw"));
-    return new Uint8Array(await new Response(stream).arrayBuffer());
+    const reader = stream.getReader(), chunks = [];
+    let total = 0;
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      total += value.length;
+      if (total > maxBytes) { await reader.cancel(); throw new FreeCodecError("ZIP 解压内容超过声明大小", "zip_size_limit"); }
+      chunks.push(value);
+    }
+    return concat(chunks);
   }
   async function deflateRaw(bytes) {
     if (typeof root.CompressionStream !== "function") throw new FreeCodecError("当前浏览器没有 deflate 压缩能力，请使用现代浏览器", "zip_compress_unavailable");
@@ -162,20 +171,23 @@
     for (let offset = zip.length - 22; offset >= lower; offset--) if (u32(zip, offset) === 0x06054b50) return offset;
     throw new FreeCodecError("RED ZIP 缺少中央目录", "zip_directory_missing");
   }
-  async function readZipEntries(redBytes) {
+  async function readZipEntries(redBytes, options = {}) {
     const raw = bytesOf(redBytes);
-    if (!startsWith(raw, RED_ZIP)) {
+    const standard = options.standardZip === true;
+    if (!standard && !startsWith(raw, RED_ZIP)) {
       if (startsWith(raw, RED_PRIVATE)) throw new FreeCodecError("加密 RED v2 当前浏览器版本只做结构识别，暂不重新封包", "private_red_unsupported");
       throw new FreeCodecError("不是 RED\\x04 普通 ZIP 封装", "red_header_invalid");
     }
     // Keep a view over the caller's buffer instead of copying the complete
     // package before reading its central directory. This matters for phone
     // browsers where a RED can be tens of megabytes.
-    const zip = raw.subarray(4), end = findEndOfCentralDirectory(zip);
+    const zip = standard ? raw : raw.subarray(4), end = findEndOfCentralDirectory(zip);
     const count = u16(zip, end + 10), cdSize = u32(zip, end + 12), cdOffset = u32(zip, end + 16);
     if (count === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) throw new FreeCodecError("ZIP64 RED 暂未支持", "zip64_unsupported");
     if (cdOffset + cdSize > zip.length) throw new FreeCodecError("RED ZIP 中央目录越界", "zip_directory_invalid");
     const entries = []; let cursor = cdOffset; const pending = [];
+    let totalSize = 0;
+    if (standard && count > 10000) throw new FreeCodecError("ZIP 条目超过 10000 个，请分批导入", "zip_size_limit");
     for (let index = 0; index < count; index++) {
       if (u32(zip, cursor) !== 0x02014b50) throw new FreeCodecError("RED ZIP 中央目录项无效", "zip_entry_invalid");
       const flags = u16(zip, cursor + 8), method = u16(zip, cursor + 10), crc = u32(zip, cursor + 16);
@@ -183,22 +195,29 @@
       const externalAttr = u32(zip, cursor + 38), localOffset = u32(zip, cursor + 42);
       if (flags & 1) throw new FreeCodecError("加密 ZIP 资源暂不支持", "zip_entry_encrypted");
       if ([compressedSize, size, localOffset].some(value => value === 0xffffffff)) throw new FreeCodecError("ZIP64 RED 暂未支持", "zip64_unsupported");
-      const nameBytes = zip.subarray(cursor + 46, cursor + 46 + nameLength), name = text(nameBytes);
-      if (!name || name.includes("\\") || name.split("/").some(part => part === "..")) throw new FreeCodecError("RED ZIP 资源路径不安全", "zip_path_invalid");
+      const nameBytes = zip.subarray(cursor + 46, cursor + 46 + nameLength);
+      let name;
+      try { name = new TextDecoder("utf-8", {fatal: true}).decode(nameBytes); }
+      catch { name = standard ? new TextDecoder("gb18030").decode(nameBytes) : text(nameBytes); }
+      if (!name || name.startsWith("/") || /^[a-z]:/i.test(name) || name.includes("\\") || name.includes("\0") || name.split("/").some(part => part === "..")) throw new FreeCodecError("RED ZIP 资源路径不安全", "zip_path_invalid");
       const comment = zip.subarray(cursor + 46 + nameLength + extraLength, cursor + 46 + nameLength + extraLength + commentLength);
       if (u32(zip, localOffset) !== 0x04034b50) throw new FreeCodecError("RED ZIP 本地项无效", "zip_local_invalid");
       const localNameLength = u16(zip, localOffset + 26), localExtraLength = u16(zip, localOffset + 28);
       const start = localOffset + 30 + localNameLength + localExtraLength, endData = start + compressedSize;
       if (endData > zip.length) throw new FreeCodecError("RED ZIP 资源越界", "zip_resource_invalid");
       const compressed = zip.subarray(start, endData);
-      pending.push({ name, compressed, method, size, crc, flags, externalAttr, comment });
+      if (!options.filter || options.filter(name)) {
+        totalSize += size;
+        if (standard && (pending.length >= 200 || size > 96 * 1024 * 1024 || totalSize > 512 * 1024 * 1024)) throw new FreeCodecError("ZIP 内待导入文件超过 200 个、单文件 96 MB 或总计 512 MB，请拆成小批次", "zip_size_limit");
+        pending.push({ name, compressed, method, size, crc, flags, externalAttr, comment });
+      }
       cursor += 46 + nameLength + extraLength + commentLength;
     }
     if (cursor !== cdOffset + cdSize) throw new FreeCodecError("RED ZIP 中央目录长度不一致", "zip_directory_length");
     const decoded = await mapConcurrent(pending, defaultConcurrency(4), async item => {
       let data;
       if (item.method === 0) data = item.compressed;
-      else if (item.method === 8) data = await inflateRaw(item.compressed);
+      else if (item.method === 8) data = await inflateRaw(item.compressed, item.size);
       else throw new FreeCodecError(`RED ZIP 压缩方法 ${item.method} 暂未支持`, "zip_method_unsupported");
       if (data.length !== item.size || crc32(data) !== item.crc) throw new FreeCodecError(`RED ZIP 资源校验失败：${item.name}`, "zip_crc_invalid");
       return { name: item.name, bytes: data, method: item.method, flags: item.flags, crc: item.crc, externalAttr: item.externalAttr, comment: item.comment };
