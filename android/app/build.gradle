@@ -2,6 +2,9 @@ plugins {
     id "com.android.application"
 }
 
+def releaseVersion = new Properties()
+rootProject.file("version.properties").withInputStream { releaseVersion.load(it) }
+
 android {
     namespace "xyz.aookshizuo.reedenlibrary"
     compileSdk 35
@@ -10,8 +13,8 @@ android {
         applicationId "xyz.aookshizuo.reedenlibrary"
         minSdk 23
         targetSdk 35
-        versionCode 3
-        versionName "1.1.1"
+        versionCode releaseVersion.VERSION_CODE.toInteger()
+        versionName releaseVersion.VERSION_NAME
     }
 
     // Bundle the same static site into the APK. The WebView still opens it

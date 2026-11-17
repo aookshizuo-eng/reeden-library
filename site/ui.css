@@ -95,6 +95,10 @@
 
 .arrival-label { display: inline-block; color: var(--accent); font-size: 11px; margin-bottom: 3px; }
 .recent-only { font-size: 12px; }
+.local-resume-panel { gap: 16px; margin: 16px var(--pad); border: 1px solid var(--border); background: var(--accent-soft); }
+.local-resume-panel strong { display: block; font-size: 13px; }
+.local-resume-panel span { overflow-wrap: anywhere; font-size: 12px; }
+@media(max-width:680px){ .local-resume-panel { align-items: stretch; flex-direction: column; margin-inline: 14px; } .local-resume-panel .form-actions { margin: 0; } }
 
 
 .theme-card { position: relative; isolation: isolate; }
@@ -121,3 +125,5 @@
   .theme-size-summary { margin: 12px 0; }
   .theme-dialog-actions { margin: 14px 0; }
 }
+
+.diagnostic-output {white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto;font:12px/1.7 ui-monospace,monospace;color:var(--muted);}

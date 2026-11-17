@@ -10,6 +10,7 @@ async function configCryptoKey(password, salt) {
   const material = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveKey"]);
   return crypto.subtle.deriveKey({name: "PBKDF2", salt, iterations: 210000, hash: "SHA-256"}, material, {name: "AES-GCM", length: 256}, false, ["encrypt", "decrypt"]);
 }
+let pendingConnectConfig;
 async function transferDeviceConfig(event) {
   event.preventDefault();
   const form = event.currentTarget, status = $("#deviceTransferStatus");
@@ -19,21 +20,29 @@ async function transferDeviceConfig(event) {
   const buttons = [...form.querySelectorAll("button")];
   buttons.forEach(button => { button.disabled = true; });
   try {
-    if (action === "export") {
+    if (["export","cloud-save","link"].includes(action)) {
       const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
       const config = {apiBase, syncToken, pan123: form.elements.include123.checked ? pan123BackupConfig() : null};
       const key = await configCryptoKey(password, salt);
       const cipher = await crypto.subtle.encrypt({name: "AES-GCM", iv}, key, new TextEncoder().encode(JSON.stringify(config)));
       const file = {format: "reeden-device-v1", salt: base64Bytes(salt), iv: base64Bytes(iv), cipher: base64Bytes(new Uint8Array(cipher))};
-      const url = URL.createObjectURL(new Blob([JSON.stringify(file)], {type: "application/json"}));
-      const link = document.createElement("a"); link.href = url; link.download = "reeden-device.encrypted.json"; link.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      operationMessage(status, "已导出加密配置。到新设备导入并输入相同口令；口令不会写入文件。");
+      if(action==='cloud-save') {
+        await ensureWriteAccess();await api('/api/device-config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(file)});
+        operationMessage(status,'加密配置已保存到私有库。新设备可先用接入链接连接，再读取最新配置。');
+      } else if(action==='link') {
+        const link=new URL(location.href);link.hash='connect='+base64Bytes(new TextEncoder().encode(JSON.stringify(file))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+        if(link.href.length>16000)throw new Error('配置较大，请改用加密文件导出');
+        $('#deviceConnectLink').value=link.href;$('#deviceLinkLabel').hidden=false;
+        operationMessage(status,'接入链接已生成。把链接和迁移口令分开传到新设备，打开后输入口令导入。');
+      } else {
+        const url=URL.createObjectURL(new Blob([JSON.stringify(file)],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download='reeden-device.encrypted.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+        operationMessage(status,'已导出加密配置。新设备导入时输入相同迁移口令。');
+      }
     } else {
-      const file = form.elements.configFile.files[0];
-      if (!file || file.size > 262144) throw new Error("请选择本站导出的加密配置（不超过 256 KB）");
-      const data = JSON.parse(await file.text());
-      if (data.format !== "reeden-device-v1") throw new Error("文件不是本站的加密配置");
+      let data=pendingConnectConfig;
+      if(action==='cloud-load') {await ensureWriteAccess();data=await api('/api/device-config');}
+      if(!data){const file=form.elements.configFile.files[0];if(!file||file.size>262144)throw new Error('请选择本站导出的加密配置（不超过 256 KB）');data=JSON.parse(await file.text());}
+      if(data.format!=='reeden-device-v1')throw new Error('不是本站的加密配置');
       const key = await configCryptoKey(password, bytesFromBase64(data.salt));
       let plain;
       try { plain = await crypto.subtle.decrypt({name: "AES-GCM", iv: bytesFromBase64(data.iv)}, key, bytesFromBase64(data.cipher)); }
@@ -47,6 +56,7 @@ async function transferDeviceConfig(event) {
         localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, normalizePan123Token(config.pan123.token));
         localStorage.setItem(PAN123_FOLDER_STORAGE_KEY, String(config.pan123.folder || "Red-Garden-Backup"));
       }
+      pendingConnectConfig=null; privateReadTicket="";
       apiBase = base; syncToken = config.syncToken; remoteUnavailable = false; storageReady = false;
       state.storage = null; browserLibraryRecordsCache = undefined; jobsSnapshotAt = 0;
       state.themes = []; state.fonts = []; state.assets = []; state.jobs = [];
@@ -102,7 +112,15 @@ function staticHostedWithoutApi() {
   const host = String(window.location.hostname || "").toLowerCase();
   return !apiBase && window.location.protocol === "https:" && (host.endsWith(".github.io") || host.endsWith(".pages.dev"));
 }
-function assetUrl(path) { return path ? apiUrl(path) : ""; }
+let privateReadTicket='',privateReadTicketUntil=0;
+function assetUrl(path) {
+  if(!path)return '';
+  const value=apiUrl(path);
+  if(privateReadTicket && value.startsWith(apiBase+'/api/') && /\/api\/(objects\/|download)/.test(value)) {
+    const url=new URL(value);url.searchParams.set('access',privateReadTicket);return url.href;
+  }
+  return value;
+}
 // A plain object GET is meant for inline previews. Download links need the
 // Worker to send Content-Disposition, otherwise an Android WebView treats the
 // cross-origin href as navigation (and the app blocks it as "leaving" the
@@ -113,7 +131,7 @@ function assetUrl(path) { return path ? apiUrl(path) : ""; }
 function downloadUrl(path, name = "") {
   const source = String(path || "");
   if (!source) return "";
-  const url = /^(?:https?:|data:|blob:)/i.test(source) ? source : apiUrl(source);
+  const url = assetUrl(source);
   if (/^https?:/i.test(url) && /\/api\/objects\//i.test(url) && !/[?&]download=1(?:&|$)/i.test(url)) {
     let file = "";
     try {
@@ -207,6 +225,7 @@ async function loadLibraryAfterConnection({fromSave = false} = {}) {
   };
   if (remote) status(fromSave ? "已保存同步地址。正在读取共享库（1/3 存储配置）…" : "正在读取共享库（1/3 存储配置）…");
   try {
+    if(apiBase)await ensureWriteAccess();
     await restoreDeviceCache();
     if (state.storage?.mode === "browser-local" && Array.isArray(browserLibraryRecordsCache)) {
       storageReady = true;
@@ -257,16 +276,17 @@ async function ensureRecordReference(record) {
 }
 async function ensureWriteAccess() {
   if (!apiBase) return true;
-  if (writeAccess.base === apiBase && writeAccess.token === syncToken && Date.now() - writeAccess.at < 300000) return true;
+  if (writeAccess.base === apiBase && writeAccess.token === syncToken && Date.now() - writeAccess.at < 300000 && privateReadTicketUntil>Date.now()+60000) return true;
   const response = await fetchWithReadTimeout(apiUrl("/api/session"), {headers: requestHeaders()}, 10000);
   if (response.status === 404) return true; // compatible with previous Worker
   const data = await response.json().catch(() => ({}));
   if (!response.ok || !data.canWrite) {
-    const message = syncToken ? "当前设备的写入 Token 不正确，请导入已有设备的加密配置，或填写正确 Token。" : "这台设备可以浏览，但尚未保存写入 Token。请导入已有设备的加密配置，或在存储设置填写 Token。";
+    const message = syncToken ? "此设备的访问口令无效。请从已连接设备生成接入链接或导出加密配置。" : "此设备尚未连接私有库。请打开接入链接并输入迁移口令，或在存储设置导入加密配置。";
     operationMessage($("#apiBaseStatus"), message, true);
     toast(message);
     throw new Error(message);
   }
+  privateReadTicket=data.ticket||'';privateReadTicketUntil=data.expires||Date.now()+300000;
   writeAccess = {base: apiBase, token: syncToken, at: Date.now()};
   operationMessage($("#apiBaseStatus"), "写入权限有效；当前设备已连接共享 R2。");
   return true;
@@ -424,7 +444,7 @@ function readSessionIds(key) {
   catch { return []; }
 }
 function saveSessionIds(key, ids) { try { sessionStorage.setItem(key, JSON.stringify(ids)); } catch {} }
-function activeJobs() { return state.jobs.filter(job => ["queued", "running"].includes(job.status)); }
+function activeJobs() { return state.jobs.filter(job => ["queued", "running"].includes(job.status) && (!browserSyncEnabled() || Date.now()-Date.parse(job.updated_at||job.created_at||0)<120000)); }
 function activeAssetIds(kind) {
   return new Set(activeJobs().flatMap(job => (job.items || []).filter(item => item.kind === kind).map(item => item.id)));
 }
@@ -1004,7 +1024,10 @@ async function backupOriginalTo123(raw, name, codec) {
 // 明明成功，立刻又被校验判失败。这里把校验也改成浏览器直连，和登录保持同一出口。
 const PAN123_DIRECT_API = "https://www.123pan.cn/b/api";
 function normalizePan123Token(value) { return String(value || "").trim().replace(/^Bearer\s+/i, "").trim(); }
+const pan123Diagnostics=[];
 function pan123Failure(error) {
+  const message=String(error?.message||error?.name||'未知错误').replace(/Bearer\s+\S+/gi,'Bearer [已隐藏]').replace(/[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,'[会话已隐藏]').replace(/(token|password|secret)(["'\s:=]+)[^\s,;"']+/gi,'$1$2[已隐藏]');
+  pan123Diagnostics.push({time:new Date().toISOString(),type:error?.name||'Error',message:message.slice(0,1200)});if(pan123Diagnostics.length>30)pan123Diagnostics.shift();
   if (error?.name === "AbortError") return "连接 123 超时，请检查网络后重试；已保存的会话仍保留。";
   if (error instanceof TypeError) return "浏览器无法直连 123（网络、扩展或跨域限制）。请使用 123 官方网页登录；重新保存 R2 设置无法解决此问题。";
   return error?.message || "123 请求未完成";
@@ -1347,13 +1370,17 @@ function objectFileName(sha, extension, label) {
   const safe = objectLabel(label);
   return safe ? `${safe}.${extension}` : `${sha}.${extension}`;
 }
-async function uploadBrowserObject(kind, sha, extension, body, contentType, label = "") {
+async function uploadBrowserObject(kind, sha, extension, body, contentType, label = "", targetRecord = null) {
   const path = `/api/objects/${encodeURIComponent(kind)}/${encodeURIComponent(objectFileName(sha, extension, label))}`;
   const request = (method) => fetch(apiUrl(path), {
     method,
     headers: requestHeaders({ "Content-Type": contentType || "application/octet-stream", "X-Content-SHA256": sha }),
     body,
   });
+  if(kind!=='records' && (body?.byteLength||body?.size||0)>65536) {
+    const head=await fetch(apiUrl(path),{method:'HEAD',headers:requestHeaders()});
+    if(head.ok&&head.headers.get('X-Content-SHA256')===sha)return path;
+  }
   // PUT is the canonical R2 object method. A few WebView proxies and older
   // Worker deployments reject PUT with 405; retrying as POST keeps the same
   // content-addressed endpoint while the Worker accepts both methods.
@@ -1376,6 +1403,7 @@ async function uploadBrowserObject(kind, sha, extension, body, contentType, labe
   // filename it actually stored; later reads and deletes must hit that object.
   let stored = null;
   try { stored = await response.json(); } catch {}
+  if(targetRecord && stored?.item)Object.assign(targetRecord,stored.item);
   if (stored?.filename) return `/api/objects/${encodeURIComponent(kind)}/${encodeURIComponent(stored.filename)}`;
   return path;
 }
@@ -1387,8 +1415,8 @@ async function uploadBrowserRecord(record, codec) {
   if (!record.imported_at) record.imported_at = new Date().toISOString();
   const bytes = new TextEncoder().encode(JSON.stringify(record));
   const recordSha = await codec.sha256Hex(bytes);
-  await uploadBrowserObject("records", recordSha, "json", bytes, "application/json");
-  record.record_sha256 = recordSha;
+  await uploadBrowserObject("records", recordSha, "json", bytes, "application/json", "", record);
+  record.record_sha256 ||= recordSha;
   recentUploadIds.add(`${record.kind}:${record.id}`);
   libraryPage[record.kind] = 1;
   librarySort[record.kind] = "added";
@@ -3141,12 +3169,13 @@ function renderThemes() {
    点一次按钮统一上传。上传阶段沿用原来的 importFonts / importAssets，
    只是把清理本地文件的弹窗挪到整批结束后合并成一次。 */
 const deferredCleanup = [];
-function stagePendingFiles(files, kind) {
+async function stagePendingFiles(files, kind) {
   const label = kind === "font" ? "字体" : "收藏";
   const accepted = kind === "font"
     ? [...(files || [])].filter(file => /\.(ttf|otf|woff2?)$/i.test(file.name || ""))
     : [...(files || [])].filter(file => ["svg", "html", "htm"].includes(assetExtension(file)));
   if (!accepted.length) { toast(kind === "font" ? "请选择 TTF、OTF、WOFF 或 WOFF2 文件" : "请选择 SVG、HTML 或 HTM 文件"); return; }
+  await rememberLocalFiles(accepted);
   let added = 0;
   for (const file of accepted) {
     const duplicate = state.pending.some(item => item.kind === kind && item.name === file.name && item.size === file.size);
@@ -3402,14 +3431,15 @@ function jobTitle(job) {
   return job.kind === "font" ? "字体同步" : job.kind === "asset" ? "收藏同步" : "主题同步";
 }
 function jobStatus(job) {
-  return { queued: "等待处理", running: "正在处理", completed: "已完成", partial: "部分失败", failed: "处理失败" }[job.status] || "等待处理";
+  if(browserSyncEnabled() && ["running","uploading"].includes(job.status) && Date.now()-Date.parse(job.updated_at||0)>120000 && !(job.lease?.until>Date.now()))return "已暂停，可继续";
+  return { uploading:"暂存原文件", paused:"已暂停", queued: "等待处理", running: "正在处理", completed: "已完成", partial: "部分失败", failed: "处理失败" }[job.status] || "等待处理";
 }
 function jobItemNames(job) {
   const items = Array.isArray(job.items) ? job.items.map(value => String(value || "").trim()).filter(Boolean) : [];
   return items.length ? items : Array.isArray(job.source_keys) ? job.source_keys.map(String).filter(Boolean) : [];
 }
 function jobCard(job) {
-  const total = Math.max(0, Number(job.total) || 0);
+  const total = Math.max(0, Number(job.total) || 0,job.source_keys?.length||0,job.items?.length||0);
   const completed = Math.min(total, Math.max(0, Number(job.completed) || 0));
   const percent = total ? Math.round((completed / total) * 100) : 0;
   const failed = Array.isArray(job.failed) ? job.failed : [];
@@ -3438,8 +3468,9 @@ function jobCard(job) {
     ? `<p class="job-items">本批包含：${escapeHtml(names.slice(0, 6).join("、"))}${names.length > 6 ? ` 等 ${names.length} 个` : ""}</p>`
     : "";
   // 统一的删除键：排队中、跑一半、已完成的都能删，不用等任务自己结束。
+  const resumeButton = job.kind==='staged-import' && isStagedResumable(job) ? `<button class="secondary-button" data-resume-cloud="${escapeHtml(job.id)}">继续上传</button>` : !['completed'].includes(job.status) && job.kind==='upload' ? '<button class="secondary-button" data-resume-old>恢复或重新选文件</button>' : '';
   const deleteButton = `<button class="secondary-button delete-job" data-delete-job="${escapeHtml(job.id)}" title="删除这条任务记录，进行中的任务也会被删掉">删除</button>`;
-  return `<article class="job-card" data-job-id="${escapeHtml(job.id)}"><div class="job-card-head"><div><h3>${escapeHtml(jobTitle(job))}</h3><span class="job-meta">${escapeHtml(jobStatus(job))} · 已处理 ${completed} / ${total} 项</span></div><div class="job-card-actions">${failed.length && !active ? `<button class="secondary-button retry-job" data-retry-job="${escapeHtml(job.id)}" ${state.operation || retrying ? "disabled" : ""}>${retrying ? "已加入重试" : "重试失败项"}</button>` : ""}${deleteButton}</div></div><div class="job-progress-row"><progress class="job-progress" max="${Math.max(1,total)}" value="${completed}" aria-label="${escapeHtml(jobTitle(job))}进度"></progress><span class="job-percent">${percent}%</span></div><p class="job-detail ${failed.length && !active ? "is-error" : ""}">${escapeHtml(detail)}</p>${itemsLine}${failed.length ? `<details class="job-errors"><summary>${failed.length} 项失败详情</summary><ul>${failed.map(item => `<li><strong>${escapeHtml(item.name || item.id || "文件")}</strong><span>${escapeHtml(item.error || "处理失败")}</span></li>`).join("")}</ul></details>` : ""}</article>`;
+  return `<article class="job-card" data-job-id="${escapeHtml(job.id)}"><div class="job-card-head"><div><h3>${escapeHtml(jobTitle(job))}</h3><span class="job-meta">${escapeHtml(jobStatus(job))} · 已处理 ${completed} / ${total} 项</span></div><div class="job-card-actions">${failed.length && !active ? `<button class="secondary-button retry-job" data-retry-job="${escapeHtml(job.id)}" ${state.operation || retrying ? "disabled" : ""}>${retrying ? "已加入重试" : "重试失败项"}</button>` : ""}${resumeButton}${deleteButton}</div></div><div class="job-progress-row"><progress class="job-progress" max="${Math.max(1,total)}" value="${completed}" aria-label="${escapeHtml(jobTitle(job))}进度"></progress><span class="job-percent">${percent}%</span></div><p class="job-detail ${failed.length && !active ? "is-error" : ""}">${escapeHtml(detail)}</p>${itemsLine}${failed.length ? `<details class="job-errors"><summary>${failed.length} 项失败详情</summary><ul>${failed.map(item => `<li><strong>${escapeHtml(item.name || item.id || "文件")}</strong><span>${escapeHtml(item.error || "处理失败")}</span></li>`).join("")}</ul></details>` : ""}</article>`;
 }
 function renderJobs() {
   const active = activeJobs();
@@ -3502,7 +3533,7 @@ async function loadJobs() {
     saveDeviceSnapshot();
     jobsRevision = revision;
     operationMessage($("#jobsStatus"), browserSyncEnabled()
-      ? "免费同步模式：批次队列存在共享 R2，关掉页面不会丢，换一台设备或重开页面会自动继续；图片压缩需要浏览器画布，所以由设备执行。"
+      ? "本机未完成文件可从顶部继续；云端暂存任务可在其他设备接管。关闭网页会暂停压缩，逐文件保留已完成结果。"
       : "任务由本地服务执行。完成记录与失败原因会保留，失败项可单独重试。");
     if (changed) {
       const finished = items.filter(job => previous.has(job.id) && ["queued", "running"].includes(previous.get(job.id)) && !["queued", "running"].includes(job.status));
@@ -3599,13 +3630,16 @@ async function loadBrowserLibraryRecords(force = false) {
   if (browserLibraryRecordsPromise) return browserLibraryRecordsPromise;
   const scope = apiBase;
   browserLibraryRecordsPromise = (async () => {
-    const records = [];
-    let cursor = "";
-    do {
-      const data = await api(`/api/library${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
-      records.push(...(data.items || data.records || []));
-      cursor = data.cursor || "";
-    } while (cursor);
+    const headers=requestHeaders();
+    const etag=localStorage.getItem('reeden-index-etag:'+scope);
+    if(etag && Array.isArray(browserLibraryRecordsCache))headers.set('If-None-Match',etag);
+    const response=await fetchWithReadTimeout(apiUrl('/api/library?all=1'),{headers},30000);
+    if(response.status===304){browserLibraryRecordsLoadedAt=Date.now();saveDeviceSnapshot();updateCacheInfo();return browserLibraryRecordsCache;}
+    const data=await response.json();if(!response.ok)throw new Error(data.error||`读取失败（${response.status}）`);
+    const records=[...(data.items||data.records||[])];
+    let cursor=data.cursor;
+    while(cursor){const page=await api('/api/library?cursor='+encodeURIComponent(cursor));records.push(...(page.items||page.records||[]));cursor=page.cursor;}
+    const nextEtag=response.headers.get('ETag');if(nextEtag)localStorage.setItem('reeden-index-etag:'+scope,nextEtag);
     if (scope !== apiBase) throw new Error("连接已切换，旧库读取结果已忽略");
     browserLibraryRecordsCache = latestRecords(records);
     browserLibraryRecordsLoadedAt = Date.now();
@@ -3779,6 +3813,7 @@ function updateStorageControls() {
   $("#pan123ProbeHelp").textContent = `验证会在已保存的备份目录 ${probeRoot}/probes/ 下上传一个随机小文件，再下载并核验。测试目录和文件可能保留在云盘。`;
 }
 async function analyzeFiles(files) {
+  await rememberLocalFiles([...(files || [])].filter(file => /\.red$/i.test(file.name || '')));
   if (state.operation) { toast("请等待当前批次处理完成"); return; }
   const valid = [...files].filter(file => file.name.toLowerCase().endsWith(".red"));
   if (!valid.length) { toast("请选择 .red 文件"); return; }
@@ -3938,6 +3973,7 @@ async function commitThemes(ids = [...selections.review]) {
             saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: "", original_url: originalPath,
             original_123: backup && !backup.error ? backup : null, original_123_error: backup?.error || ""
           }, codec);
+          if(item.file)await completeLocalFiles([item.file]);
           transferDone(name);
           operationMessage($("#reviewBatchStatus"), `已完成主题 ${++finished} / ${selected.length}…`);
           return { item, record };
@@ -3957,9 +3993,11 @@ async function commitThemes(ids = [...selections.review]) {
       for (const item of selected) if (!failures.some(entry => entry.item === item)) { state.review = state.review.filter(review => review !== item); selections.review.delete(item.staging_id); }
       renderReview(); renderThemes(); renderJobs();
       const completedFiles = results.filter(result => result.record && result.item?.file).map(result => result.item.file);
+      await completeLocalFiles(completedFiles);
       const message = failures.length ? `${completed.length} 个主题已保存到 R2，${failures.length} 个失败，请查看错误后重试。` : `${completed.length} 个主题已压缩并保存到 R2。`;
       operationMessage($("#reviewBatchStatus"), message, Boolean(failures.length)); toast(message);
-      offerLocalCleanup(completedFiles, `本次 ${completedFiles.length} 个主题已压缩并保存到 R2，可以删掉本地原包释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
+      if(commitBatchBusy)deferredCleanup.push(...completedFiles);
+      else offerLocalCleanup(completedFiles, `本次 ${completedFiles.length} 个主题已压缩并保存到 R2，可以删掉本地原包释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
       return;
     }
     // 本地服务模式也要有看得见的进度：先把条亮出来，再提交任务，随后由
@@ -4165,11 +4203,11 @@ async function deleteSelectedRecords(kind, ids = [...selections[kind]]) {
     if (kind === "font") state.fonts = state.fonts.filter(item => !deletedIds.has(String(item.id)));
     if (kind === "asset") state.assets = state.assets.filter(item => !deletedIds.has(String(item.id)));
     chosen.forEach(item => selections[kind].delete(item.id));
-    invalidateBrowserLibraryRecords();
+    browserLibraryRecordsCache=latestRecords([...state.themes,...state.fonts,...state.assets]);saveDeviceSnapshot();
     renderThemes(); renderFonts(); renderAssets();
     const failed = result.failed || [];
     const shared = result.retainedShared || [];
-    const message = `已删除 ${deletedIds.size} 项${label}。${shared.length ? `共享对象保留 ${shared.length} 个。` : ""}${failed.length ? ` ${failed.length} 个对象删除失败，文件仍保留在 R2，可稍后重试。` : ""}如需恢复已删除记录，请重新导入原文件。`;
+    const message = `已删除 ${deletedIds.size} 项${label}。${shared.length ? `共享对象保留 ${shared.length} 个。` : ""}${failed.length ? ` ${failed.length} 个对象删除失败，文件仍保留在 R2，可稍后重试。` : ""}文件进入清理等待期，可在存储维护中核对；如需恢复记录，请重新导入原文件。`;
     operationMessage(output, message, Boolean(failed.length));
     toast(failed.length ? `已删除记录，但有 ${failed.length} 个对象失败` : `${label}已删除，清单已刷新`);
     await Promise.all([loadThemes(true), loadFonts(true), loadAssets(true)]);
@@ -4279,7 +4317,7 @@ async function importFonts(files, options = {}) {
       return { file, hash: [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("") }; // taste-skill-ignore: SHA-256 bytes require two hexadecimal digits.
     }) : valid.map(file => ({ file, hash: "" }));
     for (const {file, hash} of hashed) {
-      if (hash && hashes.has(hash)) { duplicates++; continue; }
+      if (hash && hashes.has(hash)) { duplicates++; await completeLocalFiles([file]); continue; }
       if (hash) hashes.add(hash);
       unique.push(file);
     }
@@ -4309,6 +4347,7 @@ async function importFonts(files, options = {}) {
             style: analysis.style, style_source: analysis.source, glyph_method: analysis.method, glyph_error: analysis.error || "", glyph_analysis: analysis.features, tags: [],
             url: fontPath, view_url: fontPath, preview_url: previewPath, preview_state: previewPath ? "generated" : "disabled", preview_error: "", saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
           }, codec);
+          await completeLocalFiles([file]);
           transferDone(file.name);
           operationMessage(output, `已上传字体 ${++finished} / ${unique.length}…`);
           return record;
@@ -4378,7 +4417,7 @@ async function importAssets(files, options = {}) {
       return { file, bytes, hash };
     });
     for (const item of hashed) {
-      if (item.hash && hashes.has(item.hash)) { duplicates++; continue; }
+      if (item.hash && hashes.has(item.hash)) { duplicates++; await completeLocalFiles([item.file]); continue; }
       if (item.hash) hashes.add(item.hash);
       unique.push(item);
     }
@@ -4412,6 +4451,7 @@ async function importAssets(files, options = {}) {
             file_name: file.name, name: file.name.replace(/\.[^.]+$/, ""), author: "", style: "", tags: [], sha256: hash, bytes: bytes.length,
             mime, object_url: objectPath, url: objectPath, preview_url: previewPath, saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
           }, codec);
+          await completeLocalFiles([file]);
           transferDone(file.name);
           operationMessage(output, `已上传收藏 ${++finished} / ${unique.length}…`);
           return record;
@@ -4764,111 +4804,83 @@ function setupDropZone(element, onFiles) {
   element.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); element.click(); } });
 }
 async function queueFilesForLater(fileList) {
-  try { await whenStorageReady(); await ensureWriteAccess(); } catch { return; }
-  if (state.operation) { toast("请等待当前批次处理完成"); return; }
-  const valid = [...(fileList || [])].filter(file => /\.(red|ttf|otf|woff2?|svg|html?)$/i.test(String(file.name || "")));
-  if (!valid.length) { toast("没有可暂存的受支持文件"); return; }
-  const codec = await browserCodec();
-  setOperation("staging");
-  suppressCloudJob = true;
-  beginTransferProgress("后台暂存原文件", valid.length);
-  const status = $("#unifiedImportStatus");
-  status.hidden = false;
+  await whenStorageReady();await ensureWriteAccess();
+  if(state.operation){toast('请等待当前批次结束');return;}
+  const files=[...(fileList||[])].filter(file=>/\.(red|ttf|otf|woff2?|svg|html?)$/i.test(file.name||''));
+  if(!files.length)return;
+  await rememberLocalFiles(files);
+  setOperation('staging');suppressCloudJob=true;
+  const status=$('#unifiedImportStatus');let job;
   try {
-    const keys = [], names = [];
-    await mapConcurrent(valid, 2, async file => {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      const sha = await codec.sha256Hex(bytes);
-      const ext = /\.htm$/i.test(file.name) ? "html" : String(file.name).split(".").pop().toLowerCase();
-      transferStage("上传原始文件到共享库", file.name);
-      keys.push(await uploadBrowserObject("staging", sha, ext, bytes, "application/octet-stream"));
-      names.push(file.name);
-      transferDone(file.name);
-    });
-    const response = await fetch(apiUrl("/api/jobs"), {
-      method: "POST", headers: requestHeaders({"Content-Type": "application/json"}),
-      body: JSON.stringify({kind: "staged-import", title: `暂存 ${valid.length} 个文件，等待处理`, total: valid.length,
-        items: names, source_keys: keys, auto_commit: true,
-        device: /Android|iPhone|iPad/i.test(navigator.userAgent) ? "mobile" : "desktop"}),
-    });
-    if (!response.ok) throw new Error(`暂存任务创建失败（${response.status}）`);
-    suppressCloudJob = false;
-    finishTransferProgress(`${valid.length} 个原文件已暂存到共享库`);
-    operationMessage(status, `已暂存 ${valid.length} 个文件。可在任意设备打开「后台任务」点「继续处理暂存文件」完成压缩与入库。`);
-    toast("原文件已上传到共享库，稍后可继续处理");
-    offerLocalCleanup(valid, `本次 ${valid.length} 个原文件已暂存到共享库，可以删掉本地副本；需要重新处理时从云端读取即可。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
-    loadJobs().catch(() => {});
-  } catch (error) {
-    operationMessage(status, `后台暂存失败：${error.message}`, true);
-    toast(`后台暂存失败：${error.message}`);
-  } finally { suppressCloudJob = false; setOperation(""); }
+    if(files.length>1000)throw new Error("每批最多暂存 1000 个文件，请分批上传");
+    const codec=await browserCodec(),uploads=[];
+    for(const file of files){const sha=await codec.sha256Hex(new Uint8Array(await file.arrayBuffer()));const ext=assetExtension(file);uploads.push({name:file.name,key:`/api/objects/staging/${sha}.${ext}`,sha,file});}
+    job=(await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:'staged-import',title:`暂存 ${files.length} 个文件`,total:files.length,items:uploads.map(x=>x.name),source_keys:uploads.map(x=>x.key),uploads:uploads.map(({name,key})=>({name,key})),auto_commit:true,upload_complete:false,device:'browser'})})).job;
+    rememberJob(job);renderJobs();beginTransferProgress('暂存原文件',files.length);
+    for(const item of uploads){transferStage('上传到云端暂存',item.name);await uploadBrowserObject('staging',item.sha,assetExtension(item.file),new Uint8Array(await item.file.arrayBuffer()),'application/octet-stream');transferDone(item.name);await api(`/api/jobs/${job.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({stage:`已暂存 ${transferState.completed}/${files.length}`,completed:transferState.completed})});}
+    await api(`/api/jobs/${job.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'queued',stage:'原文件暂存完成，可以继续入库',upload_complete:true,completed:0})});
+    finishTransferProgress('云端暂存完成');operationMessage(status,'已保存云端恢复任务。在「上传与恢复」中继续；本设备也保留恢复副本。');
+  }catch(error){if(job)await sendCloudJobPatch({status:'partial',stage:'暂存中断，可继续已上传文件或补选原文件',error:error.message},job.id);operationMessage(status,`暂存中断：${error.message}。恢复任务已保留。`,true);}
+  finally{suppressCloudJob=false;setOperation('');await loadJobs();}
 }
+
 // A tab that closes mid-run leaves the job "running", so takeover waits out an
 // idle window first: that avoids two devices compressing the same batch while
 // still letting a genuinely abandoned batch resume on its own.
 const STAGED_TAKEOVER_IDLE_MS = 120000;
 function isStagedResumable(job, now = Date.now()) {
   if (!job || job.kind !== "staged-import") return false;
-  if (!Array.isArray(job.source_keys) || !job.source_keys.length) return false;
-  if (job.status === "queued") return true;
-  if (job.status !== "running") return false;
+  if (!Array.isArray(job.source_keys) || !job.source_keys.length || job.lease?.until>now) return false;
+  if (["queued","partial","failed","paused"].includes(job.status)) return true;
+  if (!["running","uploading"].includes(job.status)) return false;
   const idle = now - Date.parse(job.updated_at || "");
   return !Number.isFinite(idle) || idle > STAGED_TAKEOVER_IDLE_MS;
 }
-async function resumeStagedJobs() {
-  if (stagedResumeBusy || state.operation) { toast("请等待当前批次处理完成"); return; }
-  stagedResumeBusy = true;
-  const status = $("#jobsStatus");
+async function resumeStagedJobs(onlyId='') {
+  if(stagedResumeBusy || state.operation){toast('请等待当前批次结束');return;}
+  await ensureWriteAccess();stagedResumeBusy=true;
+  const status=$('#jobsStatus'),owner=crypto.randomUUID();let currentJob,heartbeat;
   try {
-    const data = await api("/api/jobs");
-    const queued = (data.items || []).filter(job => isStagedResumable(job));
-    if (!queued.length) { operationMessage(status, "当前没有待处理的暂存文件。"); toast("没有待处理的暂存文件"); return; }
-    for (const job of queued) {
-      await sendCloudJobPatch({status: "running", stage: "正在读取暂存原文件"}, job.id);
-      const files = [];
-      for (let index = 0; index < job.source_keys.length; index++) {
-        const response = await fetch(assetUrl(job.source_keys[index]));
-        if (!response.ok) throw new Error(`读取暂存文件失败（${response.status}）`);
-        const name = job.items?.[index] || String(job.source_keys[index]).split("/").pop();
-        files.push(new File([await response.arrayBuffer()], name, {type: "application/octet-stream"}));
+    const data=await api('/api/jobs');
+    const queued=(data.items||[]).filter(job=>(!onlyId || job.id===onlyId)&&isStagedResumable(job));
+    if(!queued.length){operationMessage(status,'没有可继续的云端暂存任务；其他设备正在处理的任务需等待释放。');return;}
+    for(const job of queued) {
+      currentJob=job;
+      await api(`/api/jobs/${job.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({owner,status:'running',stage:'继续逐文件入库'})});
+      heartbeat=setInterval(()=>api(`/api/jobs/${job.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({owner})}).catch(()=>{}),30000);
+      const done=new Set(job.done_keys||[]),failures=[];
+      const sources=[...new Set(job.source_keys||[])];
+      for(let index=0;index<sources.length;index++) {
+        const key=sources[index];if(done.has(key))continue;
+        const name=job.uploads?.find(item=>item.key===key)?.name||job.items?.[(job.source_keys||[]).indexOf(key)]||decodeURIComponent(key.split('/').pop());
+        try {
+          const response=await fetch(assetUrl(key),{headers:requestHeaders()});
+          if(!response.ok)throw new Error(response.status===404?'原文件未传完，请在本设备恢复或重新选择此文件':`读取暂存失败（${response.status}）`);
+          const file=new File([await response.arrayBuffer()],name,{type:'application/octet-stream'});file.archivePath='cloud-staging';
+          resumingStaged=true;suppressCloudJob=true;
+          try {await importUnifiedFiles([file]);selections.review.clear();state.review.filter(item=>item.file===file).forEach(item=>selections.review.add(item.staging_id));state.pending.filter(item=>item.file===file).forEach(item=>selections.review.add(item.id));await commitSelection();}
+          finally {resumingStaged=false;suppressCloudJob=false;}
+          if(state.review.some(item=>item.file===file)||state.pending.some(item=>item.file===file))throw new Error('文件尚未成功入库，原始暂存文件已保留');
+          const hash=key.match(/([a-f0-9]{64})\./)?.[1];
+          if(!hash || ![...state.themes,...state.fonts,...state.assets].some(record=>[record.original_sha256,record.sha256,record.source_sha256].includes(hash)))throw new Error('未能确认文件入库，暂存副本已保留');
+          done.add(key);
+          await api(`/api/jobs/${job.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({owner,done_keys:[...done],completed:done.size,stage:`已入库 ${done.size}/${sources.length}`})});
+
+        }catch(error){failures.push(`${name}：${error.message}`);}
       }
-      operationMessage(status, `正在处理「${job.title}」的 ${files.length} 个文件…`);
-      resumingStaged = true;
-      try { await importUnifiedFiles(files); }
-      finally { resumingStaged = false; }
-      // A staged batch carries the intent to process later, so finish the job
-      // here instead of parking it in the review list for another click.
-      let autoCommitted = 0;
-      if (job.auto_commit) {
-        // Parsed themes land in state.review without being ticked, so use the
-        // same "everything eligible" set the 全选 button would produce.
-        const pending = eligibleIds("review");
-        if (pending.length) {
-          operationMessage(status, `「${job.title}」已解析 ${pending.length} 个主题，正在自动压缩入库…`);
-          await sendCloudJobPatch({stage: "自动确认并压缩", total: pending.length}, job.id);
-          const before = state.themes.length;
-          try { await commitThemes(pending); autoCommitted = Math.max(0, state.themes.length - before); }
-          catch (error) { operationMessage(status, `自动压缩失败：${error.message}`, true); }
-        }
-      }
-      await sendCloudJobPatch({status: "completed", completed: job.total,
-        stage: autoCommitted ? "已自动完成压缩入库" : "已在本设备完成导入",
-        result: autoCommitted ? `${autoCommitted} 个主题已自动压缩并入库`
-          : files.length ? `${files.length} 个文件已导入；主题仍需在导入页确认` : "无文件"}, job.id);
-      // The staged raw copies served their purpose; leaving them would keep a
-      // second full copy of every theme in R2 forever.
-      for (const key of job.source_keys) {
-        fetch(apiUrl(key), {method: "DELETE", headers: requestHeaders()}).catch(() => {});
-      }
+      // Checkpoints are durable before deleting temporary sources. Resume also retries this cleanup.
+      for(const key of sources.filter(key=>done.has(key)))try{
+        const cleanup=await fetch(apiUrl(key), {method: "DELETE", headers:requestHeaders()});
+        if(!cleanup.ok)throw new Error(`HTTP ${cleanup.status}`);
+      }catch(error){failures.push('暂存清理未完成：'+error.message);}
+      clearInterval(heartbeat);heartbeat=null;
+      await api(`/api/jobs/${job.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({owner,release:true,total:sources.length,status:done.size===sources.length&&!failures.length?'completed':'partial',done_keys:[...done],completed:done.size,failed:failures.length,result:`${done.size}/${sources.length} 个文件已入库`,error:failures.join('；'),stage:failures.length?'有文件需补选或重试':'全部入库完成'})});
+      operationMessage(status,failures.length?`已完成 ${done.size}/${sources.length}；${failures.join('；')}`:'云端任务全部入库完成',failures.length>0);
     }
-    operationMessage(status, "暂存文件已处理完成；未自动提交的主题已在导入页列出，可手动确认。");
-    toast("暂存任务已处理完成");
-    await loadJobs();
-  } catch (error) {
-    operationMessage(status, `继续处理失败：${error.message}`, true);
-    toast(`继续处理失败：${error.message}`);
-  } finally { resumingStaged = false; stagedResumeBusy = false; }
+  }catch(error){operationMessage(status,`继续失败：${error.message}。文件及恢复任务均保留。`,true);if(currentJob)await sendCloudJobPatch({owner,release:true,status:'partial',error:error.message},currentJob.id);}
+  finally{clearInterval(heartbeat);resumingStaged=false;suppressCloudJob=false;stagedResumeBusy=false;await loadJobs();await refreshLocalTransfers();}
 }
+
 // The queue lives in shared R2, but image recompression needs a real canvas,
 // so the work still runs in a browser. Landing on any device finishes a batch
 // staged elsewhere instead of waiting for someone to press a button.
@@ -4908,6 +4920,67 @@ async function clearFinishedJobs() {
    grants one. Everything else gets an honest list instead of a button that
    cannot possibly work. */
 const pickedFileSources = new WeakMap();
+
+// Durable on-device checkpoints contain the original File, not just progress text.
+const localFileIds = new WeakMap();
+let transferDatabase, localTransferRows=[];
+function transferDB() {
+  if(!transferDatabase)transferDatabase=new Promise((resolve,reject)=>{const r=indexedDB.open('reeden-transfers-v1',1);r.onupgradeneeded=()=>r.result.createObjectStore('files',{keyPath:'id'});r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});
+  return transferDatabase;
+}
+async function transferStore(mode,action) {
+  const db=await transferDB();return new Promise((resolve,reject)=>{const tx=db.transaction('files',mode),request=action(tx.objectStore('files'));let result; if(request)request.onsuccess=()=>{result=request.result;};tx.oncomplete=()=>resolve(result);tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error);});
+}
+async function refreshLocalTransfers() {
+  try {localTransferRows=(await transferStore('readonly',store=>store.getAll())).filter(row=>row.apiBase===apiBase);}catch{localTransferRows=[];}
+  const panel=$('#localResumePanel');if(!panel)return;
+  panel.hidden=!localTransferRows.length;
+  $('#localResumeText').textContent=`此设备有 ${localTransferRows.length} 个未完成文件，原文件副本已保存在浏览器，可继续上传。`;
+  $('#localResumeNames').textContent=localTransferRows.slice(0,4).map(row=>row.file.name).join('、')+(localTransferRows.length>4?'…':'');
+}
+async function rememberLocalFiles(files) {
+  for(const file of files) {
+    if(localFileIds.has(file))continue;
+    const source=pickedFileSources.get(file)?.entry;
+    const row={id:crypto.randomUUID(),apiBase,file,archivePath:file.archivePath||'',created_at:Date.now(),handle:source?.handle||null,parent:source?.parent||null,path:source?.path||file.name};
+    try {await transferStore('readwrite',store=>store.put(row));}
+    catch(error) {
+      if(error?.name==='DataCloneError'){row.handle=null;row.parent=null;try{await transferStore('readwrite',store=>store.put(row));}catch{throw new Error('浏览器空间不足，无法保存恢复副本。请分批导入或使用云端暂存。');}}
+      else throw new Error('浏览器未能保存恢复副本，请检查存储空间与网站权限后重试。');
+    }
+    localFileIds.set(file,row.id);
+  }
+  await refreshLocalTransfers();
+}
+async function completeLocalFiles(files) {
+  const ids=files.map(file=>localFileIds.get(file)).filter(Boolean);
+  if(ids.length)await transferStore('readwrite',store=>{ids.forEach(id=>store.delete(id));});
+  await refreshLocalTransfers();
+}
+async function resumeLocalTransfers() {
+  if(state.operation || commitBatchBusy){toast('请等待当前批次处理结束');return;}
+  await ensureWriteAccess();await refreshLocalTransfers();
+  const files=[];
+  const loaded=new Set([...state.pending.map(x=>x.file),...state.review.map(x=>x.file)].map(file=>localFileIds.get(file)).filter(Boolean));
+  for(const row of localTransferRows) {
+    if(loaded.has(row.id))continue;
+    const file=row.file;localFileIds.set(file,row.id);if(row.archivePath)file.archivePath=row.archivePath;
+    registerPickedFiles([{file,handle:row.handle,parent:row.parent,path:row.path}]);files.push(file);
+  }
+  setView('import');
+  const oldResuming=resumingStaged;resumingStaged=true;
+  try {if(files.length)await importUnifiedFiles(files);toggleAll('review',true);await commitSelection();}
+  finally {resumingStaged=oldResuming;await refreshLocalTransfers();}
+}
+async function discardLocalTransfers() {
+  if(state.operation)return;
+  if(!window.confirm('移除浏览器里的未完成恢复副本？本机原文件和 R2 文件都保留。'))return;
+  const ids=new Set(localTransferRows.map(row=>row.id));
+  await transferStore('readwrite',store=>ids.forEach(id=>store.delete(id)));
+  state.pending=state.pending.filter(item=>!ids.has(localFileIds.get(item.file)));state.review=state.review.filter(item=>!ids.has(localFileIds.get(item.file)));
+  renderReview();await refreshLocalTransfers();
+}
+
 const LOCAL_CLEANUP_KEY = "reeden-local-cleanup";
 
 function localCleanupEnabled() {
@@ -5023,46 +5096,42 @@ function cleanupTargets(files) {
       size: Number.isFinite(entry?.size) ? entry.size : Number(file.size) || 0,
       path: entry?.path || file.webkitRelativePath || file.name || "",
       parent: entry?.parent || null,
-      deletable: Boolean(entry?.parent || entry?.handle || bridge),
+      handle: entry?.handle || null,
+      deletable: Boolean(entry?.parent || typeof entry?.handle?.remove === 'function' || bridge),
     });
   }
   return { targets, bridge };
 }
+async function sameLocalFile(current,original) {
+  if(current.size!==original.size) return false;
+  const digest=async file=>new Uint8Array(await crypto.subtle.digest('SHA-256',await file.arrayBuffer()));
+  const [a,b]=await Promise.all([digest(current),digest(original)]);return a.every((value,index)=>value===b[index]);
+}
 function openCleanupDialog(targets, summary) {
-  const dialog = $("#cleanupDialog");
-  return new Promise(resolve => {
-    if (!dialog || typeof dialog.showModal !== "function") { resolve({ selected: [], bridge: null }); return; }
-    const deletable = targets.filter(target => target.deletable);
-    const list = $("#cleanupList");
-    list.innerHTML = targets.map((target, index) => {
-      const detail = [target.path && target.path !== target.name ? target.path : "", formatBytes(target.size), target.deletable ? "" : "当前环境不允许网页删除，请手动处理"].filter(Boolean).join(" · ");
-      return `<li class="${target.deletable ? "" : "is-locked"}"><label class="check-label"><input type="checkbox" data-cleanup-index="${index}" ${target.deletable ? "checked" : "disabled"} /><span><strong>${escapeHtml(target.name)}</strong><small>${escapeHtml(detail)}</small></span></label></li>`;
-    }).join("");
-    $("#cleanupDialogDescription").textContent = deletable.length ? summary : `${summary} 当前环境无法由网页直接删除，请按下面的清单手动删除。`;
-    const boxes = $$("#cleanupList input[data-cleanup-index]");
-    const confirm = $("#cleanupConfirm");
-    const finish = value => { if (dialog.open) dialog.close(); resolve(value); };
-    const counters = () => {
-      const picked = boxes.filter(box => box.checked && !box.disabled).length;
-      $("#cleanupSummary").textContent = deletable.length ? `${picked} / ${deletable.length} 个可删除` : "没有可自动删除的文件";
-      $("#cleanupSelectAll").checked = deletable.length > 0 && picked === deletable.length;
-      $("#cleanupSelectAll").indeterminate = picked > 0 && picked < deletable.length;
-      $("#cleanupSelectAll").disabled = deletable.length === 0;
-      $("#cleanupSelectAllLabel").textContent = `全选（${deletable.length}）`;
-      confirm.disabled = picked === 0;
-      confirm.textContent = deletable.length ? `删除所选（${picked}）` : "知道了";
+  const dialog=$('#cleanupDialog');
+  return new Promise(resolve=>{
+    if(!dialog?.showModal){resolve({selected:[],bridge:null});return;}
+    const finish=value=>{dialog.close();resolve(value);};
+    const render=()=>{
+      const deletable=targets.filter(t=>t.deletable);
+      $('#cleanupList').innerHTML=targets.map((t,i)=>`<li class="${t.deletable?'':'is-locked'}"><label class="check-label"><input type="checkbox" data-cleanup-index="${i}" ${t.deletable?'checked':'disabled'}><span><strong>${escapeHtml(t.name)}</strong><small>${escapeHtml(formatBytes(t.size)+(t.deletable?'':' · 需要文件夹授权'))}</small></span></label></li>`).join('');
+      $('#cleanupDialogDescription').textContent=summary;
+      const boxes=$$('#cleanupList input'),confirm=$('#cleanupConfirm'),all=$('#cleanupSelectAll');
+      const count=()=>{const picked=boxes.filter(b=>b.checked&&!b.disabled).length;$('#cleanupSummary').textContent=`已选 ${picked} / 可删除 ${deletable.length}`;all.checked=!!deletable.length&&picked===deletable.length;all.disabled=!deletable.length;all.indeterminate=picked>0&&picked<deletable.length;$('#cleanupSelectAllLabel').textContent='全选';confirm.disabled=!!deletable.length&&!picked;confirm.textContent=deletable.length?`删除所选（${picked}）`:'知道了';};
+      boxes.forEach(box=>box.onchange=count);all.onchange=()=>{boxes.forEach(b=>{if(!b.disabled)b.checked=all.checked;});count();};
+      confirm.onclick=()=>finish({selected:targets.filter((t,i)=>boxes[i].checked&&!boxes[i].disabled),bridge:nativeFileBridge()});count();
     };
-    $("#cleanupSelectAll").onchange = event => { boxes.forEach(box => { if (!box.disabled) box.checked = event.target.checked; }); counters(); };
-    boxes.forEach(box => { box.onchange = counters; });
-    $("#cleanupConfirm").onclick = () => {
-      const selected = targets.filter((target, index) => { const box = boxes[index]; return box && box.checked && !box.disabled; });
-      finish({ selected, bridge: nativeFileBridge() });
+    const grant=$('#cleanupGrantFolder');grant.hidden=typeof window.showDirectoryPicker!=='function';grant.onclick=async()=>{
+      try{const folder=await window.showDirectoryPicker({mode:'readwrite'});grant.disabled=true;
+        const entries=await collectDirectoryFiles(folder);let matched=0;
+        for(const target of targets.filter(t=>!t.deletable)){
+          const matches=[];for(const entry of entries.filter(e=>e.name===target.name&&e.file.size===target.size))if(await sameLocalFile(entry.file,target.file))matches.push(entry);
+          if(matches.length===1){Object.assign(target,{parent:matches[0].parent,handle:matches[0].handle,deletable:true});matched++;}
+        }
+        render();$('#cleanupNote').textContent=matched?`已匹配 ${matched} 个内容相同的文件。删除前会再次核对，云端副本不受影响。`:'没有唯一匹配的文件，请选择原文件所在文件夹。';
+      }catch(error){if(error.name!=='AbortError')$('#cleanupNote').textContent='授权失败：'+error.message;}finally{grant.disabled=false;}
     };
-    $("#cleanupCancel").onclick = () => finish({ selected: [], bridge: null });
-    $("#closeCleanupDialog").onclick = () => finish({ selected: [], bridge: null });
-    dialog.oncancel = event => { event.preventDefault(); finish({ selected: [], bridge: null }); };
-    counters();
-    dialog.showModal();
+    $('#cleanupCancel').onclick=$('#closeCleanupDialog').onclick=()=>finish({selected:[],bridge:null});dialog.oncancel=e=>{e.preventDefault();finish({selected:[],bridge:null});};render();dialog.showModal();
   });
 }
 async function removeDirectoryEntry(target) {
@@ -5071,6 +5140,8 @@ async function removeDirectoryEntry(target) {
   if (typeof parent.queryPermission === "function") permission = await parent.queryPermission({ mode: "readwrite" });
   if (permission !== "granted" && typeof parent.requestPermission === "function") permission = await parent.requestPermission({ mode: "readwrite" });
   if (permission !== "granted") throw new Error("未获得该文件夹的写入授权");
+  const current=await (await parent.getFileHandle(target.name)).getFile();
+  if(!await sameLocalFile(current,target.file))throw new Error('文件内容已改变，已保留');
   await parent.removeEntry(target.name);
 }
 async function removeFileHandle(target) {
@@ -5082,14 +5153,16 @@ async function removeFileHandle(target) {
     if (permission !== "granted") throw new Error("未获得该文件的写入授权");
   }
   if (typeof handle.remove !== "function") throw new Error("当前浏览器不支持用文件句柄删除");
+  if(!await sameLocalFile(await handle.getFile(),target.file))throw new Error('文件内容已改变，已保留');
   await handle.remove();
 }
 async function performLocalCleanup(selected, bridge) {
   const byHandle = selected.filter(target => target.parent);
-  const byFileHandle = selected.filter(target => !target.parent && target.handle);
-  const byNative = selected.filter(target => !target.parent && !target.handle && bridge);
+  const byFileHandle = selected.filter(target => !target.parent && typeof target.handle?.remove === "function");
+  const byNative = selected.filter(target => !target.parent && typeof target.handle?.remove !== "function" && bridge);
   let deleted = 0;
   const failures = [];
+  for (const target of selected.filter(target => !target.parent && !target.handle && !bridge)) failures.push({name: target.name, reason: '没有删除权限；请选择所在文件夹授权，或手动删除'});
   for (const target of byHandle) {
     try { await removeDirectoryEntry(target); deleted++; }
     catch (error) { failures.push({ name: target.name, reason: error?.message || "删除失败" }); }
@@ -5104,8 +5177,10 @@ async function performLocalCleanup(selected, bridge) {
       const result = JSON.parse(String(bridge.deleteFiles(JSON.stringify(payload)) || "{}"));
       if (result?.unsupported) failures.push({ name: `${byNative.length} 个文件`, reason: result.message || "系统不允许删除这些文件" });
       else {
-        deleted += Number(result?.deleted) || 0;
+        const nativeDeleted = Math.min(byNative.length, Math.max(0, Number(result?.deleted) || 0));
+        deleted += nativeDeleted;
         for (const item of result?.failed || []) failures.push({ name: item?.name || "文件", reason: item?.reason || "删除失败" });
+        if (nativeDeleted + (result?.failed?.length || 0) < byNative.length) failures.push({name: '本地文件', reason: '系统未确认删除结果，请手动检查'});
       }
     } catch (error) { failures.push({ name: `${byNative.length} 个文件`, reason: error?.message || "原生删除失败" }); }
   }
@@ -5115,6 +5190,7 @@ async function performLocalCleanup(selected, bridge) {
 // the caller keeps its operation lock release path, and a dismissed dialog just
 // leaves the files on disk.
 async function offerLocalCleanup(files, summary) {
+  if(!localCleanupEnabled())return;
   const { targets } = cleanupTargets(files.filter(file => !file.archivePath));
   if (!targets.length) return;
   // 即使当前环境一个都删不了，也要把清单摆出来：用户至少知道哪些文件已经上传、
@@ -5123,6 +5199,7 @@ async function offerLocalCleanup(files, summary) {
   const { selected, bridge } = await openCleanupDialog(targets, summary);
   if (!selected.length) return;
   const result = await performLocalCleanup(selected, bridge);
+  operationMessage($("#unifiedImportStatus"),`本地清理：已删除 ${result.deleted} 个；${result.failures.map(item=>item.name+"："+item.reason).join("；")||"全部完成"}`,result.failures.length>0);
   if (result.failures.length) toast(`已删除 ${result.deleted} 个本地文件，${result.failures.length} 个失败：${result.failures[0].name}（${result.failures[0].reason}）`);
   else toast(`已删除 ${result.deleted} 个本地文件`);
 }
@@ -5178,8 +5255,8 @@ async function importUnifiedFiles(fileList) {
   }
   operationMessage(status, `已识别 ${groups.theme.length} 个主题、${groups.font.length} 个字体、${groups.asset.length} 个收藏，正在依次处理…`);
   if (groups.theme.length) await analyzeFiles(groups.theme);
-  if (groups.font.length) stagePendingFiles(groups.font, "font");
-  if (groups.asset.length) stagePendingFiles(groups.asset, "asset");
+  if (groups.font.length) await stagePendingFiles(groups.font, "font");
+  if (groups.asset.length) await stagePendingFiles(groups.asset, "asset");
   operationMessage(status, `本批已分流：${groups.theme.length} 个主题、${groups.font.length} 个字体、${groups.asset.length} 个收藏。${unsupported.length ? `已跳过不支持的文件：${unsupported.join("、")}` : ""}`, Boolean(unsupported.length));
 }
 // 从别的应用「分享」到 APK：原生把文件复制进 cache，并用 shouldInterceptRequest
@@ -5394,6 +5471,13 @@ document.addEventListener("click", event => {
 $("#closeModal").addEventListener("click", () => $("#modalBackdrop").hidden = true);
 $("#openJobs").addEventListener("click", () => setView("jobs"));
 $("#refreshJobs").addEventListener("click", () => loadJobs().catch(() => {}));
+document.addEventListener('click',event=>{
+  const cloud=event.target.closest('[data-resume-cloud]');if(cloud)resumeStagedJobs(cloud.dataset.resumeCloud).catch(error=>toast(error.message));
+  if(event.target.closest('[data-resume-old]')){if(localTransferRows.length)resumeLocalTransfers().catch(error=>toast(error.message));else{setView('import');toast('此旧任务没有保存原文件，请重新选择原文件；已入库内容会查重跳过');$('#chooseUnifiedFiles').click();}}
+});
+$("#resumeLocalTransfers").addEventListener("click",()=>resumeLocalTransfers().catch(error=>toast(error.message)));
+$("#discardLocalTransfers").addEventListener("click",()=>discardLocalTransfers().catch(error=>toast(error.message)));
+refreshLocalTransfers();
 $("#resumeStagedJobs").addEventListener("click", () => resumeStagedJobs());
 $$("input[name='compressionPreset']").forEach(input => input.addEventListener("change", () => { syncCompressionControls(); updateBulkControls(); }));
 $$("input[name='compressionCodec']").forEach(input => input.addEventListener("change", () => { syncCompressionControls(); updateBulkControls(); }));
@@ -5501,6 +5585,20 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 $("#probePan123").addEventListener("click", probePan123);
+$('#copyPan123Diagnostics').addEventListener('click',async()=>{
+ const text=JSON.stringify({time:new Date().toISOString(),site:location.hostname,events:pan123Diagnostics},null,2);$('#pan123Diagnostics').textContent=text;$('#pan123Diagnostics').hidden=false;
+ try{await navigator.clipboard.writeText(text);toast('已复制诊断，不包含保存的账号和会话');}catch{toast('请选中下面的诊断内容复制');}
+});
+$('#maintenancePlan').addEventListener('click',async()=>{
+ const status=$('#maintenanceStatus'),button=$('#maintenancePlan');button.disabled=true;
+ try{await ensureWriteAccess();const plan=await api('/api/maintenance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'plan'})});
+ $('#maintenanceList').textContent=plan.items.map(item=>item.key+' · '+formatBytes(item.bytes)+' · '+item.reason).join('\n')||'没有符合条件的文件';
+ operationMessage(status,`待核对 ${plan.items.length} 个；另有 ${plan.held_count} 个保留，${plan.remaining} 个可在下一批核对。仅列出无引用且满 7 天的文件。`);
+ const confirm=$('#maintenanceDelete');confirm.hidden=!plan.items.length;confirm.onclick=async()=>{
+ if(!window.confirm('确认删除清单中的 '+plan.items.length+' 个无引用旧文件？此操作无法撤销。'))return;
+ confirm.disabled=true;try{const result=await api('/api/maintenance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'delete',id:plan.id})});operationMessage(status,`已清理 ${result.deleted.length} 个，跳过 ${result.skipped.length} 个。`);confirm.hidden=true;}catch(error){operationMessage(status,error.message,true);}finally{confirm.disabled=false;}};
+ }catch(error){operationMessage(status,error.message,true);}finally{button.disabled=false;}
+});
 $("#deviceTransferForm").addEventListener("submit", transferDeviceConfig);
 $("#testWriteAccess").addEventListener("click", async event => {
   const button = event.currentTarget; button.disabled = true; writeAccess.at = 0;
@@ -5570,7 +5668,10 @@ $("#syncStorage").addEventListener("click", event => cloudOperation("sync", even
 $$('.nav-item').forEach(item => item.addEventListener('click', () => { setView(item.dataset.view); $(".sidebar").classList.remove("is-open"); }));
 $$("#themeDensity .density-option").forEach(button => button.addEventListener("click", () => applyThemeDensity(button.dataset.density)));
 restoreThemeDensity();
-const initialView = location.hash.slice(1);
+let initialView=location.hash.slice(1);
+if(initialView.startsWith('connect=')) {
+  try{pendingConnectConfig=JSON.parse(new TextDecoder().decode(bytesFromBase64(initialView.slice(8).replace(/-/g,'+').replace(/_/g,'/'))));initialView='storage';history.replaceState(null,'',location.pathname+location.search+'#storage');operationMessage($('#deviceTransferStatus'),'已收到加密接入配置，请输入迁移口令并点击导入。');}catch{initialView='storage';toast('接入链接无效，请重新生成');}
+}
 hydrateLocalSnapshots();
 try {
   const saved = JSON.parse(localStorage.getItem("reeden-browse-v1") || "null");

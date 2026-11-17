@@ -2,34 +2,12 @@ import assert from "node:assert/strict";
 import {createHash} from "node:crypto";
 import {handle, __test} from "./worker.js";
 
-class MemoryObject {
-  constructor(bytes, options = {}) {
-    this.bytes = bytes;
-    this.size = bytes.length;
-    this.httpMetadata = options.httpMetadata;
-    this.customMetadata = options.customMetadata || {};
-  }
-  get body() { return new Response(this.bytes).body; }
-  async text() { return new TextDecoder().decode(this.bytes); }
-}
-class MemoryR2 {
-  constructor() { this.items = new Map(); }
-  async put(key, data, options = {}) { this.items.set(key, new MemoryObject(new Uint8Array(data), options)); }
-  async get(key) { return this.items.get(key) || null; }
-  async head(key) { return this.items.get(key) || null; }
-  async delete(key) { this.items.delete(key); }
-  async list({prefix, cursor, limit}) {
-    const keys = [...this.items.keys()].filter(key => key.startsWith(prefix)).sort();
-    const start = cursor ? Number(cursor) : 0;
-    const page = keys.slice(start, start + limit);
-    return {objects: page.map(key => ({key})), truncated: start + limit < keys.length, cursor: String(start + limit)};
-  }
-}
+import {MemoryR2} from "../scripts/test-memory-r2.mjs";
 
 const encoder = new TextEncoder();
 const origin = "https://example.github.io";
 const token = "test-token";
-const env = {ASSETS: new MemoryR2(), ALLOWED_ORIGINS: origin, SYNC_WRITE_TOKEN: token};
+const env = {ASSETS: new MemoryR2(), ALLOWED_ORIGINS: origin, PRIVATE_LIBRARY:false, SYNC_WRITE_TOKEN: token};
 const headers = (extra = {}) => ({Origin: origin, Authorization: `Bearer ${token}`, ...extra});
 const sha256 = async bytes => __test.digestHex(bytes);
 
@@ -126,19 +104,19 @@ assert.equal(deleteOne.status, 200);
 assert.equal((await env.ASSETS.get(`assets/${sharedSha}.svg`)) !== null, true);
 const deleteTwo = await handle(new Request("https://worker.example/api/library", {method: "DELETE", headers: headers({"Content-Type": "application/json"}), body: JSON.stringify({items: [{kind: "asset", id: "shared-b"}]}),}), env);
 assert.equal(deleteTwo.status, 200);
-assert.equal((await env.ASSETS.get(`assets/${sharedSha}.svg`)) === null, true);
+assert.equal((await env.ASSETS.get(`assets/${sharedSha}.svg`)) !== null, true,"soft deletion retains bytes until reviewed cleanup");
 // New uploads use readable object names, including Chinese and URL escapes.
 for (const key of ['assets/共享图标.svg', 'assets/仅此一份.html']) await env.ASSETS.put(key, encoder.encode('named-object'));
 for (const id of ['named-a', 'named-b']) {
   const item = {kind:'asset', id, object_url:'https://worker.example/api/objects/assets/'+encodeURIComponent('共享图标.svg')};
   if (id === 'named-a') item.preview_url = '/api/objects/assets/'+encodeURIComponent('仅此一份.html');
-  const data = encoder.encode(JSON.stringify(item));await env.ASSETS.put('records/'+await sha256(data)+'.json',data);
+  const data = encoder.encode(JSON.stringify(item));await handle(new Request('https://worker.example/api/objects/records/'+await sha256(data)+'.json',{method:'PUT',headers:headers(),body:data}),env);
 }
 for (const id of ['named-a','named-b']) {
   const deleted = await handle(new Request('https://worker.example/api/library',{method:'DELETE',headers:headers({'Content-Type':'application/json'}),body:JSON.stringify({items:[{kind:'asset',id}]})}),env);
   assert.equal(deleted.status,200);
-  assert.equal((await env.ASSETS.get('assets/共享图标.svg')) !== null,id === 'named-a','shared named objects survive until the last reference is deleted');
-  assert.equal(await env.ASSETS.get('assets/仅此一份.html'),null,'unshared named objects are removed');
+  assert.notEqual(await env.ASSETS.get('assets/共享图标.svg'),null,'bytes remain until reviewed cleanup');
+  assert.notEqual(await env.ASSETS.get('assets/仅此一份.html'),null,'unshared named objects are deferred for review');
 }
 // The standalone Worker shares the Pages implementation, so the encrypted
 // RED repack route must exist here too (a 404 would mean the copies drifted).
@@ -367,7 +345,7 @@ assert.equal((await emptyInventory.json()).folderExists, false);
 // Batch download: the Worker builds a Stored ZIP straight from R2, so the
 // browser never has to fetch 50 MB of fonts into JS memory and deflate them
 // again. Verify the archive byte-for-byte, including the manifest.
-const dlEnv = {ASSETS: new MemoryR2(), ALLOWED_ORIGINS: origin, SYNC_WRITE_TOKEN: token};
+const dlEnv = {ASSETS: new MemoryR2(), ALLOWED_ORIGINS: origin, PRIVATE_LIBRARY:false, SYNC_WRITE_TOKEN: token};
 const dlFontA = encoder.encode("font-A-bytes"), dlPreviewA = encoder.encode("preview-A-jpeg");
 const dlFontB = encoder.encode("font-B-bytes"), dlPreviewB = encoder.encode("preview-B-jpeg");
 const [faSha, paSha, fbSha, pbSha] = await Promise.all([dlFontA, dlPreviewA, dlFontB, dlPreviewB].map(sha256));
@@ -439,10 +417,11 @@ assert.equal(dlManifest.files.length, 4);
 assert.equal(dlManifest.kind, "font");
 // A missing object is reported inside the archive instead of aborting the
 // whole download; the remaining files stay usable.
-const ghostSha = "f".repeat(64);
+const ghostBytes=encoder.encode("ghost font");const ghostSha=await sha256(ghostBytes);await dlPut(`fonts/${ghostSha}.ttf`,ghostBytes);
 const ghostRecord = encoder.encode(JSON.stringify({kind: "font", id: "font-dl-ghost", file_name: "Ghost.ttf", extension: "ttf",
   url: `/api/objects/fonts/${ghostSha}.ttf`, updated_at: "2026-11-15T00:00:00.000Z"}));
 await dlPut(`records/${await sha256(ghostRecord)}.json`, ghostRecord);
+await dlEnv.ASSETS.delete(`fonts/${ghostSha}.ttf`);
 const ghostResponse = await handle(new Request(`https://worker.example/api/download?kind=font&ids=font-dl-a,font-dl-ghost`, {headers: {Origin: origin}}), dlEnv);
 assert.equal(ghostResponse.status, 200);
 const ghostZip = new Uint8Array(await ghostResponse.arrayBuffer());

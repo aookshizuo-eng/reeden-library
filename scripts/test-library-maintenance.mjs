@@ -3,23 +3,10 @@ import {createRequire} from "node:module";
 import {handle, __test} from "../pages/worker-api.js";
 const codec = createRequire(import.meta.url)("../site/free_codec.js");
 const encoder = new TextEncoder();
-class MemoryR2 {
-  items = new Map(); gets = 0; lists = 0;
-  async put(key, value, options={}) {
-    const bytes = new Uint8Array(value);
-    this.items.set(key,{body:bytes,text:async()=>new TextDecoder().decode(bytes),httpMetadata:options.httpMetadata});
-  }
-  async get(key) { this.gets++; return this.items.get(key); }
-  async list({prefix,cursor,limit}) {
-    this.lists++;
-    const keys=[...this.items.keys()].filter(key=>key.startsWith(prefix)).sort();
-    const start=Number(cursor||0);
-    return {objects:keys.slice(start,start+limit).map(key=>({key})),truncated:start+limit<keys.length,cursor:String(start+limit)};
-  }
-  async delete(key) { this.items.delete(key); }
-}
+import {MemoryR2} from "./test-memory-r2.mjs";
+
 const bucket=new MemoryR2();
-const env={ASSETS:bucket,SYNC_WRITE_TOKEN:"test-token",ALLOWED_ORIGINS:"https://app.example"};
+const env={ASSETS:bucket,SYNC_WRITE_TOKEN:"test-token",PRIVATE_LIBRARY:false,ALLOWED_ORIGINS:"https://app.example"};
 const headers={Origin:"https://app.example",Authorization:"Bearer test-token","Content-Type":"application/json"};
 let target;
 for(let i=0;i<250;i++){
@@ -47,7 +34,7 @@ assert.deepEqual(updated.tags,["新标签"]);
 const stale=await handle(new Request("https://app.example/api/themes/theme249",{method:"PATCH",headers,body:JSON.stringify({record_sha256:target.record_sha256,name:"过期版本"})}),env);
 assert.equal(stale.status,409);
 const wrong=await handle(new Request("https://app.example/api/fonts/theme249",{method:"PATCH",headers,body:JSON.stringify({record_sha256:updated.record_sha256,tags:[]})}),env);
-assert.equal(wrong.status,409);
+assert.equal(wrong.status,404);
 const previewEdit=await handle(new Request("https://app.example/api/themes/theme249",{method:"PATCH",headers,body:JSON.stringify({record_sha256:updated.record_sha256,preview_light_url:"/api/objects/previews/"+"a".repeat(64)+".jpg",preview_dark_url:"",preview_details:{kind:"shelf_and_splash",renderer_version:2}})}),env);
 assert.equal(previewEdit.status,200);
 const previewItem=(await previewEdit.json()).item;

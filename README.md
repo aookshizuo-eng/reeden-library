@@ -9,11 +9,11 @@
 - 本地：`npm ci`，然后运行 `npm run dev`。若要连接共享库，在「存储设置 → 多设备访问」填写同步地址。
 - GitHub Pages：`npm run build` 生成 `dist/`。仓库的 Pages Source 选择 **GitHub Actions**，推送 `main` 后自动发布。
 - Cloudflare Pages：`npm run build:pages` 生成含 Worker 的 `dist-pages/`。沿用项目 `red-garden-sync` 与现有 R2 绑定。部署前运行 `npm run verify -- --cloudflare`，部署后用 `npm run verify -- --cloudflare --url=https://red-garden-sync.pages.dev --require-current` 核对线上文件。
-- Android：构建时将 `dist/` 内置进 APK。已安装的旧 APK 仍使用自己的内置前端，需要安装新版 APK 才能看到改动。
+- Android：新版优先加载线上前端，联网失败时回退内置 `dist/`。旧 APK 需要升级一次才能获得这一行为。
 
-Pages 版本自动使用共享同步地址，上传设备还需要写入 Token，前端不需要 R2 Access Key。地址和 Token 修改后自动保存在当前设备；换电脑可在「存储设置 → 迁移设备配置」导出加密配置，用同一口令在另一台电脑导入。123 会话可选择一起迁移，账号密码不会保存或导出。
+Pages 版本自动使用共享同步地址，所有设备需要私有库访问口令，前端不需要 R2 Access Key。地址和 Token 修改后自动保存在当前设备；换电脑可在「存储设置 → 迁移设备配置」导出加密配置，用同一口令在另一台电脑导入。123 会话可选择一起迁移，账号密码不会保存或导出。
 
-资源索引缓存在设备的 IndexedDB，重开页面优先显示缓存，不重新读取整库；其他设备修改后点击刷新获取。空闲任务停止轮询；启用自动继续时，旧的任务快照仍会做一次检查。改名称、分类或标签只读取和写入对应记录，不再为每次编辑扫描全库。旧缓存首次编辑会先补齐记录引用。缓存不是备份，清除浏览器数据后会重新读取。
+资源索引缓存在设备的 IndexedDB，重开页面优先显示缓存，不重新读取整库；其他设备修改后点击刷新获取。空闲任务停止轮询；启用自动继续时，旧的任务快照仍会做一次检查。云端共享清单使用 R2 条件写入：首次迁移只读记录 JSON，后续手动刷新读取一份清单并支持 ETag / 304；改名称、分类或标签不扫描对象列表，同一记录过期修改返回 409。旧缓存首次编辑会先补齐记录引用。缓存不是备份，清除浏览器数据后会重新读取。
 
 三个库支持最新入库、最早入库、最近修改、名称、大小排序和最近 24 小时筛选；支持批量添加、移除、替换标签，以及根据已有分类和文件类型补标签。上传前检查写入权限，整批结束显示汇总，失败文件留在待上传列表。
 
@@ -55,6 +55,26 @@ R2 对象键只保留可读名：`compressed/少女心事-压缩.red`、`origina
 
 `android/` 是一个轻量 WebView 壳：它把同一份 Pages 前端打进 APK，并保留 GitHub Pages origin，因此手机和电脑填写同一个 R2 Worker 后共用同一套主题、字体和预览库。APK 需要联网访问 R2；它不会把 R2 密钥或 123 会话打包进去。文件选择器使用 `ACTION_OPEN_DOCUMENT` 并申请写权限，因此「上传成功后删除本地文件」只能删本次通过应用选择的文件，按显示名与大小匹配；网页层只在本站点 origin 下拿得到 `RedGardenNative` 桥。
 
-没有 Android Studio 时也可以在 Windows Git Bash 中用 `android/build-apk.sh` 手动打包：脚本使用 `android/toolchain/` 下的 JDK 17、build-tools 35 和 platform 35，依次跑 aapt2 → javac → d8 → zipalign → apksigner，产出 `android/build/red-garden-1.1.9.apk`，依赖本机 `android/manual-build/debug.keystore`。这条旧脚本仍有本机绝对路径；换电脑建议使用下方 GitHub Actions 构建。工具链、构建目录和签名文件不要提交。
+没有 Android Studio 时也可以在 Windows Git Bash 中用 `android/build-apk.sh` 手动打包：脚本使用 `android/toolchain/` 下的 JDK 17、build-tools 35 和 platform 35，依次跑 aapt2 → javac → d8 → zipalign → apksigner，产出 `android/build/red-garden-1.2.0.apk`，依赖本机 `android/manual-build/debug.keystore`。脚本自动定位仓库，和 Gradle 共用 `android/version.properties`。两条安装渠道保留各自原有包名与签名，避免覆盖已有安装；跨渠道不能保证直接覆盖升级。工具链、构建目录和签名文件不要提交。
 
 推送仓库后，在 GitHub Actions 运行 **Build Red Garden Android APK**，下载构建产物 `red-garden-android-debug` 里的 `app-debug.apk`。这是 debug 签名包，适合个人安装；如果公开分发，需要换成自己的 release keystore。
+
+## 私有库、配置与恢复
+
+默认启用私有读取。`SYNC_WRITE_TOKEN` 同时用于读取和写入；`PRIVATE_LIBRARY=false` 仅用于有意公开的资源库。预览与下载使用短期签名地址，口令不放入资源 URL。不要给 R2 桶启用公开域名。私有模式不依赖 Supabase。
+
+新设备：在已连接设备的「存储设置 → 多设备访问」生成接入链接，另一台设备打开并输入迁移口令。也可导出 / 导入加密配置。AES-GCM 密文可以保存到私有库，迁移口令始终留在设备，链接与口令请分开传送。123 会话可选包含在密文里，平台会话过期仍须本人重新验证。
+
+普通导入先把 File 与可持久化的文件句柄保存在 IndexedDB，页面顶部显示「继续上传」。逐文件成功后移除恢复副本；失败及尚未确认的文件保留。跨电脑接续需要先勾选「后台暂存」，或用 CLI 先上传原文件；逐文件接续，不是字节级断点上传。浏览器存储空间不足会明确报错，清除站点数据会移除本机恢复副本。
+
+CLI 先建任务、再逐项上传并登记。中断后重新选择同一批文件，追加 `--resume <任务ID>`；已暂存文件通过 HEAD + SHA-256 检查后跳过。123 备份失败会记录错误，不中止 R2 入库。网页处理中的批次有两分钟租约，其他设备等待租约到期后可接管。
+
+删除资源先更新共享清单，文件进入待清理列表。存储设置中「历史文件清理」先生成核对清单，再由用户确认删除；只处理无引用且满 7 天的旧文件，每批最多 50 个。未入库原文件默认保留。清理前核对清单版本与对象 ETag，执行期间暂停新写入。没有自动扫描删除真实历史文件。
+
+本地清理需主动开启。文件句柄不能删除时可另行授权所在文件夹，仅匹配内容一致的唯一文件；删除前再次核对 SHA-256。权限不足、文件变化或系统未确认的结果会明确显示，不能再把未执行的删除当成功。
+
+## 构建依赖与验证
+
+`npm ci` 的 postinstall 会暂时禁用 picomatch 重复 extglob（`+(...)` / `*(...)`），降低已知构建期正则回溯风险；普通 `**/*.js` 不受影响。上游未提供完整修复时 `npm audit` 的版本警告仍会保留，本地缓解不等于上游已修复。生产依赖审计通过。
+
+验证：`node worker/test-worker.mjs`、`node worker/test-private-repack.mjs`、`node scripts/test-library-maintenance.mjs`、`node scripts/test-sync-resume.mjs`、`node scripts/test-compress-references.mjs`；构建后运行 `node scripts/verify-pages.mjs --cloudflare`。新增测试覆盖私有读取、签名资源、并发 CAS、304、核对清理、租约、CLI 中断恢复和构建 glob 缓解。

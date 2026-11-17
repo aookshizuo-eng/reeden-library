@@ -65,6 +65,7 @@ public final class MainActivity extends Activity {
     // 以前每次选择都清空，批量导入后再统一删除时只剩最后一批能对上，表现就是
     // 弹窗里列了 N 个文件却只删掉一个。
     private final Map<String, Uri> pickedDocuments = new java.util.LinkedHashMap<>();
+    private volatile boolean bundledFallback = false;
     private volatile String currentPageUrl = HOME_URL;
     // 从别的应用分享进来的文件：先复制到 cache，再让网页用同源 URL 读走。
     // 用 URL 而不是 base64 桥，是因为主题动辄 20 MB，base64 字符串会直接
@@ -288,7 +289,15 @@ public final class MainActivity extends Activity {
             public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest request) {
                 WebResourceResponse shared = openSharedFile(request.getUrl(), request.getMethod());
                 if (shared != null) return shared;
-                return openBundledSiteAsset(request.getUrl(), request.getMethod());
+                return bundledFallback ? openBundledSiteAsset(request.getUrl(), request.getMethod()) : null;
+            }
+
+            @Override
+            public void onReceivedError(WebView v, WebResourceRequest request, android.webkit.WebResourceError error) {
+                if (request.isForMainFrame() && isSiteUrl(request.getUrl()) && !bundledFallback) {
+                    bundledFallback = true;
+                    v.loadUrl(HOME_URL);
+                }
             }
 
             @Override

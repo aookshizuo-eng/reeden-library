@@ -7,7 +7,8 @@
     "build": "vite build",
     "preview": "vite preview --port 8765",
     "verify": "node scripts/verify-pages.mjs",
-    "build:pages": "node scripts/sync-pages.mjs"
+    "build:pages": "node scripts/sync-pages.mjs",
+    "postinstall": "node scripts/harden-build-globs.mjs"
   },
   "repository": {
     "type": "git",

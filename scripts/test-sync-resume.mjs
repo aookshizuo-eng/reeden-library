@@ -1,0 +1,45 @@
+import assert from 'node:assert/strict';
+import {handle,__test} from '../pages/worker-api.js';
+import {MemoryR2} from './test-memory-r2.mjs';
+import {spawn,spawnSync} from 'node:child_process';
+import {createServer} from 'node:http';
+import {mkdir,writeFile,rm} from 'node:fs/promises';
+import path from 'node:path';
+const bucket=new MemoryR2(),origin='https://app.example',env={ASSETS:bucket,SYNC_WRITE_TOKEN:'test-token',ALLOWED_ORIGINS:origin};
+const headers={Origin:origin,Authorization:'Bearer test-token','Content-Type':'application/json'};
+const call=(url,method='GET',body,extra={})=>handle(new Request(origin+url,{method,headers:{...headers,...extra},...(body===undefined?{}:{body:JSON.stringify(body)})}),env);
+const put=async record=>{const bytes=JSON.stringify(record),sha=await __test.digestHex(new TextEncoder().encode(bytes));const response=await handle(new Request(origin+'/api/objects/records/'+sha+'.json',{method:'PUT',headers,body:bytes}),env);assert.equal(response.status,201,await response.clone().text());return (await response.json()).item;};
+await bucket.put('assets/private.svg','private-svg',{customMetadata:{sha256:'a'.repeat(64)}});
+for(const route of ['/api/library','/api/jobs','/api/storage','/api/objects/assets/private.svg'])assert.equal((await handle(new Request(origin+route),env)).status,401);
+const session=await (await call('/api/session')).json();assert.ok(session.ticket);
+assert.equal((await handle(new Request(origin+'/api/objects/assets/private.svg?access='+session.ticket),env)).status,200);
+assert.equal((await handle(new Request(origin+'/api/library?access='+session.ticket),env)).status,401);
+assert.equal((await handle(new Request(origin+'/api/objects/assets/private.svg?access='+session.ticket+'x'),env)).status,401);
+const a=await put({kind:'asset',id:'a',name:'Alpha',object_url:'/api/objects/assets/private.svg'}),b=await put({kind:'asset',id:'b',name:'Beta',object_url:'/api/objects/assets/private.svg'});
+const listing=await call('/api/library?all=1'),tag=listing.headers.get('ETag');bucket.lists=0;
+assert.equal((await call('/api/library?all=1','GET',undefined,{'If-None-Match':tag})).status,304);assert.equal(bucket.lists,0);
+const same=await Promise.all(['One','Two'].map(name=>call('/api/assets/a','PATCH',{record_sha256:a.record_sha256,name})));
+assert.deepEqual(same.map(x=>x.status).sort(),[200,409]);
+const fresh=(await (await call('/api/library?all=1')).json()).records.find(x=>x.id==='a');
+const different=await Promise.all([call('/api/assets/a','PATCH',{record_sha256:fresh.record_sha256,tags:['A']}),call('/api/assets/b','PATCH',{record_sha256:b.record_sha256,tags:['B']})]);assert.deepEqual(different.map(x=>x.status),[200,200]);assert.equal(bucket.lists,0);
+const records=(await (await call('/api/library?all=1')).json()).records;assert.deepEqual(records.find(x=>x.id==='a').tags,['A']);assert.deepEqual(records.find(x=>x.id==='b').tags,['B']);
+await call('/api/library','DELETE',{items:[{kind:'asset',id:'a'}]});assert.ok(await bucket.head('assets/private.svg'));
+const old=new Date(Date.now()-10*86400000);await bucket.put('previews/old.jpg','old');bucket.items.get('previews/old.jpg').uploaded=old;
+await bucket.put('originals/unindexed.red','keep');bucket.items.get('originals/unindexed.red').uploaded=old;
+let plan=await (await call('/api/maintenance','POST',{action:'plan'})).json();assert.ok(plan.items.some(x=>x.key==='previews/old.jpg'));assert.ok(!plan.items.some(x=>x.key==='assets/private.svg'||x.key==='originals/unindexed.red'));
+await call('/api/assets/b','PATCH',{tags:['changed']});assert.equal((await call('/api/maintenance','POST',{action:'delete',id:plan.id})).status,409);
+plan=await (await call('/api/maintenance','POST',{action:'plan'})).json();const cleaned=await (await call('/api/maintenance','POST',{action:'delete',id:plan.id})).json();assert.ok(cleaned.deleted.includes('previews/old.jpg'));assert.equal(await bucket.head('previews/old.jpg'),null);assert.ok(await bucket.head('originals/unindexed.red'));assert.ok(await bucket.head('assets/private.svg'));
+const created=(await (await call('/api/jobs','POST',{kind:'staged-import',items:['a.svg'],source_keys:['/api/objects/staging/'+'a'.repeat(64)+'.svg'],upload_complete:false})).json()).job;assert.equal(created.status,'uploading');
+assert.equal((await call('/api/jobs/'+created.id,'PATCH',{owner:'first',status:'running'})).status,200);assert.equal((await call('/api/jobs/'+created.id,'PATCH',{owner:'second',status:'running'})).status,409);
+assert.equal((await call('/api/jobs/'+created.id,'PATCH',{owner:'first',release:true,status:'partial',done_keys:['done']})).status,200);assert.equal((await call('/api/jobs/'+created.id,'PATCH',{owner:'second',status:'running'})).status,200);
+assert.equal((await call('/api/device-config','PUT',{syncToken:'plaintext'})).status,400);
+assert.equal((await call('/api/device-config','PUT',{format:'reeden-device-v1',cipher:'ciphertext',iv:'iv',salt:'salt'})).status,200);assert.ok(!(await (await bucket.get('system/device-config-v1.json')).text()).includes('test-token'));
+const glob=spawnSync(process.execPath,['-e',`const assert=require('node:assert/strict'),p=require('picomatch');assert.ok(p('site/**/*.js')('site/a/b.js'));assert.ok(!p('site/**/*.js')('site/a.css'));for(const pattern of ['+(*)','+(*a)','*(a|aa)','+(*(a))'])p(pattern)('a'.repeat(10000)+'!');`],{cwd:process.cwd(),timeout:2500,encoding:'utf8'});assert.equal(glob.status,0,glob.stderr);
+// Exercise the actual CLI against the Worker, including an interrupted batch.
+const cliBucket=new MemoryR2();let failSecond=true,firstPutHadJob=false,puts=0;
+const server=createServer(async(req,res)=>{try{const chunks=[];for await(const chunk of req)chunks.push(chunk);if(req.method==='PUT'&&req.url.includes('/staging/')){puts++;firstPutHadJob=[...cliBucket.items.keys()].some(x=>x.startsWith('jobs/'));if(failSecond&&puts===2){failSecond=false;res.writeHead(503).end('temporary interruption');return;}}
+ const url='http://127.0.0.1:'+server.address().port;const response=await handle(new Request(url+req.url,{method:req.method,headers:req.headers,...(['GET','HEAD'].includes(req.method)?{}:{body:Buffer.concat(chunks)})}),{ASSETS:cliBucket,SYNC_WRITE_TOKEN:'test-token',ALLOWED_ORIGINS:url});res.writeHead(response.status,Object.fromEntries(response.headers)).end(Buffer.from(await response.arrayBuffer()));}catch(error){res.writeHead(500).end(error.message);}});
+await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const dir=path.resolve('work/sync-resume-test');await mkdir(dir,{recursive:true});await writeFile(path.join(dir,'甲.svg'),'<svg>one</svg>');await writeFile(path.join(dir,'乙.html'),'<html>two</html>');
+const run=resume=>new Promise(resolve=>{let output='';const child=spawn(process.execPath,['scripts/remote-import.mjs','--dir',dir,'--api','http://127.0.0.1:'+server.address().port,...(resume?['--resume',resume]:[])],{env:{...process.env,REEDEN_SYNC_TOKEN:'test-token'}});child.stdout.on('data',x=>output+=x);child.stderr.on('data',x=>output+=x);child.on('exit',code=>resolve({code,output}));});
+try{const first=await run();assert.equal(first.code,1,first.output);assert.ok(firstPutHadJob);const jobs=[...cliBucket.items].filter(([key])=>key.startsWith('jobs/')).map(([,x])=>JSON.parse(new TextDecoder().decode(x.bytes)));assert.equal(jobs.length,1);assert.equal(jobs[0].status,'partial');const second=await run(jobs[0].id);assert.equal(second.code,0,second.output);assert.equal(puts,3,'resume skips the first already uploaded blob');assert.equal(JSON.parse(await (await cliBucket.get('jobs/'+jobs[0].id+'.json')).text()).status,'queued');}finally{server.close();await rm(dir,{recursive:true,force:true});}
+console.log('PASS: private reads and signed assets; atomic concurrent edits; 304/no LIST; safe reviewed cleanup; durable leases; ciphertext config; bounded build globs; CLI job-first interruption/resume.');

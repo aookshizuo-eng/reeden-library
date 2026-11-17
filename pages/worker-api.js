@@ -3,9 +3,82 @@
  *
  * R2 is used only as object storage. Browser clients never receive an R2
  * access key; this Worker is the R2 binding and validates object hashes before
- * accepting a write. Reads are intentionally public when the Worker URL is
- * known. Configure SYNC_WRITE_TOKEN before enabling browser uploads.
+ * accepting a write. Reads require the device access token or a short-lived signed URL.
+ * Set PRIVATE_LIBRARY=false only for an intentionally public library. Configure SYNC_WRITE_TOKEN before enabling browser uploads.
  */
+
+
+const LIBRARY_INDEX_KEY = 'system/library-v1.json';
+function problem(status, message) { return Object.assign(new Error(message), {status}); }
+const indexRecordId = record => `${record.kind}:${record.id}`;
+async function loadLibraryIndex(env) {
+  let object = await env.ASSETS.get(LIBRARY_INDEX_KEY);
+  if (object) {
+    const data = JSON.parse(await object.text());
+    if (data.version !== 1 || !Array.isArray(data.records)) throw problem(503, '共享清单格式异常，未覆盖原数据');
+    return {data, etag: object.etag};
+  }
+  // One-time migration reads record JSON only, never RED/font/image payloads.
+  const entries = await scanRecordEntries(env);
+  const latest = new Map();
+  for (const {key,record} of entries) {
+    if (!['theme','font','asset'].includes(record?.kind) || !record.id) continue;
+    const id = indexRecordId(record), previous = latest.get(id);
+    if (!previous || String(previous.updated_at || '') < String(record.updated_at || '')) latest.set(id, {...record,record_sha256:key.slice(8,-5)});
+  }
+  const data = {version:1, revision:crypto.randomUUID(), records:[...latest.values()], garbage:[], updated_at:new Date().toISOString()};
+  const saved = await env.ASSETS.put(LIBRARY_INDEX_KEY,JSON.stringify(data),{onlyIf:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'}});
+  if (saved === null) return loadLibraryIndex(env);
+  return {data,etag:saved?.etag};
+}
+async function mutateLibraryIndex(env, change) {
+  for (let attempt=0;attempt<6;attempt++) {
+    const current = await loadLibraryIndex(env);
+    if (current.data.maintenance?.until > Date.now()) throw problem(423,'资源库正在核对清理，请稍后重试；本地任务已保留');
+    const value = await change(current.data);
+    current.data.revision = crypto.randomUUID();current.data.updated_at = new Date().toISOString();
+    const saved = await env.ASSETS.put(LIBRARY_INDEX_KEY,JSON.stringify(current.data),{onlyIf:current.etag?{etagMatches:current.etag}:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'},customMetadata:{maintenance_until:'0'}});
+    if (saved !== null) return value;
+  }
+  throw problem(409,'其他设备正在修改资源库，请稍后重试；本地任务已保留');
+}
+async function registerRecord(env, record, sha) {
+  if (!record || !['theme','font','asset'].includes(record.kind) || typeof record.id!=='string' || !record.id || record.id.length>160) throw problem(400,'资源记录格式无效');
+  return mutateLibraryIndex(env,async data=>{
+    const previous=data.records.find(item=>indexRecordId(item)===indexRecordId(record));
+    if (previous) return previous; // Idempotent replay must not erase user edits.
+    const references=[...referencedObjectKeys(record)].filter(key=>!key.startsWith('records/'));
+    for(const key of references)if(!await env.ASSETS.head(key))throw problem(409,'关联文件不存在，请从恢复任务重新上传：'+key);
+    const item={...record,record_sha256:sha};data.records.push(item);return item;
+  });
+}
+function privateLibrary(env) { return String(env.PRIVATE_LIBRARY ?? 'true') !== 'false'; }
+async function readKey(env) {
+  if (!env.SYNC_WRITE_TOKEN) throw problem(503,'私有库尚未配置访问口令');
+  return crypto.subtle.importKey('raw',new TextEncoder().encode(env.SYNC_WRITE_TOKEN),{name:'HMAC',hash:'SHA-256'},false,['sign','verify']);
+}
+async function readTicket(env) {
+  const expires=(Math.floor(Date.now()/86400000)+2)*86400000;
+  const signature=new Uint8Array(await crypto.subtle.sign('HMAC',await readKey(env),new TextEncoder().encode(String(expires))));
+  return {ticket:`${expires}.${base64String(signature).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}`,expires};
+}
+async function mayRead(request,env) {
+  if (!privateLibrary(env) || checkWriteToken(request,env)) return true;
+  const url=new URL(request.url);
+  if (!url.pathname.startsWith('/api/objects/') && url.pathname!=='/api/download') return false;
+  const [expires,signature] = (url.searchParams.get('access') || '').split('.');
+  if (!/^\d+$/.test(expires || '') || Number(expires)<Date.now() || Number(expires)>Date.now()+172800000 || !signature) return false;
+  try { return await crypto.subtle.verify('HMAC',await readKey(env),base64Bytes(signature.replace(/-/g,'+').replace(/_/g,'/')),new TextEncoder().encode(expires)); } catch { return false; }
+}
+async function deviceConfig(request,env) {
+  if(!originAllowed(request,env,{write:request.method!=='GET'}))throw problem(403,'Origin 不在允许列表中');
+  const key='system/device-config-v1.json';
+  if(request.method==='GET') {const object=await env.ASSETS.get(key);return object?response(await object.text(),200,request,env,{'Content-Type':'application/json'}):json({error:'尚未保存云端加密配置'},404,request,env);}
+  if(!checkWriteToken(request,env))return json({error:'需要访问口令'},401,request,env);
+  const raw=await request.text();if(raw.length>262144)return json({error:'配置文件过大'},413,request,env);
+  const data=JSON.parse(raw);if(data.format!=='reeden-device-v1'||typeof data.cipher!=='string'||typeof data.salt!=='string'||typeof data.iv!=='string')return json({error:'只接受加密配置'},400,request,env);
+  await env.ASSETS.put(key,raw,{httpMetadata:{contentType:'application/json'}});return json({ok:true},200,request,env);
+}
 
 const DEFAULT_MAX_UPLOAD_BYTES = 96 * 1024 * 1024;
 const MAX_LIST_RECORDS = 200;
@@ -58,7 +131,8 @@ function corsHeaders(request, env) {
   return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET,HEAD,PUT,POST,PATCH,DELETE,OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization,Content-Type,Content-Length,X-Content-SHA256,X-Pan123-Token,X-Pan123-Folder,X-Pan123-Filename,X-Pan123-Etag",
+    "Access-Control-Allow-Headers": "Authorization,Content-Type,Content-Length,X-Content-SHA256,X-Pan123-Token,X-Pan123-Folder,X-Pan123-Filename,X-Pan123-Etag,If-None-Match",
+    "Access-Control-Expose-Headers": "ETag,X-Content-SHA256",
     "Access-Control-Max-Age": "600",
     Vary: "Origin",
   };
@@ -86,7 +160,7 @@ function json(value, status, request, env, extra = {}) {
 function originAllowed(request, env, {write = false} = {}) {
   const origin = request.headers.get("Origin");
   const allowed = configuredOrigins(env);
-  if (!origin) return !write;
+  if (!origin) return !write || checkWriteToken(request, env);
   // A Pages deployment may receive its own generated `*.pages.dev` hostname
   // before the dashboard variable list has been refreshed. Same-origin calls
   // are still protected by the write token below, so accepting the Worker
@@ -405,6 +479,8 @@ async function deleteStagingObject(request, env, spec) {
 async function putObject(request, env, spec) {
   if (!originAllowed(request, env, {write: true})) return json({error: "Origin 不在允许列表中"}, 403, request, env);
   if (!checkWriteToken(request, env)) return json({error: "上传接口需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
+  const indexHead=typeof env.ASSETS.head==='function'?await env.ASSETS.head(LIBRARY_INDEX_KEY):null;
+  if(Number(indexHead?.customMetadata?.maintenance_until)>Date.now())throw problem(423,'资源库正在清理，请稍后继续恢复任务');
   const length = request.headers.get("Content-Length");
   if (length !== null && (!/^\d+$/.test(length) || Number(length) > maxUpload(env))) {
     return json({error: "上传文件超过大小限制"}, 413, request, env);
@@ -418,9 +494,26 @@ async function putObject(request, env, spec) {
   if (declared && declared !== actual) return json({error: "内容与声明的 SHA-256 不一致", actual}, 400, request, env);
   if (spec.sha && spec.sha !== actual) return json({error: "SHA-256 与对象路径不一致", actual}, 400, request, env);
   const key = await resolveObjectKey(env, spec, actual);
-  await env.ASSETS.put(key, data, {httpMetadata: {contentType: contentType(spec)}, customMetadata: {sha256: actual}});
+  let item;
+  if (spec.kind === 'records') {
+    let record; try { record=JSON.parse(new TextDecoder().decode(data)); } catch { throw problem(400,'资源记录不是有效 JSON'); }
+    await env.ASSETS.put(key,data,{httpMetadata:{contentType:'application/json'},customMetadata: {sha256: actual}});
+    item=await registerRecord(env,record,actual);
+  } else {
+    // Conditional creation closes the readable-name race between devices.
+    let candidate=key, saved;
+    for(let attempt=0;attempt<6;attempt++) {
+      saved=await env.ASSETS.put(candidate,data,{onlyIf:{etagDoesNotMatch:'*'},httpMetadata:{contentType:contentType(spec)},customMetadata: {sha256: actual}});
+      if(saved!==null)break;
+      const existing=await env.ASSETS.head(candidate);
+      if(existing?.customMetadata?.sha256===actual){saved=existing;break;}
+      candidate=`${spec.kind}/${spec.label || spec.sha}-${actual.slice(0,16)}${attempt?'-'+attempt:''}.${spec.ext}`;
+    }
+    if(saved===null)throw problem(409,'同名文件正在由其他设备上传，请重试');
+    return json({ok:true,key:candidate,filename:candidate.slice(spec.kind.length+1),sha256:actual,bytes:data.byteLength},201,request,env);
+  }
   const filename = key.slice(spec.kind.length + 1);
-  return json({ok: true, key, filename, sha256: actual, bytes: data.byteLength}, 201, request, env);
+  return json({ok: true, key, filename, sha256: actual, bytes: data.byteLength, item}, 201, request, env);
 }
 // A readable key is not unique on its own: two themes can share a name, and a
 // re-compressed pack must not silently replace the previous one. Reuse the
@@ -438,10 +531,12 @@ async function resolveObjectKey(env, spec, digest) {
 }
 
 async function getObject(request, env, spec) {
-  const object = await env.ASSETS.get(spec.key);
+  const object = request.method==='HEAD' && typeof env.ASSETS.head==='function' ? await env.ASSETS.head(spec.key) : await env.ASSETS.get(spec.key);
   if (!object) return json({error: "对象不存在"}, 404, request, env);
   const headers = new Headers(corsHeaders(request, env));
-  headers.set("Cache-Control", "public, max-age=31536000, immutable");
+  headers.set("Cache-Control", privateLibrary(env) ? "private, max-age=86400" : "public, max-age=31536000, immutable");
+  headers.set("Referrer-Policy", "no-referrer");
+  if(object.customMetadata?.sha256)headers.set('X-Content-SHA256',object.customMetadata.sha256);
   headers.set("Content-Type", contentType(spec));
   if (object.httpMetadata?.contentType) headers.set("Content-Type", object.httpMetadata.contentType);
   if (spec.kind === "assets" && spec.ext === "html") headers.set("Content-Security-Policy", "sandbox");
@@ -450,10 +545,12 @@ async function getObject(request, env, spec) {
   // cross-origin href is treated as navigation and then blocked by the app.
   const download = new URL(request.url).searchParams.get("download");
   if (download !== null && download !== "0" && download !== "false") {
-    const ascii = spec.filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
-    headers.set("Content-Disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(spec.filename)}`);
+    const requestedName = new URL(request.url).searchParams.get("name") || spec.filename;
+    const downloadName = requestedName.replace(/[\\/:*?"<>|\r\n]/g,"_").slice(0,160);
+    const ascii = downloadName.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+    headers.set("Content-Disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(downloadName)}`);
   }
-  return new Response(object.body, {status: 200, headers});
+  return new Response(request.method==='HEAD'?null:object.body, {status: 200, headers});
 }
 
 /**
@@ -512,27 +609,10 @@ async function readObjectBytes(object) {
   if (object?.body) return new Uint8Array(await new Response(object.body).arrayBuffer());
   throw new Error("R2 对象没有可读取的数据");
 }
-async function latestLibraryRecords(env, kind = null) {
-  const byId = new Map();
-  let cursor;
-  do {
-    const listing = await env.ASSETS.list({prefix: "records/", cursor, limit: MAX_LIST_RECORDS});
-    const loaded = await mapConcurrent(listing.objects || [], 16, async item => {
-      const object = await env.ASSETS.get(item.key);
-      if (!object) return null;
-      try { return JSON.parse(await object.text()); } catch { return null; }
-    });
-    for (const record of loaded) {
-      if (!record || typeof record !== "object" || !record.kind || !record.id) continue;
-      if (kind && record.kind !== kind) continue;
-      const key = `${record.kind}:${record.id}`;
-      const current = byId.get(key);
-      if (!current || String(record.updated_at || "") > String(current.updated_at || "")) byId.set(key, record);
-    }
-    cursor = listing.truncated ? listing.cursor : undefined;
-  } while (cursor);
-  return [...byId.values()];
+async function latestLibraryRecords(env,kind=null) {
+  const {data}=await loadLibraryIndex(env);return data.records.filter(item=>!kind || item.kind===kind);
 }
+
 // Mirrors downloadableFiles() in the front end so the archive layout stays the
 // same in remote mode and in the browser-only fallback.
 function downloadFileList(kind, record) {
@@ -666,26 +746,16 @@ async function downloadSelected(request, env) {
   return streamZip(request, env, kind, entries, stamp);
 }
 
-async function listRecords(request, env, wantedKind = null) {
-  if (!originAllowed(request, env)) return json({error: "Origin 不在允许列表中"}, 403, request, env);
-  const url = new URL(request.url);
-  const cursor = url.searchParams.get("cursor") || undefined;
-  const listed = await env.ASSETS.list({prefix: "records/", cursor, limit: MAX_LIST_RECORDS});
-  const loaded = await mapConcurrent(listed.objects || [], 16, async (item) => {
-    const object = await env.ASSETS.get(item.key);
-    if (!object) return null;
-    try {
-      const record = JSON.parse(await object.text());
-      if (record && typeof record === "object" && (!wantedKind || record.kind === wantedKind)) return {...record, record_sha256: item.key.match(/^records\/([a-f0-9]{64})\.json$/)?.[1] || record.record_sha256};
-    } catch {
-      // A malformed record must not prevent the rest of the library loading.
-    }
-    return null;
-  });
-  const records = loaded.filter(Boolean);
-  // `items` keeps the existing library UI contract; `records` is the clearer
-  // name used by the standalone free-sync client.
-  return json({records, items: records, cursor: listed.truncated ? listed.cursor : null}, 200, request, env);
+async function listRecords(request,env,wantedKind=null) {
+  if(!originAllowed(request,env))return json({error:'Origin 不在允许列表中'},403,request,env);
+  const {data}=await loadLibraryIndex(env),url=new URL(request.url);
+  const etag='"'+data.revision+'"';
+  if(request.headers.get('If-None-Match')===etag)return response(null,304,request,env,{ETag:etag});
+  const all=data.records.filter(item=>!wantedKind || item.kind===wantedKind);
+  // The new client asks for one shared manifest; old clients keep pagination.
+  const start=Math.max(0,Number(url.searchParams.get('cursor'))||0),limit=url.searchParams.get('all')==='1'?all.length:MAX_LIST_RECORDS;
+  const records=all.slice(start,start+limit);
+  return json({records,items:records,cursor:start+limit<all.length?String(start+limit):null,revision:data.revision},200,request,env,{ETag:etag});
 }
 
 function normalizeAssetClassification(value) {
@@ -719,28 +789,14 @@ async function updateRecordClassification(request, env, kind, id) {
   }
   const reference = String(payload.record_sha256 || "");
   if (reference && !SHA256.test(reference)) return json({error: "记录版本无效，请刷新列表"}, 400, request, env);
-  let target;
-  if (reference) {
-    const key = `records/${reference}.json`;
-    const object = await env.ASSETS.get(key);
-    if (object) {
-      try {
-        const record = JSON.parse(await object.text());
-        if (record.kind === kind && String(record.id) === String(id)) target = {key, record};
-      } catch {}
-    }
-    if (!target) return json({error: "这条记录已被其他设备修改，请刷新资源库后重试"}, 409, request, env);
-  } else {
-    // Old clients remain compatible; new clients send the record hash and avoid scanning.
-    const entries = await listAllRecordEntries(env);
-    target = entries.filter(item => item.record.kind === kind && String(item.record.id) === String(id))
-      .sort((a, b) => String(b.record.updated_at || "").localeCompare(String(a.record.updated_at || "")))[0];
-  }
-  if (!target) return json({error: "资源记录不存在"}, 404, request, env);
-  const record = {...target.record};
-  delete record.record_sha256;
+  let updated;
+  await mutateLibraryIndex(env,async data=>{
+    const target=data.records.find(item=>item.kind===kind && String(item.id)===String(id));
+    if(!target)throw problem(404,'资源记录不存在');
+    if(reference && reference!==target.record_sha256)throw problem(409,'这条记录已被其他设备修改，请刷新资源库后重试');
+    const record={...target};delete record.record_sha256;
   const displayName = normalizeAssetClassification(payload.name);
-  const updated = {
+  updated = {
     ...record,
     ...previewUpdates,
     ...(displayName ? {name: displayName} : {}),
@@ -753,8 +809,9 @@ async function updateRecordClassification(request, env, kind, id) {
   const sha = await digestHex(bytes);
   const key = `records/${sha}.json`;
   await env.ASSETS.put(key, bytes, {httpMetadata: {contentType: "application/json; charset=utf-8"}});
-  if (target.key !== key && typeof env.ASSETS.delete === "function") await env.ASSETS.delete(target.key);
-  updated.record_sha256 = sha;
+  updated.record_sha256=sha;
+  data.records=data.records.map(item=>indexRecordId(item)===indexRecordId(updated)?updated:item);
+  });
   return json({ok: true, item: updated}, 200, request, env);
 }
 
@@ -775,6 +832,10 @@ function referencedObjectKeys(value, keys = new Set()) {
 }
 
 async function listAllRecordEntries(env) {
+  const {data}=await loadLibraryIndex(env);return data.records.map(record=>({key:`records/${record.record_sha256}.json`,record}));
+}
+
+async function scanRecordEntries(env) {
   const entries = [];
   let cursor;
   do {
@@ -793,34 +854,22 @@ async function listAllRecordEntries(env) {
   return entries;
 }
 
-async function deleteLibraryRecords(request, env) {
-  if (!originAllowed(request, env, {write: true})) return json({error: "Origin 不在允许列表中"}, 403, request, env);
-  if (!checkWriteToken(request, env)) return json({error: "删除接口需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
-  let payload;
-  try { payload = await request.json(); } catch { return json({error: "删除请求不是有效 JSON"}, 400, request, env); }
-  const requested = Array.isArray(payload?.items) ? payload.items : [];
-  if (!requested.length || requested.length > 100) return json({error: "请提供 1–100 个待删除记录"}, 400, request, env);
-  const targets = new Set(requested.filter(item => item && ["theme", "font", "asset"].includes(item.kind) && String(item.id || "")).map(item => `${item.kind}:${item.id}`));
-  if (!targets.size) return json({error: "删除记录格式无效"}, 400, request, env);
-  const entries = await listAllRecordEntries(env);
-  const matched = entries.filter(({record}) => targets.has(`${record.kind}:${record.id}`));
-  if (!matched.length) return json({ok: true, deleted: [], missing: [...targets], retainedShared: []}, 200, request, env);
-  const remainingRefs = new Set();
-  entries.filter(entry => !matched.includes(entry)).forEach(entry => referencedObjectKeys(entry.record, remainingRefs));
-  const deleteKeys = new Set(matched.map(entry => entry.key));
-  const candidateObjects = new Set();
-  matched.forEach(entry => referencedObjectKeys(entry.record, candidateObjects));
-  const retainedShared = [];
-  for (const key of candidateObjects) {
-    if (key.startsWith("records/")) continue;
-    if (remainingRefs.has(key)) retainedShared.push(key); else deleteKeys.add(key);
-  }
-  const failed = [];
-  for (const key of deleteKeys) {
-    try { if (typeof env.ASSETS.delete === "function") await env.ASSETS.delete(key); else failed.push({key, error: "R2 不支持删除"}); }
-    catch (error) { failed.push({key, error: error?.message || "删除失败"}); }
-  }
-  return json({ok: failed.length === 0, deleted: matched.map(entry => ({kind: entry.record.kind, id: entry.record.id})), deletedObjects: [...deleteKeys].filter(key => !key.startsWith("records/")), retainedShared, failed}, failed.length ? 207 : 200, request, env);
+async function deleteLibraryRecords(request,env) {
+  if(!originAllowed(request,env,{write:true}) || !checkWriteToken(request,env))return json({error:'删除需要访问口令'},401,request,env);
+  const payload=await request.json(),items=Array.isArray(payload?.items)?payload.items:[];
+  if(!items.length || items.length>100)return json({error:'请提供 1–100 个待删除记录'},400,request,env);
+  const targets=new Set(items.filter(x=>['theme','font','asset'].includes(x?.kind)&&x.id).map(indexRecordId));
+  const result=await mutateLibraryIndex(env,data=>{
+    const matched=data.records.filter(x=>targets.has(indexRecordId(x))),remaining=data.records.filter(x=>!targets.has(indexRecordId(x)));
+    const refs=new Set();remaining.forEach(x=>referencedObjectKeys(x,refs));
+    const keys=new Set();matched.forEach(x=>referencedObjectKeys(x,keys));
+    const candidates=[...keys].filter(x=>!refs.has(x));
+    // Keep a recovery window. Physical deletion runs only from a reviewed GC plan.
+    const at=new Date().toISOString();
+    data.garbage=[...(data.garbage||[]),...candidates.map(key=>({key,at}))];data.records=remaining;
+    return {ok:true,deleted:matched.map(({kind,id})=>({kind,id})),retainedShared:[...keys].filter(x=>refs.has(x)),deferredObjects:candidates,failed:[]};
+  });
+  return json(result,200,request,env);
 }
 
 /**
@@ -988,13 +1037,15 @@ async function createJob(request, env) {
   try { payload = await request.json(); } catch { return json({error: "任务数据不是有效 JSON"}, 400, request, env); }
   const id = [...crypto.getRandomValues(new Uint8Array(8))].map(byte => byte.toString(16).padStart(2, "0")).join("");
   const now = new Date().toISOString();
-  const total = Number.isFinite(Number(payload?.total)) ? Math.max(0, Number(payload.total)) : 0;
+  const total = Math.max(Number(payload?.total)||0,Array.isArray(payload?.source_keys)?payload.source_keys.length:0,Array.isArray(payload?.items)?payload.items.length:0);
   const job = {
     id, kind: String(payload?.kind || payload?.action || "upload").slice(0, 60),
     title: String(payload?.title || "上传任务").slice(0, 160),
-    status: "queued", stage: "等待处理", completed: 0, failed: 0, total,
-    items: Array.isArray(payload?.items) ? payload.items.slice(0, 100).map(item => String(item).slice(0, 200)) : [],
-    source_keys: Array.isArray(payload?.source_keys) ? payload.source_keys.slice(0, 100).map(item => String(item).slice(0, 200)) : [],
+    status: payload?.upload_complete === false ? "uploading" : "queued", stage: "等待处理", completed: 0, failed: 0, total,
+    items: Array.isArray(payload?.items) ? payload.items.slice(0, 1000).map(item => String(item).slice(0, 200)) : [],
+    source_keys: Array.isArray(payload?.source_keys) ? payload.source_keys.slice(0, 1000).map(item => String(item).slice(0, 600)) : [],
+    done_keys: [], upload_complete: payload?.upload_complete !== false,
+    uploads: Array.isArray(payload?.uploads) ? payload.uploads.slice(0,1000).map(x=>({name:String(x.name||'').slice(0,200),key:String(x.key||'').slice(0,600)})) : [],
     // The device that staged the batch already accepted "process this later",
     // so the next page load may finish compression without asking again.
     auto_commit: payload?.auto_commit === true,
@@ -1005,7 +1056,7 @@ async function createJob(request, env) {
   return json({ok: true, job}, 201, request, env);
 }
 
-async function updateJob(request, env, id) {
+async function updateJob(request, env, id, attempt=0) {
   if (!safeJobId(id)) return json({error: "任务编号无效"}, 400, request, env);
   if (!originAllowed(request, env, {write: true})) return json({error: "Origin 不在允许列表中"}, 403, request, env);
   if (!checkWriteToken(request, env)) return json({error: "任务接口需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
@@ -1015,6 +1066,10 @@ async function updateJob(request, env, id) {
   try { patch = await request.json(); } catch { return json({error: "任务更新不是有效 JSON"}, 400, request, env); }
   let job;
   try { job = JSON.parse(await object.text()); } catch { return json({error: "任务记录损坏"}, 409, request, env); }
+  if (job.lease?.until > Date.now() && patch.owner !== job.lease.owner) return json({error:'其他设备正在处理此任务，请稍后接管'},409,request,env);
+  if(patch.owner)job.lease={owner:String(patch.owner).slice(0,80),until:Date.now()+120000};
+  if(patch.release===true || ['completed','partial','failed'].includes(patch.status))delete job.lease;
+  const previousDone=job.done_keys||[];
   // `current` carries the item being processed right now (theme/font name);
   // without it the job list only showed "0 / 1" and users could not tell what
   // the device was actually working on.
@@ -1024,8 +1079,12 @@ async function updateJob(request, env, id) {
   for (const key of ["completed", "failed", "total"]) {
     if (Number.isFinite(Number(patch[key]))) job[key] = Math.max(0, Number(patch[key]));
   }
+  for(const key of ['items','source_keys','done_keys'])if(Array.isArray(patch[key]))job[key]=patch[key].slice(0,1000).map(x=>String(x).slice(0,600));
+  if(Array.isArray(patch.done_keys)) {job.done_keys=[...new Set([...previousDone,...patch.done_keys])];job.completed=Math.max(job.completed||0,job.done_keys.length);}
+  if(typeof patch.upload_complete==='boolean')job.upload_complete=patch.upload_complete;
   job.updated_at = new Date().toISOString();
-  await env.ASSETS.put(jobKey(id), new TextEncoder().encode(JSON.stringify(job)), {httpMetadata: {contentType: "application/json"}});
+  const saved=await env.ASSETS.put(jobKey(id),new TextEncoder().encode(JSON.stringify(job)),{onlyIf:object.etag?{etagMatches:object.etag}:undefined,httpMetadata:{contentType:'application/json'}});
+  if(saved===null){if(attempt<3)return updateJob(new Request(request.url,{method:'PATCH',headers:request.headers,body:JSON.stringify(patch)}),env,id,attempt+1);return json({error:'任务已被其他设备更新，请刷新后重试'},409,request,env);}
   return json({ok: true, job}, 200, request, env);
 }
 
@@ -1307,7 +1366,56 @@ const LOCAL_PROCESSING_NOTICE = {
 };
 const LOCAL_JOB_NOTICE = {...LOCAL_PROCESSING_NOTICE};
 
-export async function handle(request, env) {
+async function maintenance(request,env) {
+  if(!checkWriteToken(request,env))throw problem(401,'维护需要访问口令');
+  const input=await request.json(),now=Date.now(),age=7*86400000;
+  if(input.action==='plan') {
+    const {data}=await loadLibraryIndex(env),refs=new Set();data.records.forEach(record=>referencedObjectKeys(record,refs));
+    const explicit=new Map((data.garbage||[]).map(item=>[item.key,Date.parse(item.at)]));
+    const candidates=[],held=[];
+    for(const prefix of ['records/','previews/','originals/','compressed/','fonts/','assets/']) {
+      let cursor;
+      do {
+        const listing=await env.ASSETS.list({prefix,cursor,limit:1000});
+        for(const object of listing.objects||[]) {
+          if(refs.has(object.key))continue;
+          const uploaded=new Date(object.uploaded).getTime();
+          const tracked=explicit.has(object.key),eligible=prefix==='records/'||prefix==='previews/'||tracked;
+          if(eligible && Number.isFinite(uploaded) && now-uploaded>age && (!tracked || now-explicit.get(object.key)>age))candidates.push({key:object.key,etag:object.etag,bytes:object.size||0,reason:tracked?'已删除记录的无引用文件':'无引用旧预览或旧版本记录'});
+          else held.push({key:object.key,reason:!eligible?'尚未入库的原文件：保留，建议先解析':'未满 7 天或无法确认时间：保留'});
+        }
+        cursor=listing.truncated?listing.cursor:undefined;
+      }while(cursor);
+    }
+    const plan={id:crypto.randomUUID(),revision:data.revision,created_at:now,items:candidates.slice(0,50),remaining:Math.max(0,candidates.length-50),held:held.slice(0,100),held_count:held.length};
+    await env.ASSETS.put('system/cleanup-'+plan.id+'.json',JSON.stringify(plan),{httpMetadata:{contentType:'application/json'}});
+    return json(plan,200,request,env);
+  }
+  if(input.action!=='delete'||!/^[a-f\d-]{36}$/.test(input.id||''))throw problem(400,'清理请求无效');
+  const planObject=await env.ASSETS.get('system/cleanup-'+input.id+'.json');if(!planObject)throw problem(404,'核对清单不存在，请重新生成');
+  const plan=JSON.parse(await planObject.text());if(now-plan.created_at>1800000)throw problem(409,'清理清单已过期，请重新核对');
+  let current=await loadLibraryIndex(env);if(current.data.revision!==plan.revision)throw problem(409,'资源库已有更改，请重新核对');
+  if(current.data.maintenance?.until>now)throw problem(423,'其他设备正在清理');
+  current.data.maintenance={owner:plan.id,until:now+60000};
+  const locked=await env.ASSETS.put(LIBRARY_INDEX_KEY,JSON.stringify(current.data),{onlyIf:current.etag?{etagMatches:current.etag}:undefined,httpMetadata:{contentType:'application/json'},customMetadata:{maintenance_until:String(now+60000)}});
+  if(locked===null)throw problem(409,'资源库已有更改，请重新核对');
+  const deleted=[],skipped=[];
+  try {
+    const refs=new Set();current.data.records.forEach(record=>referencedObjectKeys(record,refs));
+    await mapConcurrent(plan.items,4,async item=>{
+      if(Date.now()>now+50000||refs.has(item.key)){skipped.push(item.key);return;}
+      const head=await env.ASSETS.head(item.key);
+      if(!head || !item.etag || head.etag!==item.etag || now-new Date(head.uploaded).getTime()<age){skipped.push(item.key);return;}
+      await env.ASSETS.delete(item.key);deleted.push(item.key);
+    });
+  }finally{
+    current=await loadLibraryIndex(env);
+    if(current.data.maintenance?.owner===plan.id){delete current.data.maintenance;current.data.garbage=(current.data.garbage||[]).filter(item=>!deleted.includes(item.key));current.data.revision=crypto.randomUUID();await env.ASSETS.put(LIBRARY_INDEX_KEY,JSON.stringify(current.data),{onlyIf:current.etag?{etagMatches:current.etag}:undefined,httpMetadata:{contentType:'application/json'},customMetadata:{maintenance_until:'0'}});}
+  }
+  await env.ASSETS.delete('system/cleanup-'+plan.id+'.json');return json({ok:true,deleted,skipped},200,request,env);
+}
+
+async function routeRequest(request, env) {
   const url = new URL(request.url);
   if (request.method === "OPTIONS") {
     if (!originAllowed(request, env)) return response("", 403, request, env);
@@ -1317,8 +1425,11 @@ export async function handle(request, env) {
   if (url.pathname === "/api/session" && request.method === "GET") {
     if (!originAllowed(request, env)) return json({error: "Origin 不在允许列表中"}, 403, request, env);
     const canWrite = checkWriteToken(request, env);
-    return json({ok: canWrite, canWrite, requiresToken: Boolean(env.SYNC_WRITE_TOKEN)}, canWrite ? 200 : 401, request, env);
+    return json({ok: canWrite, canWrite, privateLibrary:privateLibrary(env), requiresToken: Boolean(env.SYNC_WRITE_TOKEN), ...(canWrite?await readTicket(env):{})}, canWrite ? 200 : 401, request, env);
   }
+  if (['GET','HEAD'].includes(request.method) && url.pathname.startsWith('/api/') && !await mayRead(request,env)) return json({error:'私有资源库，请先在存储设置导入配置或填写访问口令'},401,request,env,{'WWW-Authenticate':'Bearer'});
+  if(url.pathname==='/api/maintenance' && request.method==='POST'){if(!originAllowed(request,env,{write:true}))throw problem(403,'Origin 不在允许列表中');return maintenance(request,env);}
+  if(url.pathname==='/api/device-config' && ['GET','PUT'].includes(request.method))return deviceConfig(request,env);
   if (url.pathname === "/api/library" && request.method === "GET") return listRecords(request, env);
   if (url.pathname === "/api/themes" && request.method === "GET") return listRecords(request, env, "theme");
   if (url.pathname === "/api/fonts" && request.method === "GET") return listRecords(request, env, "font");
@@ -1339,12 +1450,13 @@ export async function handle(request, env) {
   }
   if (url.pathname === "/api/storage" && request.method === "GET") {
     if (!originAllowed(request, env)) return json({error: "Origin 不在允许列表中"}, 403, request, env);
-    return json({provider: "cloudflare_r2", shared: true, publicReads: true, ...LOCAL_PROCESSING_NOTICE,
+    return json({provider: "cloudflare_r2", shared: true, publicReads: !privateLibrary(env), ...LOCAL_PROCESSING_NOTICE,
       maxUploadBytes: maxUpload(env)}, 200, request, env);
   }
   if (url.pathname === "/api/jobs" && request.method === "GET") return listJobs(request, env);
   if (url.pathname === "/api/jobs" && request.method === "POST") return createJob(request, env);
   const jobRoute = url.pathname.match(/^\/api\/jobs\/([^/]+)$/);
+  if(jobRoute && request.method==='GET') {const object=await env.ASSETS.get(jobKey(decodeURIComponent(jobRoute[1])));return object?json({job:JSON.parse(await object.text())},200,request,env):json({error:'任务不存在'},404,request,env);}
   if (jobRoute && request.method === "PATCH") return updateJob(request, env, decodeURIComponent(jobRoute[1]));
   if (jobRoute && request.method === "DELETE") return deleteJob(request, env, decodeURIComponent(jobRoute[1]));
   const spec = objectSpec(url.pathname);
@@ -1354,6 +1466,9 @@ export async function handle(request, env) {
   return getObject(request, env, spec);
 }
 
+export async function handle(request,env) {
+  try{return await routeRequest(request,env);}catch(error){return json({error:error?.message||'请求失败'},error?.status||500,request,env);}
+}
 export default {fetch: handle};
 
-export const __test = {configuredOrigins, corsHeaders, originAllowed, objectSpec, maxUpload, digestHex, base64Bytes, base64String, decryptPrivateManifest, repackPrivateRed, privateDirectory, sealPrivatePrefix, listJobs, createJob, updateJob, deleteJob, backupOriginalTo123, verifyPan123, listPan123Backups, loginPan123, downloadSelected, downloadEntries, crc32Bytes, headerText, deleteStagingObject};
+export const __test = {configuredOrigins, corsHeaders, originAllowed, objectSpec, maxUpload, digestHex, base64Bytes, base64String, decryptPrivateManifest, repackPrivateRed, privateDirectory, sealPrivatePrefix, listJobs, createJob, updateJob, deleteJob, backupOriginalTo123, verifyPan123, listPan123Backups, loginPan123, downloadSelected, downloadEntries, crc32Bytes, headerText, deleteStagingObject,loadLibraryIndex,mutateLibraryIndex,readTicket,mayRead};

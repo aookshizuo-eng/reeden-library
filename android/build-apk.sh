@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT="D:/Documents/Codex/2026-11-10/new-chat/work/github-pages"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -W)"
+VERSION_CODE=$(sed -n 's/^VERSION_CODE=//p' "$ROOT/android/version.properties" | tr -d '\r')
+VERSION_NAME=$(sed -n 's/^VERSION_NAME=//p' "$ROOT/android/version.properties" | tr -d '\r')
+[[ "$VERSION_CODE" =~ ^[0-9]+$ && "$VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid version.properties"; exit 1; }
 TC="$ROOT/android/toolchain"
 JDK="$TC/jdk-17.0.2"
 BT="$TC/android-15"
@@ -12,7 +15,8 @@ OUT="$ROOT/android/build"
 export JAVA_HOME="$JDK"
 export PATH="$JDK/bin:$PATH"
 
-rm -rf "$OUT"
+[[ "$OUT" == "$ROOT/android/build" && -f "$SRC/AndroidManifest.xml" && -f "$ROOT/package.json" ]] || { echo "Build target validation failed"; exit 1; }
+rm -rf -- "$OUT"
 mkdir -p "$OUT/res" "$OUT/gen" "$OUT/classes" "$OUT/dex"
 
 echo "1/6 aapt2 compile"
@@ -27,8 +31,8 @@ echo "2/6 aapt2 link (assets from dist/)"
   --java "$OUT/gen" \
   --min-sdk-version 23 \
   --target-sdk-version 35 \
-  --version-code 11 \
-  --version-name 1.1.9 \
+  --version-code "$VERSION_CODE" \
+  --version-name "$VERSION_NAME" \
   "$OUT/res/resources.zip"
 
 echo "3/6 javac"
@@ -57,6 +61,6 @@ echo "6/6 zipalign + sign"
   --ks-pass pass:android --key-pass pass:android \
   --ks-key-alias androiddebugkey \
   --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
-  --out red-garden-1.1.9.apk aligned.apk
-"$BT/apksigner.bat" verify --print-certs red-garden-1.1.9.apk | head -6
-ls -la red-garden-1.1.9.apk
+  --out "red-garden-$VERSION_NAME.apk" aligned.apk
+"$BT/apksigner.bat" verify --print-certs "red-garden-$VERSION_NAME.apk" | head -6
+ls -la "red-garden-$VERSION_NAME.apk"

@@ -32,11 +32,12 @@ function parseArgs(argv) {
     };
     if (arg === "--help" || arg === "-h") options.help = true;
     else if (arg === "--dry-run") options.dryRun = true;
-    else if (arg.startsWith("--api")) options.api = take("--api");
-    else if (arg.startsWith("--token")) options.token = take("--token");
-    else if (arg.startsWith("--123-token")) options.panToken = take("--123-token");
-    else if (arg.startsWith("--123-folder")) options.panFolder = take("--123-folder");
-    else if (arg.startsWith("--dir")) options.paths.push(take("--dir"));
+    else if ((arg === "--api" || arg.startsWith("--api="))) options.api = take("--api");
+    else if ((arg === "--token" || arg.startsWith("--token="))) options.token = take("--token");
+    else if ((arg === "--123-token" || arg.startsWith("--123-token="))) options.panToken = take("--123-token");
+    else if ((arg === "--123-folder" || arg.startsWith("--123-folder="))) options.panFolder = take("--123-folder");
+    else if ((arg === "--dir" || arg.startsWith("--dir="))) options.paths.push(take("--dir"));
+    else if (arg === "--resume" || arg.startsWith("--resume=")) options.resume = take("--resume");
     else if (arg.startsWith("--")) throw new Error(`未知参数：${arg}`);
     else options.paths.push(arg);
   }
@@ -52,6 +53,7 @@ const HELP = `用法：node scripts/remote-import.mjs <文件或目录...> [选�
   --token <Token>     SYNC_WRITE_TOKEN（也可用环境变量 REEDEN_SYNC_TOKEN）
   --123-token <Token> 可选：把原始 .red 额外备份到 123 云盘（也可用 REEDEN_PAN123_TOKEN）
   --123-folder <目录> 123 备份目录，默认 Red-Garden-Backup
+  --resume <任务ID>   接续之前的任务，重新选择同一批原文件
   --dry-run           只列出待上传文件，不发送任何请求
 
 文件后缀：${[...SUPPORTED].join(", ")}。上传后会在 R2 创建持久化任务，网页端可继续处理。`;
@@ -78,7 +80,7 @@ function extensionOf(file) {
 }
 
 async function request(url, init, label) {
-  const response = await fetch(url, init);
+  const response = await fetch(url, {...init,signal:AbortSignal.timeout(90000)});
   if (!response.ok) {
     let detail = "";
     try { detail = (await response.text()).slice(0, 300); } catch {}
@@ -94,43 +96,50 @@ async function main() {
   if (!options.token && !options.dryRun) throw new Error("缺少写入 Token：请用 --token 或 REEDEN_SYNC_TOKEN 提供，本机不会保存该值");
   const collected = (await Promise.all(options.paths.map(collect))).flat();
   const files = collected.filter(file => extensionOf(file)).sort();
+  if(files.length>1000)throw new Error("每批最多 1000 个文件，请分批选择目录");
   if (!files.length) throw new Error("没有找到受支持后缀的文件");
   console.log(`同步 API：${options.api}；待上传 ${files.length} 个文件${options.dryRun ? "（dry-run，不发送请求）" : ""}`);
   if (options.dryRun) {
     for (const file of files) console.log("  ", path.relative(process.cwd(), file));
     return;
   }
-  const auth = {"Authorization": `Bearer ${options.token}`, "Content-Type": "application/octet-stream"};
-  const keys = [], names = [];
-  for (const [index, file] of files.entries()) {
-    const bytes = new Uint8Array(await fs.readFile(file));
-    if (bytes.length > MAX_BYTES) throw new Error(`文件超过 Worker 上传上限（96 MiB）：${file}`);
-    const sha = crypto.createHash("sha256").update(bytes).digest("hex");
-    const ext = extensionOf(file), name = path.basename(file);
-    const key = `/api/objects/staging/${sha}.${ext}`;
-    await request(options.api + key, {method: "PUT", headers: auth, body: bytes}, `上传 ${name}`);
-    keys.push(key);
-    names.push(name);
-    console.log(`[${index + 1}/${files.length}] 已暂存 ${name} (${bytes.length} 字节)`);
-    if (ext === "red" && options.panToken) {
-      const md5 = crypto.createHash("md5").update(bytes).digest("hex");
-      const response = await request(options.api + "/api/backup/123", {
-        method: "POST",
-        headers: {...auth, "X-Pan123-Token": options.panToken, "X-Pan123-Folder": encodeURIComponent(options.panFolder),
-          "X-Pan123-Filename": encodeURIComponent(name.replace(/[\\/:*?"<>|]/g, "_")), "X-Pan123-Etag": md5},
-        body: bytes,
-      }, `123 备份 ${name}`);
-      const result = await response.json();
-      console.log(`        123 备份：${result.key}${result.reused ? "（已存在）" : ""}`);
-    }
+  const auth={Authorization:`Bearer ${options.token}`,Origin:new URL(options.api).origin};
+  const jsonHeaders={...auth,'Content-Type':'application/json'};
+  const plan=[];
+  for(const file of [...new Set(files)]) {
+    const bytes=await fs.readFile(file);if(bytes.length>MAX_BYTES)throw new Error(`文件超过 96 MiB：${file}`);
+    const sha=crypto.createHash('sha256').update(bytes).digest('hex');plan.push({file,name:path.basename(file),sha,key:`/api/objects/staging/${sha}.${extensionOf(file)}`});
   }
-  const created = await request(options.api + "/api/jobs", {
-    method: "POST", headers: {"Authorization": `Bearer ${options.token}`, "Content-Type": "application/json"},
-    body: JSON.stringify({kind: "staged-import", title: `后台上传 ${files.length} 个文件`, total: files.length,
-      items: names, source_keys: keys, device: "cli"}),
-  }, "创建后台任务");
-  const job = await created.json();
-  console.log(`已创建持久化任务 ${job.job?.id || "(未知)"}：在网页「后台任务」点击「继续处理暂存文件」即可完成入库。`);
+  let job;
+  if(options.resume) {
+    if(!/^[a-f0-9]{8,64}$/.test(options.resume))throw new Error('任务 ID 无效');
+    job=(await (await request(options.api+'/api/jobs/'+options.resume,{headers:auth},'读取恢复任务')).json()).job;
+    if(job.kind!=='staged-import' || plan.some(item=>!job.source_keys.includes(item.key)))throw new Error('所选文件与恢复任务不匹配，未上传');
+    if(job.lease?.until>Date.now())throw new Error('网页正在处理该任务，请稍后重试');
+  } else {
+    job=(await (await request(options.api+'/api/jobs',{method:'POST',headers:jsonHeaders,body:JSON.stringify({kind:'staged-import',title:`后台上传 ${plan.length} 个文件`,total:plan.length,items:plan.map(x=>x.name),uploads:plan.map(x=>({name:x.name,key:x.key})),source_keys:plan.map(x=>x.key),device:'cli',auto_commit:true,upload_complete:false})},'创建恢复任务')).json()).job;
+  }
+  console.log(`恢复任务：${job.id}；中断后使用 --resume ${job.id} 接续。`);
+  const patch=async data=>request(options.api+'/api/jobs/'+job.id,{method:'PATCH',headers:jsonHeaders,body:JSON.stringify(data)},'登记任务进度');
+  let completed=0;const backups=[];
+  try {
+    for(const item of plan) {
+      if((job.done_keys||[]).includes(item.key)){console.log(`已入库，跳过 ${item.name}`);completed++;continue;}
+      const bytes=await fs.readFile(item.file);
+      if(crypto.createHash('sha256').update(bytes).digest('hex')!==item.sha)throw new Error(`文件在读取后发生变化：${item.name}`);
+      const head=await fetch(options.api+item.key,{method:'HEAD',headers:auth,signal:AbortSignal.timeout(15000)});
+      if(!head.ok || head.headers.get('X-Content-SHA256')!==item.sha)await request(options.api+item.key,{method:'PUT',headers:{...auth,'Content-Type':'application/octet-stream'},body:bytes},`上传 ${item.name}`);
+      completed++;await patch({status:'uploading',stage:`原文件已暂存 ${completed}/${plan.length}`,upload_complete:false});
+      console.log(`[${completed}/${plan.length}] 已暂存 ${item.name}`);
+      if(extensionOf(item.file)==='red'&&options.panToken)try{
+        await request(options.api+'/api/backup/123',{method:'POST',headers:{...auth,'Content-Type':'application/octet-stream','X-Pan123-Token':options.panToken,'X-Pan123-Folder':encodeURIComponent(options.panFolder),'X-Pan123-Filename':encodeURIComponent(item.name),'X-Pan123-Etag':crypto.createHash('md5').update(bytes).digest('hex')},body:bytes},`123 备份 ${item.name}`);
+      }catch(error){backups.push(error.message);}
+    }
+    await patch({status:'queued',stage:'原文件暂存完成，等待网页处理',upload_complete:true,error:backups.join('；')});
+    console.log(`暂存完成。在网页「上传与恢复」继续任务 ${job.id}。`);
+    if(backups.length){console.error('123 备份未完成，R2 任务已保留：'+backups.join('；'));process.exitCode=1;}
+  }catch(error){await patch({status:'partial',stage:'暂存中断，可补传原文件',error:error.message,upload_complete:false}).catch(()=>{});throw new Error(`${error.message}；恢复命令：追加 --resume ${job.id}`);}
+
 }
 
 main().catch(error => { console.error("后台上传失败：", error.message); process.exitCode = 1; });

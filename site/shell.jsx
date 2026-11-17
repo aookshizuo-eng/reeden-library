@@ -1,5 +1,5 @@
 import {BookOpen, PanelsTopLeft, Type, Bookmark, Upload, ListChecks, Settings, Ellipsis} from "lucide-react";
-import {Button, LibrarySearch, LibraryTools, LibraryPager} from "./ui";
+import {Button, Input, LibrarySearch, LibraryTools, LibraryPager} from "./ui";
 
 export default function Shell() {
   return <>
@@ -31,8 +31,9 @@ export default function Shell() {
         </header>
 
         <p className="operation-status startup-error" id="startupError" role="alert" hidden></p>
+        <section className="job-banner local-resume-panel" id="localResumePanel" aria-label="未完成上传" hidden><div><strong id="localResumeText"></strong><span id="localResumeNames"></span></div><div className="form-actions"><Button id="resumeLocalTransfers">继续上传</Button><Button id="discardLocalTransfers" variant="ghost">移除恢复副本</Button></div></section>
         <section className="job-banner" id="jobBanner" aria-label="后台任务进度" hidden>
-          <div><strong id="jobBannerTitle">后台任务</strong><span id="jobBannerText"></span></div><button className="text-button" id="openJobs">查看任务</button>
+          <div><strong id="jobBannerTitle">上传与恢复</strong><span id="jobBannerText"></span></div><button className="text-button" id="openJobs">查看任务</button>
         </section>
 
         <section className="view" id="importView" data-view-panel="import" hidden>
@@ -42,7 +43,7 @@ export default function Shell() {
             <div className="drop-zone unified-drop-zone" id="unifiedDropZone" tabIndex="0" role="button" aria-label="拖入主题、字体或 SVG、HTML 文件">
               <span className="drop-icon">↓</span><strong id="unifiedDropTitle">把 ZIP、主题、字体或收藏文件拖到这里</strong><span>自动按后缀识别并分流</span><small>.zip · .red · .ttf · .otf · .woff · .woff2 · .svg · .html</small>
             </div>
-            <div className="ingest-actions unified-actions"><button className="primary-button" id="chooseUnifiedFiles" type="button">选择文件</button><button className="secondary-button" id="chooseUnifiedFolder" type="button">选择文件夹</button><label className="check-label queue-later-label"><input id="queueForLater" type="checkbox" /><span>后台暂存：先上传原文件到共享库，之后在任意设备打开会自动继续并完成压缩入库</span></label><label className="check-label queue-later-label"><input id="localCleanupEnabled" type="checkbox" /><span>清理本地文件：选择文件夹时申请写入权限，上传成功后再问你要不要删掉本地副本</span></label></div>
+            <div className="ingest-actions unified-actions"><button className="primary-button" id="chooseUnifiedFiles" type="button">选择文件</button><button className="secondary-button" id="chooseUnifiedFolder" type="button">选择文件夹</button><label className="check-label queue-later-label"><input id="queueForLater" type="checkbox" /><span>后台暂存：先上传原文件到共享库，之后在任意设备打开可继续压缩入库</span></label><label className="check-label queue-later-label"><input id="localCleanupEnabled" type="checkbox" /><span>清理本地文件：选择文件夹时申请写入权限，上传成功后再问你要不要删掉本地副本</span></label></div>
             <p className="field-help cleanup-hint" id="localCleanupHint"></p>
             <input id="unifiedInput" type="file" accept=".zip,.red,.ttf,.otf,.woff,.woff2,.svg,.html,.htm" multiple hidden /><input id="unifiedFolderInput" type="file" accept=".zip,.red,.ttf,.otf,.woff,.woff2,.svg,.html,.htm" webkitdirectory="" multiple hidden />
             <p className="operation-status" id="archiveImportStatus" role="status" hidden></p>
@@ -168,7 +169,7 @@ export default function Shell() {
 
 
         <section className="view" id="jobsView" data-view-panel="jobs" hidden>
-          <div className="title-row"><div><h1>后台任务</h1><p className="lede">批次队列存在共享 R2 里：关掉页面不会丢，换一台设备打开也会自动接着处理。免费模式的图片压缩需要浏览器画布，所以由设备执行。</p></div><button className="text-button" id="refreshJobs">刷新任务</button></div>
+          <div className="title-row"><div><h1>上传与恢复</h1><p className="lede">普通上传的未完成文件保存在本设备；云端暂存文件可跨设备继续。每个文件成功后记录进度，关闭网页会暂停当前设备的处理。</p></div><button className="text-button" id="refreshJobs">刷新任务</button></div>
           <div className="form-actions"><button className="secondary-button" id="resumeStagedJobs" type="button">继续处理暂存文件</button><button className="text-button" id="clearFinishedJobs" type="button">清除已完成任务</button><label className="check-label queue-later-label"><input id="autoResumeQueue" type="checkbox" /><span>打开页面时自动继续云端排队的批次</span></label></div>
           <p className="operation-status" id="jobsStatus" role="status"></p><div id="jobList" className="job-list"></div><div className="empty-state" id="jobsEmpty"><h2>暂时没有后台任务</h2><p>确认主题或同步资产后，这里会显示进度和结果。</p></div>
         </section>
@@ -177,14 +178,15 @@ export default function Shell() {
           <div className="title-row"><div><h1>存储设置</h1><p className="lede">压缩 RED、预览图和字体存入 R2；原始 RED 可另存到 123 云盘。</p></div><div className="title-meta"><span id="storageState">正在读取配置</span></div></div>
           <section className="settings-grid">
             <div className="settings-label"><h2>多设备访问</h2><p>GitHub Pages 等静态站点可以把界面连接到单独的同步 API。API 地址只保存在当前浏览器，不在仓库中保存密钥。</p></div>
-            <div className="settings-panel static-api-panel"><label>同步 API 地址<input id="apiBaseInput" type="url" inputMode="url" placeholder="https://red-garden-sync.pages.dev" autoComplete="off" spellCheck="false" /></label><label>同步写入 Token（可选）<input id="syncTokenInput" type="password" inputMode="text" placeholder="仅在 Worker 要求时填写" autoComplete="off" spellCheck="false" /></label><p className="field-help">Pages 版本自动连接共享库；填写相同同步地址的设备读取同一个 R2 库。此站无需在每台电脑填写 R2 Access Key。写入 Token 在当前浏览器自动保存；换设备可使用下方加密配置迁移。</p><div className="form-actions"><button className="secondary-button" id="saveApiBase" type="button">保存并连接</button><button className="secondary-button" id="testWriteAccess" type="button">检测写入权限</button><button className="text-button" id="clearApiBase" type="button">恢复默认连接</button></div><p className="operation-status" id="apiBaseStatus" role="status"></p></div>
+            <div className="settings-panel static-api-panel"><label>同步 API 地址<input id="apiBaseInput" type="url" inputMode="url" placeholder="https://red-garden-sync.pages.dev" autoComplete="off" spellCheck="false" /></label><label>私有库访问口令<input id="syncTokenInput" type="password" inputMode="text" placeholder="新设备请导入配置或填写口令" autoComplete="off" spellCheck="false" /></label><p className="field-help">Pages 版本连接私有共享库；填写相同同步地址的设备读取同一个 R2 库。此站无需在每台电脑填写 R2 Access Key。写入 Token 在当前浏览器自动保存；换设备可使用下方加密配置迁移。</p><div className="form-actions"><button className="secondary-button" id="saveApiBase" type="button">保存并连接</button><button className="secondary-button" id="testWriteAccess" type="button">检测写入权限</button><button className="text-button" id="clearApiBase" type="button">恢复默认连接</button></div><p className="operation-status" id="apiBaseStatus" role="status"></p></div>
             <div className="settings-label"><h2>换设备，一次导入</h2><p>网页地址相同，浏览器里的凭据仍然各自独立。用加密文件迁移同步 Token 和可选的 123 会话，无需重复配置 R2。</p></div>
             <form className="settings-panel" id="deviceTransferForm">
               <label>迁移口令<input type="password" name="passphrase" minLength={8} autoComplete="new-password" placeholder="至少 8 位；导入时使用相同口令" required /></label>
               <label className="check-label"><input type="checkbox" name="include123" /><span>导出时同时包含 123 登录会话（可选）</span></label>
               <label>导入已加密的配置<input type="file" name="configFile" accept=".json" /></label>
-              <div className="form-actions"><Button type="submit" name="action" value="export" variant="outline">导出加密配置</Button><Button type="submit" name="action" value="import">导入并连接</Button></div>
-              <p className="field-help">凭据只以 AES-GCM 密文保存在文件中，不放进网页链接或上传到 R2。每个浏览器导入一次；123 仍可能因到期或平台风控要求重新登录。</p>
+              <div className="form-actions"><Button type="submit" name="action" value="export" variant="outline">导出加密配置</Button><Button type="submit" name="action" value="import">导入并连接</Button><Button type="submit" value="cloud-save" variant="outline">保存云端密文</Button><Button type="submit" value="cloud-load" variant="outline">恢复云端配置</Button><Button type="submit" value="link" variant="ghost">生成设备接入链接</Button></div>
+              <label id="deviceLinkLabel" hidden>设备接入链接<Input id="deviceConnectLink" readOnly onFocus={event=>event.target.select()} /></label>
+              <p className="field-help">配置在本机用 AES-GCM 加密，文件、接入链接和云端只保存密文。请把迁移口令与接入链接分开传送。每个浏览器导入一次；123 仍可能因到期或平台风控要求重新登录。</p>
               <p className="operation-status" id="deviceTransferStatus" role="status"></p>
             </form>
             <div className="settings-label"><h2>原始 RED 备份到 123 云盘</h2><p>可用账号密码或网页登录，将未压缩的 RED 原包额外备份到 123 云盘。登录会话保存在当前设备。</p></div>
@@ -248,11 +250,11 @@ export default function Shell() {
                 <div className="form-actions"><button className="secondary-button" type="submit">登录并保存会话</button></div>
               </form></div></details>
               <details className="session-fallback" id="pan123SessionDetails"><summary>登录需要验证码？使用已有会话</summary><div className="session-fallback-content"><p className="field-help">在你自己的浏览器打开 123 云盘并登录。按 F12 → Network（网络），刷新文件列表，在发往 123 云盘的请求中查找 Authorization 请求头，只复制 Bearer 后的会话 Token。不要粘贴 Cookie 或完整请求。会话等同登录凭据，仅在此处提交给本机服务。</p><form id="pan123SessionForm" className="credential-form" autoComplete="off"><label>会话 Token<input name="token" type="password" autoComplete="new-password" spellCheck="false" required aria-describedby="pan123TokenHelp" /></label><p className="field-help" id="pan123TokenHelp">使用当前 Windows 用户加密保存。提交后清空输入，不会显示已保存的 Token。</p><div className="form-actions"><button className="secondary-button" type="submit">保存会话</button></div></form></div></details>
-              <p className="operation-status" id="pan123Status" role="status">先保存原始包存储和目录，再验证上传与回读。</p>
-              <div className="archive-probe" id="pan123ProbeBlock"><p className="field-help" id="pan123ProbeHelp">验证会在备份目录的 probes/ 下上传一个随机小文件，再下载并核验。测试目录和文件可能保留在云盘。</p><div className="form-actions"><button className="secondary-button" id="probePan123" type="button" aria-describedby="pan123ProbeHelp">上传测试文件并回读</button><button className="text-button" type="button" data-open-view="jobs">查看后台任务</button></div></div>
-              <p className="field-help">同步和验证由同步 Worker 执行：关闭网页后仍会继续，不需要电脑保持开机。</p>
+              <div className="form-actions"><Button id="copyPan123Diagnostics" type="button" variant="outline">复制 123 诊断</Button><a className="download-link" href="https://www.123pan.com/" target="_blank" rel="noreferrer">前往官方网页完成验证</a></div><pre id="pan123Diagnostics" className="diagnostic-output" hidden></pre><p className="field-help">尚未开通开放平台时继续使用现有会话。遇到验证码请先在官方网页完成；云端无法代替本人验证。</p><p className="operation-status" id="pan123Status" role="status">先保存原始包存储和目录，再验证上传与回读。</p>
+              <div className="archive-probe" id="pan123ProbeBlock"><p className="field-help" id="pan123ProbeHelp">验证会在备份目录的 probes/ 下上传一个随机小文件，再下载并核验。测试目录和文件可能保留在云盘。</p><div className="form-actions"><button className="secondary-button" id="probePan123" type="button" aria-describedby="pan123ProbeHelp">上传测试文件并回读</button><button className="text-button" type="button" data-open-view="jobs">查看上传与恢复</button></div></div>
+              <p className="field-help">连接验证由同步 Worker 转发；文件压缩需要保持页面打开，中断后可从恢复入口继续。</p>
             </div>
-            <div className="settings-label"><h2>读取与同步</h2><p>读取已有库会合并主题名、作者、哈希和预览。没有库清单的已有文件会单独列出，不自动下载或覆盖。</p></div>
+            <div className="settings-label"><h2>历史文件清理</h2><p>先核对再删除。正在使用的文件和未满 7 天的文件会保留。</p></div><div className="settings-panel"><div className="form-actions"><Button id="maintenancePlan" type="button" variant="outline">生成核对清单</Button><Button id="maintenanceDelete" type="button" variant="destructive" hidden>删除清单中的旧文件</Button></div><p className="operation-status" id="maintenanceStatus" role="status"></p><pre id="maintenanceList" className="diagnostic-output"></pre></div><div className="settings-label"><h2>读取与同步</h2><p>读取已有库会合并主题名、作者、哈希和预览。没有库清单的已有文件会单独列出，不自动下载或覆盖。</p></div>
             <div className="settings-panel"><div className="form-actions"><button className="secondary-button" id="pullStorage" type="button">读取 R2 已有库</button><button className="secondary-button" id="syncStorage" type="button">同步本地资产到 R2</button></div><p className="operation-status" id="storageOperation" role="status">尚未读取 R2 已有库。</p><div id="storageUnindexed" hidden></div></div>
           </section>
         </section>
@@ -270,7 +272,7 @@ export default function Shell() {
     </nav>
     <div className="mobile-more" id="mobileMore" hidden>
       <p className="more-hint"><span id="moreRuntimeMode">本地处理模式</span></p>
-      <button type="button" data-more-view="jobs">后台任务<span className="nav-count" id="moreJobCount" hidden></span></button>
+      <button type="button" data-more-view="jobs">上传与恢复<span className="nav-count" id="moreJobCount" hidden></span></button>
       <button type="button" data-more-view="storage">存储设置</button>
       <button type="button" data-more-action="refresh">刷新当前库</button>
     </div>
@@ -289,7 +291,7 @@ export default function Shell() {
       </form>
     </dialog>
     <dialog className="theme-dialog bulk-category-dialog" id="bulkCategoryDialog" aria-labelledby="bulkCategoryTitle"><div className="theme-dialog-head"><div><h2 id="bulkCategoryTitle">批量修改类别</h2><p id="bulkCategorySub"></p></div><button className="icon-button" id="closeBulkCategory" type="button" aria-label="关闭">×</button></div><div className="theme-dialog-body"><div className="bulk-category-mode" role="radiogroup" aria-label="处理方式"><label><input type="radio" name="bulkCategoryMode" defaultValue="add" defaultChecked /><span>添加类别（保留原有）</span></label><label><input type="radio" name="bulkCategoryMode" defaultValue="replace" /><span>替换为所选类别</span></label></div><div className="bulk-category-picks" id="bulkCategoryPicks"></div><div className="theme-category-add"><input id="bulkCategoryInput" type="text" maxLength="16" placeholder="新类别，例如 深色护眼" aria-label="新建主题类别" /><button className="text-button" id="bulkCategoryAdd" type="button">加入</button></div><p className="field-help">勾选要写入的类别，再点下面的按钮。选择「替换」时，原有分类会被覆盖，可以一个都不选来清空。</p><div className="modal-actions"><button className="secondary-button" id="bulkCategoryCancel" type="button">取消</button><button className="primary-button" id="bulkCategoryApply" type="button">应用到 0 个主题</button></div></div></dialog>
-    <dialog className="preview-dialog cleanup-dialog" id="cleanupDialog" aria-labelledby="cleanupDialogTitle" aria-describedby="cleanupDialogDescription"><div className="preview-dialog-head"><div><h2 id="cleanupDialogTitle">删除本地文件</h2><p className="preview-description" id="cleanupDialogDescription"></p></div><button className="icon-button" id="closeCleanupDialog" type="button" aria-label="关闭">×</button></div><div className="cleanup-toolbar"><label className="check-label"><input id="cleanupSelectAll" type="checkbox" defaultChecked /><span id="cleanupSelectAllLabel">全选</span></label><span id="cleanupSummary"></span></div><ul className="cleanup-list" id="cleanupList"></ul><p className="cleanup-note" id="cleanupNote">删除只作用于本机文件，云端库和 R2 里的记录不受影响；之后仍可从云端重新下载。</p><div className="modal-actions"><button className="secondary-button" id="cleanupCancel" type="button">保留文件</button><button className="primary-button" id="cleanupConfirm" type="button">删除所选</button></div></dialog>
+    <dialog className="preview-dialog cleanup-dialog" id="cleanupDialog" aria-labelledby="cleanupDialogTitle" aria-describedby="cleanupDialogDescription"><div className="preview-dialog-head"><div><h2 id="cleanupDialogTitle">删除本地文件</h2><p className="preview-description" id="cleanupDialogDescription"></p></div><button className="icon-button" id="closeCleanupDialog" type="button" aria-label="关闭">×</button></div><div className="cleanup-toolbar"><label className="check-label"><input id="cleanupSelectAll" type="checkbox" defaultChecked /><span id="cleanupSelectAllLabel">全选</span></label><span id="cleanupSummary"></span><Button id="cleanupGrantFolder" variant="outline" type="button">授权所在文件夹</Button></div><ul className="cleanup-list" id="cleanupList"></ul><p className="cleanup-note" id="cleanupNote">删除只作用于本机文件，云端库和 R2 里的记录不受影响；之后仍可从云端重新下载。</p><div className="modal-actions"><button className="secondary-button" id="cleanupCancel" type="button">保留文件</button><button className="primary-button" id="cleanupConfirm" type="button">删除所选</button></div></dialog>
     <div className="modal-backdrop" id="modalBackdrop" hidden><section className="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div className="modal-head"><div><h2 id="modalTitle">确认主题</h2><p id="modalSubtitle">查看候选后再保存。</p></div><button className="icon-button" id="closeModal" aria-label="关闭">×</button></div><div id="modalBody"></div></section></div>
   </>;
 }
