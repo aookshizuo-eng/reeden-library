@@ -3639,9 +3639,9 @@ function renderStorageSummary(data) {
     $("#credentialState").textContent = syncToken ? "同步写入令牌已填写（仅保存在本机浏览器）。" : "尚未填写同步写入令牌；读取可用，上传会被 Worker 拒绝。";
     $("#pan123CredentialState").textContent = "会话只保存在本机浏览器；登录和测试连接由浏览器直连；备份上传由同步 Worker 代转，Token 不写入仓库或 R2。";
     $("#storageForm").hidden = true;
+    $("#r2SettingsLabel").hidden = true;
     // 静态模式没有本机后端，但 123 的登录与扫码接口允许跨域，浏览器可以自己
-    // 直连——请求从用户自己的网络出口发出，不会被 123 判定成「海外登录」而
-    // 强制弹阿里云图形验证码。所以扫码面板在这里照常可用。
+    // 直连，请求从用户自己的网络出口发出。平台仍可能要求验证。
     $("#pan123Label").hidden = false;
     $("#pan123Label h2").textContent = "连接 123 云盘";
     const labelNote = $("#pan123Label p:first-of-type");
@@ -3658,6 +3658,7 @@ function renderStorageSummary(data) {
     return;
   }
   $("#storageForm").hidden = false;
+  $("#r2SettingsLabel").hidden = false;
   const library = data.library || {};
   const archive = data.archive || {};
   const status = data.status || {};
@@ -5412,7 +5413,7 @@ $("#bulkTagForm").addEventListener("submit", applyBulkTags);
 $("#closeBulkTags").addEventListener("click", () => { if (!state.operation) $("#bulkTagDialog").close(); });
 $("#bulkTagDialog").addEventListener("cancel", event => { if (state.operation) event.preventDefault(); });
 $("#saveApiBase").addEventListener("click", saveApiBaseSetting);
-$("#clearApiBase").addEventListener("click", () => { $("#apiBaseInput").value = ""; saveApiBaseSetting(); });
+$("#clearApiBase").addEventListener("click", () => { $("#apiBaseInput").value = normalizeApiBase(window.REEDEN_API_BASE); saveApiBaseSetting(); });
 (() => {
   const config = pan123BackupConfig();
   $("#pan123BackupToken").value = config.token;
