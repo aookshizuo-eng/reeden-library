@@ -5039,7 +5039,7 @@ async function expandImportArchives(files) {
       if (file.size > 256 * 1024 * 1024) throw new Error("ZIP 超过 256 MB，请拆分后导入");
       const codec = await loadFreeCodec();
       const entries = await codec.readZipEntries(new Uint8Array(await file.arrayBuffer()), {standardZip: true,
-        filter: name => !name.startsWith("__MACOSX/") && !name.split("/").some(part => part.startsWith(".")) && /\.(red|ttf|otf|woff2?)$/i.test(name),
+        filter: name => !name.startsWith("__MACOSX/") && !name.split("/").some(part => part.startsWith(".")) && /\.(red|ttf|otf|woff2?|svg|html?)$/i.test(name),
       });
       for (const entry of entries) {
         const item = new File([entry.bytes], entry.name.split("/").pop(), {lastModified: file.lastModified});
@@ -5047,11 +5047,11 @@ async function expandImportArchives(files) {
         result.push(item);
         extracted++;
       }
-      if (!entries.length) errors.push(`${file.name}：没有找到字体或 RED 文件`);
+      if (!entries.length) errors.push(`${file.name}：没有找到支持的主题、字体或 SVG/HTML 收藏`);
     } catch (error) { errors.push(`${file.name}：${error.message}`); }
   }
   if (extracted || errors.length) {
-    const text = [extracted ? `ZIP 已在本机提取 ${extracted} 个字体/主题；原 ZIP 保留，等待确认上传。` : "", ...errors].filter(Boolean).join(" ");
+    const text = [extracted ? `ZIP 已在本机提取 ${extracted} 个主题/字体/收藏；原 ZIP 保留，等待确认上传。` : "", ...errors].filter(Boolean).join(" ");
     operationMessage($("#archiveImportStatus"), text, errors.length > 0);
   }
   return result;
