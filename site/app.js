@@ -122,8 +122,10 @@ function downloadUrl(path, name = "") {
       const parts = rest.split("/");
       file = decodeURIComponent(parts[parts.length - 1] || "");
     } catch { file = ""; }
-    if (!file) file = String(name || "");
-    const safe = file.replace(/[\\/:*?"<>|\r\n]/g, "_").slice(0, 120);
+    file = String(name || file);
+    let safe = file.replace(/[\\/:*?"<>|\r\n]/g, "_");
+    const extension = safe.match(/\.[a-z\d]{1,8}$/i)?.[0] || "";
+    if (safe.length > 120) safe = safe.slice(0, 120 - extension.length) + extension;
     return `${url}${url.includes("?") ? "&" : "?"}download=1&name=${encodeURIComponent(safe)}`;
   }
   return url;
@@ -276,6 +278,7 @@ function requestHeaders(headers = {}) {
 }
 const THEME_PAGE_SIZE = 24;
 const state = { themes: [], fonts: [], assets: [], review: [], pending: [], jobs: [], activeView: "themes", themeDensity: "grid", importKind: "theme", themeSearch: "", themeAuthor: "all", themeCategory: "all", assetFilter: "all", assetSearch: "", fontSearch: "", fontFilter: "all", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs"), importAssetIds: readSessionIds("reeden-import-assets") };
+let themeSelectionMode = false;
 const selections = { review: new Set(), theme: new Set(), font: new Set(), asset: new Set() };
 // 本地服务模式下「确认上传」是提交后台任务；记住这批 job id，轮询回来时把
 // 进度写进用户眼前那条进度条，而不是让用户只看见一句「已加入后台」。
@@ -1398,17 +1401,28 @@ function normalizeIdentity(value) {
   return String(value || "").toLocaleLowerCase("zh-CN").replace(/[\s\p{P}\p{S}]+/gu, "");
 }
 function browserDuplicateCandidates(name, author) {
-  const target = `${normalizeIdentity(name)}\u0000${normalizeIdentity(author || "作者未记录")}`;
-  return state.themes.filter(theme => `${normalizeIdentity(theme.name)}\u0000${normalizeIdentity(theme.author || "作者未记录")}` === target);
+  const target = `${normalizeIdentity(themeIdentity({name, author}).title)}\u0000${normalizeIdentity(author || "作者未记录")}`;
+  return state.themes.filter(theme => `${normalizeIdentity(themeIdentity(theme).title)}\u0000${normalizeIdentity(themeIdentity(theme).author)}` === target);
+}
+
+function themeIdentity(theme) {
+  const author = String(theme?.author || '').trim() || '作者未记录';
+  let title = String(theme?.name || theme?.source_name || theme?.file_name || '未命名主题').trim();
+  if (author !== '作者未记录') {
+    const prefix = title.slice(0, author.length);
+    const suffix = title.slice(author.length);
+    if (prefix.toLocaleLowerCase('zh-CN') === author.toLocaleLowerCase('zh-CN') && /^\s*[-—–－]\s*\S/.test(suffix)) {
+      title = suffix.replace(/^\s*[-—–－]\s*/, '').trim();
+    }
+  }
+  return {title: title || '未命名主题', author};
 }
 function filenameIdentityFallback(fileName) {
-  const stem = String(fileName || "主题").replace(/\.red$/i, "").replace(/\s*[([【（].*?(?:加密|未加密|日夜|夜间).*?[)\]】）]\s*$/i, "").replace(/\s*[-_·]?(?:未加密|加密|日夜|夜间)\s*$/i, "").replace(/\s*\(\d+\)\s*$/i, "").trim();
-  const parts = (stem.includes("_-_") ? stem.split(/_-_+/) : stem.split(/\s*[-—–]\s+/)).map(item => item.trim()).filter(Boolean);
-  if (parts.length < 3) return { name: stem || "主题", author: "作者未记录" };
-  const first = parts[0];
-  const author = parts[1];
-  const name = /^(?:应用主题|主题|reeden)$/i.test(first) ? parts.slice(2).join(" - ") : parts.slice(2).join(" - ");
-  return { name: name || stem || "主题", author: author || "作者未记录" };
+  const stem = String(fileName || '主题').replace(/\.red$/i, '').replace(/\s*[([【（].*?(?:加密|未加密|日夜|夜间).*?[)\]】）]\s*$/i, '').replace(/\s*[-_·]?(?:未加密|加密|日夜|夜间)\s*$/i, '').replace(/\s*\(\d+\)\s*$/i, '').trim();
+  const parts = stem.split(/_-_+|\s+[-—–－]\s*|\s*[-—–－]\s+/).map(item => item.trim()).filter(Boolean);
+  if (/^(?:应用主题|主题|reeden)$/i.test(parts[0] || '')) parts.shift();
+  if (parts.length < 2) return {name: parts[0] || stem || '主题', author: '作者未记录'};
+  return {name: parts.slice(1).join(' - '), author: parts[0]};
 }
 function metadataFromEntries(entries, fileName) {
   const fallback = filenameIdentityFallback(fileName);
@@ -1426,7 +1440,9 @@ function metadataFromEntries(entries, fileName) {
     }
     for (const child of Object.values(value)) if (child && typeof child === "object") visit(child);
   };
-  for (const entry of entries || []) {
+  const metadataPriority = entry => /^theme\.json$/i.test(entry.name || '') ? 0 : /(^|\/)theme\.json$/i.test(entry.name || '') ? 1 : 2;
+  const ordered = [...(entries || [])].sort((a, b) => metadataPriority(a) - metadataPriority(b));
+  for (const entry of ordered) {
     if (!entry.name?.toLowerCase().endsWith(".json")) continue;
     try {
       const value = JSON.parse(new TextDecoder().decode(entry.bytes));
@@ -1434,7 +1450,7 @@ function metadataFromEntries(entries, fileName) {
       if (metadataName && metadataAuthor) break;
     } catch { /* JSON assets can be unrelated configuration. */ }
   }
-  return { name, author };
+  return {name: themeIdentity({name, author}).title, author};
 }
 async function imagePreviewBlob(bytes, mime, maxWidth = 900) {
   if (!bytes?.length || !mime?.startsWith("image/") || typeof createImageBitmap !== "function") return null;
@@ -1758,17 +1774,17 @@ async function composeThemePreviewBlob(entries, codec) {
   else { context.fillStyle = "#f2ece1"; context.fillRect(panelX, 0, panelW, panelH); }
   // 书架页上方固定留一条横幅位置给轮播图；包里没有轮播才把整块还给背景。
   // 横幅是宽图，用 cover 会被裁成一条色带，所以这里也走「模糊铺底 + 完整图」。
-  const carouselBox = carousel ? {x: panelX + 16, y: 16, w: panelW - 32, h: 190} : null;
+  const carouselBox = carousel ? {x: panelX + 16, y: 16, w: panelW - 32, h: 400} : null;
   if (carouselBox) {
     context.save();
     clipRoundRect(carouselBox.x, carouselBox.y, carouselBox.w, carouselBox.h, 12); context.clip();
-    await fillScene(carousel, carouselBox.x, carouselBox.y, carouselBox.w, carouselBox.h);
+    await drawFit(carousel, carouselBox.x, carouselBox.y, carouselBox.w, carouselBox.h, "blur");
     context.restore();
   }
   if (card) {
     // card_bg 是实际的横版书架卡片，重复几次就能看出主题真实的书架密度。
     const cardX = panelX + 20, cardW = panelW - 40, cardH = 150;
-    const firstY = carouselBox ? 232 : 88, rowGap = 16;
+    const firstY = carouselBox ? carouselBox.y + carouselBox.h + 26 : 88, rowGap = 16;
     for (let index = 0; index < Math.min(covers.length, 4); index++) {
       const y = firstY + index * (cardH + rowGap);
       if (y + cardH > panelH - 24) break;
@@ -2255,6 +2271,8 @@ function resultWarning(result) {
   return typeof warnings === "string" ? warnings : Object.values(warnings).join("；");
 }
 function operationMessage(element, message, failed = false) {
+  if (!element) return;
+  element.hidden = !message;
   element.textContent = message;
   element.classList.toggle("is-error", failed);
 }
@@ -2423,9 +2441,10 @@ function updateBulkControls() {
     $("#" + countId).textContent = count === checkedMatches ? `已选 ${count} 项` : `已选 ${count} 项（${count - checkedMatches} 项在筛选范围外）`;
     const clear = $(`[data-clear-selection="${kind}"]`);
     if (clear) { clear.hidden = !count; clear.disabled = Boolean(state.operation); }
-    const syncCount = [...selections[kind]].filter(id => eligibleIds(kind).includes(id)).length;
     const syncButton = $("#" + buttonId);
     if (syncButton) {
+      const eligibleSyncIds = new Set(eligibleIds(kind));
+      const syncCount = [...selections[kind]].filter(id => eligibleSyncIds.has(id)).length;
       const blocked = Boolean(state.operation) || !storageReady || storageSettingsPending() || !syncCount || (["theme", "font", "asset"].includes(kind) && !r2Enabled());
       // 禁用态按钮按下去毫无反应，用户只会看到「点不动」。改成「看起来灰着、
       // 点一下就告诉你为什么」，保证每次点击都有反馈；真正的拦截条件仍在
@@ -2453,6 +2472,19 @@ function updateBulkControls() {
     const bar = $("#" + kind + "Toolbar");
     if (bar) bar.classList.toggle("has-selection", count > 0);
   });
+  const selectingThemes = themeSelectionMode || selections.theme.size > 0;
+  $("#themeList").classList.toggle("is-selecting", selectingThemes);
+  $("#toggleThemeSelection").textContent = selectingThemes ? "退出多选" : "多选";
+  $("#toggleThemeSelection").setAttribute("aria-pressed", String(selectingThemes));
+  $("#toggleThemeSelection").disabled = Boolean(state.operation);
+  $("#themeSelectionHint").hidden = !selectingThemes;
+  $$("#themeList [data-theme-open]").forEach(button => {
+    const theme = state.themes.find(item => String(item.id) === button.dataset.themeOpen);
+    const selected = selections.theme.has(button.dataset.themeOpen);
+    button.setAttribute("aria-label", selectingThemes ? `${selected ? "取消选择" : "选择"} ${themeIdentity(theme).title}` : `查看 ${themeIdentity(theme).title} 的详情`);
+    if (selectingThemes) button.setAttribute("aria-pressed", String(selected)); else button.removeAttribute("aria-pressed");
+  });
+  $$("#themeDialog form input, #themeDialog form button").forEach(input => { input.disabled = Boolean(state.operation); });
   const chosenReview = state.review.filter(item => selections.review.has(item.staging_id));
   const chosenPending = state.pending.filter(item => selections.review.has(item.id));
   const pendingFonts = chosenPending.filter(item => item.kind === "font").length;
@@ -2556,12 +2588,7 @@ function recordKindPath(kind) {
 function recordTags(record) {
   return Array.isArray(record?.tags) ? record.tags.filter(Boolean).map(String) : [];
 }
-function classificationEditor(record, kind) {
-  const author = String(record?.author || "").trim();
-  const style = String(record?.style || "").trim();
-  const tags = recordTags(record);
-  return `<div class="record-classifications">${author ? `<span class="category-chip">作者：${escapeHtml(author)}</span>` : `<span class="category-chip is-empty">未分作者</span>`}${style ? `<span class="category-chip">风格：${escapeHtml(style)}</span>` : `<span class="category-chip is-empty">未分风格</span>`}${tags.map(tag => `<span class="category-chip">#${escapeHtml(tag)}</span>`).join("")}</div><form class="asset-meta-form record-classification-form" data-record-form="${escapeHtml(record?.id || "")}" data-record-kind="${escapeHtml(kind)}"><div class="asset-meta-fields"><label>作者<input name="author" value="${escapeHtml(author)}" placeholder="作者" /></label><label>风格<input name="style" value="${escapeHtml(style)}" placeholder="风格" /></label><label>标签<input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="标签，用逗号分隔" /></label></div><button class="text-button" type="submit">保存分类</button></form>`;
-}
+
 function inferFontCategory(font) {
   const text = [font?.family, font?.file_name, font?.subfamily].filter(Boolean).join(" ").toLocaleLowerCase("zh-CN");
   if (/(?:可爱|萌|童趣|儿童|cute|comic|kids)/i.test(text)) return "可爱字形";
@@ -2645,7 +2672,7 @@ function fontCard(font, imported = false) {
 function themeMatchesSearch(theme) {
   const needle = String(state.themeSearch || "").trim().toLocaleLowerCase("zh-CN");
   if (!needle) return true;
-  return [theme.name, theme.author, theme.file_name, theme.source_name, ...themeCategoryList(theme), theme.compression_supported === false ? "加密" : "压缩"].some(value => String(value || "").toLocaleLowerCase("zh-CN").includes(needle));
+  return [theme.name, themeIdentity(theme).title, theme.author, theme.file_name, theme.source_name, ...(theme.tags || []), ...themeCategoryList(theme), theme.compression_supported === false ? "加密" : "压缩"].some(value => String(value || "").toLocaleLowerCase("zh-CN").includes(needle));
 }
 function themeAuthorLabel(theme) { return String(theme?.author || "").trim() || "作者未记录"; }
 function renderThemeAuthorFilter() {
@@ -2705,9 +2732,12 @@ async function saveThemeCategories(themeId, categories) {
     await patchThemeCategories(theme, categories);
     if (browserSyncEnabled()) saveDeviceSnapshot();
     renderThemes();
-    if ($("#themeDialog").open) openThemeDialog(themeId);
+    if ($("#themeDialog").open && $("#themeDialog").dataset.themeId === String(themeId)) {
+      openThemeDialog(themeId);
+      operationMessage($("#themeDialogStatus"), "分类已保存");
+    }
     toast("分类已保存");
-  } catch (error) { toast(`分类保存失败：${error.message}`); }
+  } catch (error) { operationMessage($("#themeDialogStatus"), `分类保存失败：${error.message}`, true); toast(`分类保存失败：${error.message}`); }
   finally { setOperation(""); }
 }
 /* 批量分类：一次给多个主题加/换类别。逐条 PATCH，每条都走和单项编辑
@@ -2846,10 +2876,12 @@ async function saveThemeIdentity(themeId, form) {
   const theme = state.themes.find(item => String(item.id) === String(themeId));
   if (!theme || state.operation) return;
   const fields = new FormData(form);
-  const name = String(fields.get("name") || "").trim();
   const author = String(fields.get("author") || "").trim();
+  const rawName = String(fields.get("name") || "").trim();
+  const name = rawName ? themeIdentity({name: rawName, author}).title : "";
   if (!name) { toast("作品名不能为空"); return; }
   setOperation("theme-identity");
+  operationMessage($("#themeDialogStatus"), "正在保存名称与作者…");
   try {
     await ensureRecordReference(theme);
     const result = await api(`/api/themes/${encodeURIComponent(theme.id)}`, {
@@ -2860,39 +2892,66 @@ async function saveThemeIdentity(themeId, form) {
     updateCachedRecord(theme);
     if (browserSyncEnabled()) saveDeviceSnapshot();
     renderThemes();
-    openThemeDialog(theme.id);
+    if ($("#themeDialog").open && $("#themeDialog").dataset.themeId === String(theme.id)) {
+      openThemeDialog(theme.id);
+      operationMessage($("#themeDialogStatus"), "名称与作者已保存");
+    }
     toast("名称与作者已保存");
-  } catch (error) { toast(`保存失败：${error.message}`); }
+  } catch (error) { operationMessage($("#themeDialogStatus"), `保存失败：${error.message}`, true); toast(`保存失败：${error.message}`); }
   finally { setOperation(""); }
 }
 function openThemeDialog(id) {
   const theme = state.themes.find(item => String(item.id) === String(id));
   const dialog = $("#themeDialog");
   if (!theme || !dialog) return;
+
+  const sameTheme = dialog.open && dialog.dataset.themeId === String(id);
+  const expanded = new Set(sameTheme ? $$('.theme-detail-disclosure[open]', dialog).map(item => item.dataset.section) : []);
+  const scrollTop = sameTheme ? $('#themeDialogBody').scrollTop : 0;
+  const oldForm = sameTheme && state.operation !== 'theme-identity' ? $('.theme-identity-form', dialog) : null;
+  const draft = oldForm ? {name: oldForm.elements.name.value, author: oldForm.elements.author.value} : null;
+  const identity = themeIdentity(theme);
+  const title = identity.title, author = identity.author;
   const preview = preferredPreview(theme.preview_light_url, theme.preview_dark_url);
   const roles = [...new Set((theme.resource_summary || []).map(item => item.role).filter(Boolean))];
   const themeFile = theme.compressed_url || theme.library_url;
-  const backup = theme.original_123?.key ? "123 已备份" : theme.original_123_error ? "123 备份失败" : "123 未备份";
-  $("#themeDialogTitle").textContent = theme.name || "未命名主题";
-  $("#themeDialogSub").textContent = `${themeAuthorLabel(theme)} · ${previewKind(theme.preview_details)} · ${syncLabel(theme)}`;
-  $("#themeDialogBody").innerHTML = `<div class="theme-dialog-preview">${previewImage(preview.url, `${theme.name} ${preview.label} · ${previewKind(theme.preview_details)}`, "", theme.preview_details)}</div>
-    <form class="theme-identity-form" data-theme-identity="${escapeHtml(theme.id)}"><div class="asset-meta-fields"><label>作品名<input name="name" maxlength="200" value="${escapeHtml(theme.name || "")}" placeholder="作品名" /></label><label>作者<input name="author" maxlength="200" value="${escapeHtml(theme.author === "作者未记录" ? "" : (theme.author || ""))}" placeholder="作者，未记录可留空" /></label></div><button class="text-button" type="submit">保存名称与作者</button></form>
-    <div class="theme-dialog-details"><dl class="detail-list">
-      ${themeDetailRow("压缩结果", compressionSummary(theme))}
-      ${themeDetailRow("原始体积", theme.original_size ? formatBytes(theme.original_size) : "")}
-      ${themeDetailRow("压缩后体积", theme.compressed_size ? formatBytes(theme.compressed_size) : "")}
-      ${themeDetailRow("同步状态", syncLabel(theme))}
-      ${themeDetailRow("123 备份", backup)}
-      ${themeDetailRow("资源角色", roles.join(" · "))}
-      ${themeDetailRow("源文件", theme.source_name || theme.file_name || "")}
-      ${themeDetailRow("类别", themeCategoryList(theme).join(" · ") || "未分类")}
-    </dl>${themeCategoryEditorMarkup(theme)}${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}<div class="theme-dialog-actions">
-      ${themeFile ? `<a class="secondary-button" href="${escapeHtml(downloadUrl(themeFile, theme.name || theme.file_name))}">下载主题</a>` : ""}
-      ${theme.original_url ? `<a class="secondary-button" href="${escapeHtml(downloadUrl(theme.original_url, theme.source_name || theme.file_name))}">下载原始包</a>` : ""}
-      ${themeFile && !savedToCloud(theme) ? `<button class="primary-button" id="themeDialogSync" type="button">同步到 R2</button>` : ""}
-      <button class="text-button" id="themeDialogRebuild" type="button">更新预览</button>
-      <button class="text-button danger-text" id="themeDialogDelete" type="button">删除</button>
-    </div></div>`;
+  const backup = theme.original_123?.key ? '123 已备份' : theme.original_123_error ? '123 备份失败' : '123 未备份';
+  const tags = [...new Set([...themeCategoryList(theme), ...(theme.tags || [])])];
+  const compressed = Number(theme.compressed_size || theme.bytes) || 0;
+  const original = Number(theme.original_size) || 0;
+  const reduction = original > compressed && compressed > 0 ? `节省 ${((1 - compressed / original) * 100).toFixed(1)}%` : '';
+  const open = section => expanded.has(section) ? ' open' : '';
+  dialog.dataset.themeId = String(id);
+  $('#themeDialogTitle').textContent = title;
+  $('#themeDialogSub').textContent = author;
+  $('#themeDialogBody').innerHTML = `<div class="theme-dialog-preview">${previewImage(preview.url, `${title} · ${previewKind(theme.preview_details)}`, '', theme.preview_details)}${preview.url ? '<p class="preview-hint">点击图片放大</p>' : ''}</div>
+    <div class="theme-dialog-details">
+      <div class="theme-detail-status"><span class="badge ${savedToCloud(theme) ? 'is-good' : ''}">${escapeHtml(syncLabel(theme))}</span><span class="badge">${backup}</span></div>
+      <div class="theme-size-summary">${original && compressed && original !== compressed ? `<span>${formatBytes(original)}</span><span aria-label="压缩为">→</span>` : ''}<strong>${compressed || original ? formatBytes(compressed || original) : '体积未记录'}</strong>${reduction ? `<span class="theme-size-saving">${reduction}</span>` : ''}</div>
+      ${tags.length ? `<div class="theme-detail-tags">${tags.slice(0, 5).map(tag => `<span class="category-chip">${escapeHtml(tag)}</span>`).join('')}${tags.length > 5 ? `<span class="field-help">另 ${tags.length - 5} 项</span>` : ''}</div>` : ''}
+      <div class="theme-dialog-actions">
+        ${themeFile ? `<a class="primary-button" href="${escapeHtml(downloadUrl(themeFile, title + '.red'))}">下载主题</a>` : ''}
+        ${theme.original_url ? `<a class="secondary-button" href="${escapeHtml(downloadUrl(theme.original_url, /\.red$/i.test(theme.source_name || theme.file_name || '') ? theme.source_name || theme.file_name : title + '-原包.red'))}">下载原始包</a>` : ''}
+        ${themeFile && !savedToCloud(theme) ? '<button class="secondary-button" id="themeDialogSync" type="button">同步到 R2</button>' : ''}
+      </div>
+      <p class="operation-status" id="themeDialogStatus" role="status" hidden></p>
+      ${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === 'string' ? theme.sync_error : Object.values(theme.sync_error).join('；'))}</p>` : ''}
+      <div class="theme-detail-editors">
+        <details class="theme-detail-disclosure" data-section="identity"${open('identity')}><summary>编辑名称与作者</summary>
+          <form class="theme-identity-form" data-theme-identity="${escapeHtml(theme.id)}"><div class="asset-meta-fields"><label>作品名<input name="name" maxlength="200" value="${escapeHtml(draft?.name ?? title)}" required /></label><label>作者<input name="author" maxlength="200" value="${escapeHtml(draft?.author ?? (author === '作者未记录' ? '' : author))}" placeholder="未记录可留空" /></label></div><button class="secondary-button" type="submit">保存名称与作者</button></form>
+        </details>
+        <details class="theme-detail-disclosure" data-section="categories"${open('categories')}><summary>编辑分类与标签</summary>${themeCategoryEditorMarkup(theme)}
+          <form class="theme-tags-form" data-record-form="${escapeHtml(theme.id)}" data-record-kind="theme"><label>标签<input name="tags" value="${escapeHtml((theme.tags || []).join('，'))}" placeholder="用逗号分隔" /></label><button class="secondary-button" type="submit">保存标签</button></form>
+        </details>
+        <details class="theme-detail-disclosure" data-section="maintenance"${open('maintenance')}><summary>文件信息与维护</summary><dl class="detail-list">
+          ${themeDetailRow('源文件', theme.source_name || theme.file_name)}
+          ${themeDetailRow('预览内容', previewKind(theme.preview_details))}
+          ${themeDetailRow('资源角色', roles.join(' · '))}
+          ${themeDetailRow('原始体积', original ? formatBytes(original) : '')}
+        </dl><div class="theme-maintenance-actions"><button class="text-button" id="themeDialogRebuild" type="button">更新预览</button><button class="text-button danger-text" id="themeDialogDelete" type="button">删除主题</button></div><p class="field-help">更新预览会读取一次已保存的主题文件，使用最新布局重新生成。</p></details>
+      </div>
+    </div>`;
+  $('#themeDialogBody').scrollTop = scrollTop;
   const categoryEditor = $("#themeDialogBody .theme-category-editor");
   if (categoryEditor) {
     const current = () => themeCategoryList(theme);
@@ -2929,7 +2988,17 @@ function openThemeDialog(id) {
     saveThemeIdentity(theme.id, event.currentTarget);
   });
   $("#themeDialogSync")?.addEventListener("click", () => { dialog.close(); syncTheme(theme.id); });
-  $("#themeDialogRebuild")?.addEventListener("click", () => { dialog.close(); rebuildPreview(theme.id); });
+  $("#themeDialogRebuild")?.addEventListener("click", async event => {
+    const button = event.currentTarget;
+    button.disabled = true; button.textContent = "正在更新…";
+    try {
+      if (await rebuildPreview(theme.id) && dialog.open && dialog.dataset.themeId === String(theme.id)) {
+        openThemeDialog(theme.id);
+        operationMessage($('#themeDialogStatus'), '预览已更新');
+      }
+    }
+    finally { button.disabled = false; button.textContent = "更新预览"; }
+  });
   $("#themeDialogDelete")?.addEventListener("click", () => { dialog.close(); deleteSelectedRecords("theme", [theme.id]); });
   if (!dialog.open) dialog.showModal();
 }
@@ -2995,7 +3064,7 @@ function catalogPage(kind) {
   const all = state[kind + "s"];
   const name = libraryKinds[kind].name;
   const order = librarySort[kind];
-  const label = item => item.name || item.family || item.file_name || "";
+  const label = item => kind === "theme" ? themeIdentity(item).title : item.name || item.family || item.file_name || "";
   const bytes = item => Number(item.compressed_size ?? item.bytes ?? item.original_size) || 0;
   const byName = (a, b) => libraryCollator.compare(label(a), label(b));
   const updated = item => Date.parse(order === "added" || order === "oldest" ? item.imported_at || item.created_at || item.updated_at || "" : item.updated_at || item.created_at || "") || 0;
@@ -3040,35 +3109,31 @@ async function refreshCatalog(kind) {
     button.disabled = false;
   }
 }
+
 function renderThemes() {
-  const list = $("#themeList");
+  const list = $('#themeList');
   renderThemeAuthorFilter();
   renderThemeCategoryFilter();
-  const pageItems = catalogPage("theme");
+  const pageItems = catalogPage('theme');
   list.innerHTML = pageItems.map(theme => {
+    const {title, author} = themeIdentity(theme);
     const preview = preferredPreview(theme.preview_light_url, theme.preview_dark_url);
-    const author = themeAuthorLabel(theme);
-    // 作品名里已经带了作者名（例如「Muiii - 书签 · 日夜」）时不再重复写作者；
-    // 手机上标题和作者之间的空行来自 .item-heading 的最小高度，CSS 里已收紧。
-    const nameIncludesAuthor = author && author !== "作者未记录" && String(theme.name || "").toLocaleLowerCase("zh-CN").includes(author.toLocaleLowerCase("zh-CN"));
-    const authorText = nameIncludesAuthor ? "" : author;
     const categories = themeCategoryList(theme);
-    const meta = [authorText, ...categories].filter(Boolean);
-    // 卡片只留作品图和一行作者/类别；压缩结果、体积、角色、123 备份、同步与
-    // 删除都收进点击后打开的主题细节弹窗，跟参考站的卡片一样安静。
     return `<article class="theme-card" data-theme-id="${escapeHtml(theme.id)}">
-      <div class="theme-preview">${previewImage(preview.url, `${theme.name} ${preview.label} · ${previewKind(theme.preview_details)}`, "", theme.preview_details)}<span class="preview-caption">${escapeHtml(previewKind(theme.preview_details))}</span><button class="theme-more" type="button" data-theme-open="${escapeHtml(theme.id)}" aria-label="查看 ${escapeHtml(theme.name || "未命名主题")} 的主题细节">⋯</button></div>
-      <div class="theme-info">${isNewArrival(theme) ? '<span class="arrival-label">新入库</span>' : ""}<div class="item-heading">${selectInput("theme", theme.id, `主题 ${theme.name || "未命名主题"}`, isAssetBusy("theme", theme.id))}<button class="theme-title theme-open" type="button" data-theme-open="${escapeHtml(theme.id)}">${escapeHtml(theme.name || "未命名主题")}</button></div>${meta.length ? `<div class="theme-meta">${authorText ? `<span class="theme-author">${escapeHtml(authorText)}</span>` : ""}${categories.length ? `<span class="theme-categories">${categories.map(category => `<em>${escapeHtml(category)}</em>`).join("")}</span>` : ""}</div>` : ""}${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === "string" ? theme.sync_error : Object.values(theme.sync_error).join("；"))}</p>` : ""}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === "string" ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join("；"))}</p>` : ""}</div>
+      <button class="theme-card-hit" type="button" data-theme-open="${escapeHtml(theme.id)}" aria-label="查看 ${escapeHtml(title)} 的详情"></button>
+      <div class="theme-preview">${preview.url ? `<div class="theme-thumbnail"><img src="${escapeHtml(assetUrl(preview.url))}" alt="${escapeHtml(title)} 主题预览" loading="lazy" /></div>` : '<span class="preview-empty">暂无预览</span>'}<span class="preview-caption" title="作者：${escapeHtml(author)}">${escapeHtml(author)}</span><button class="theme-more" type="button" data-theme-details="${escapeHtml(theme.id)}" aria-label="查看 ${escapeHtml(title)} 的详情">⋯</button></div>
+      <div class="theme-info">${isNewArrival(theme) ? '<span class="arrival-label">新入库</span>' : ''}<div class="item-heading">${selectInput('theme', theme.id, `主题 ${title}`, isAssetBusy('theme', theme.id))}<h3 class="theme-title">${escapeHtml(title)}</h3></div>${categories.length ? `<div class="theme-meta"><span class="theme-categories">${categories.map(category => `<em>${escapeHtml(category)}</em>`).join('')}</span></div>` : ''}${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === 'string' ? theme.sync_error : Object.values(theme.sync_error).join('；'))}</p>` : ''}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === 'string' ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join('；'))}</p>` : ''}</div>
     </article>`;
-  }).join("");
-  $$("[data-theme-open]").forEach(button => button.addEventListener("click", event => { event.stopPropagation(); openThemeDialog(button.dataset.themeOpen); }));
-  $$("#themeList .theme-card").forEach(card => card.addEventListener("click", event => {
-    if (event.target.closest("input, button, a, label")) return;
-    openThemeDialog(card.dataset.themeId);
+  }).join('');
+  $$('#themeList [data-theme-open]').forEach(button => button.addEventListener('click', event => {
+    const id = button.dataset.themeOpen;
+    if (state.operation || isAssetBusy('theme', id)) { toast('请等待当前任务完成'); return; }
+    if (themeSelectionMode || selections.theme.size || event.ctrlKey || event.metaKey) {
+      if (selections.theme.has(id)) selections.theme.delete(id); else selections.theme.add(id);
+      updateBulkControls();
+    } else openThemeDialog(id);
   }));
-  $$(".sync-theme").forEach(button => button.addEventListener("click", () => syncTheme(button.dataset.id)));
-  $$(".rebuild-preview").forEach(button => button.addEventListener("click", () => rebuildPreview(button.dataset.id)));
-  $$(".delete-record[data-kind='theme']").forEach(button => button.addEventListener("click", () => deleteSelectedRecords("theme", [button.dataset.id])));
+  $$('#themeList [data-theme-details]').forEach(button => button.addEventListener('click', () => openThemeDialog(button.dataset.themeDetails)));
   renderCompressionResults();
   updateBulkControls();
 }
@@ -3297,8 +3362,8 @@ async function saveRecordClassification(form) {
   const next = {
     ...record,
     author: fields.has("author") ? String(fields.get("author") || "").trim() : record.author || "",
-    style: String(fields.get("style") || "").trim(),
-    tags: splitTags(fields.get("tags")),
+    style: fields.has("style") ? String(fields.get("style") || "").trim() : record.style || "",
+    tags: fields.has("tags") ? splitTags(fields.get("tags")) : record.tags || [],
     updated_at: new Date().toISOString(),
   };
   setOperation("record-classification");
@@ -3313,9 +3378,9 @@ async function saveRecordClassification(form) {
     const index = collection.findIndex(item => item.id === id);
     if (index >= 0) collection[index] = next;
     updateCachedRecord(next);
-    if (kind === "theme") renderThemes(); else if (kind === "font") renderFonts(); else renderAssets();
+    if (kind === "theme") { renderThemes(); if ($("#themeDialog").open && $("#themeDialog").dataset.themeId === id) { openThemeDialog(id); operationMessage($("#themeDialogStatus"), "标签已保存"); } } else if (kind === "font") renderFonts(); else renderAssets();
     toast("分类已保存");
-  } catch (error) { toast(`分类保存失败：${error.message}`); }
+  } catch (error) { if (kind === "theme") operationMessage($("#themeDialogStatus"), `标签保存失败：${error.message}`, true); toast(`分类保存失败：${error.message}`); }
   finally { setOperation(""); }
 }
 function renderImportedFonts() {
@@ -3752,6 +3817,7 @@ async function analyzeFiles(files) {
           if (plain?.name) identity.name = plain.name;
           if (plain?.author) identity.author = plain.author;
         }
+        identity.name = themeIdentity(identity).title;
         let previewUrl = "";
         let previewDetails = { kind: previewCompositionKind(entries), simulation: true, encrypted_source: inspection.format === "red_private_v2" };
         if (entries.length) {
@@ -4143,22 +4209,53 @@ async function syncSelectedAssets(kind, ids = [...selections[kind]]) {
   } catch (error) { operationMessage(output, error.message, true); toast(error.message); }
   finally { setOperation(""); }
 }
+
 async function rebuildPreview(themeId) {
-  if (state.operation) return;
-  if (browserSyncEnabled()) {
-    toast("免费浏览器模式在导入时生成预览，暂不提供云端重建接口");
-    return;
-  }
-  setOperation("preview");
-  const button = $(`.rebuild-preview[data-id="${CSS.escape(themeId)}"]`);
-  if (button) button.disabled = true;
-  toast("正在用主题素材重新组合书架预览…");
+  if (state.operation) return false;
+  await whenStorageReady();
+  const theme = state.themes.find(item => String(item.id) === String(themeId));
+  if (!theme) return false;
+  const status = $('#themeDialogStatus');
+  setOperation('preview');
+  operationMessage(status, '正在读取主题并更新预览…');
   try {
-    await api(`/api/themes/${encodeURIComponent(themeId)}/preview/rebuild`, { method: "POST" });
-    await loadThemes();
-    toast("预览已更新，同步存储可上传");
-  } catch (error) { toast(error.message); }
-  finally { setOperation(""); }
+    if (browserSyncEnabled()) {
+      await ensureWriteAccess();
+      const source = theme.compressed_url || theme.library_url || theme.original_url;
+      if (!source) throw new Error('这条记录没有可读取的主题文件，请重新导入');
+      const codec = await browserCodec();
+      const raw = await fetchDownloadableBytes(source);
+      let entries;
+      try { entries = await codec.readZipEntries(raw); }
+      catch (error) {
+        if (error?.code !== 'private_red_unsupported') throw error;
+        entries = await codec.extractPrivatePreviewImages(raw);
+      }
+      const preview = await composeThemePreviewBlob(entries, codec);
+      if (!preview) throw new Error('主题里没有可生成预览的图片，原预览已保留');
+      const bytes = new Uint8Array(await preview.arrayBuffer());
+      const sha = await codec.sha256Hex(bytes);
+      const previewUrl = await uploadBrowserObject('previews', sha, 'jpg', bytes, 'image/jpeg', `${themeIdentity(theme).title}-预览`);
+      await ensureRecordReference(theme);
+      const result = await api(`/api/themes/${encodeURIComponent(themeId)}`, {
+        method: 'PATCH', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({record_sha256: theme.record_sha256, preview_light_url: previewUrl, preview_details: {...theme.preview_details, kind: previewCompositionKind(entries), simulation: true, renderer_version: 2}}),
+      });
+      Object.assign(theme, result.item);
+      updateCachedRecord(theme);
+      renderThemes();
+    } else {
+      await api(`/api/themes/${encodeURIComponent(themeId)}/preview/rebuild`, {method: 'POST'});
+      await loadThemes();
+    }
+    operationMessage(status, '预览已更新');
+    toast('预览已更新');
+    return true;
+  } catch (error) {
+    operationMessage(status, `预览更新失败：${error.message}`, true);
+    toast(`预览更新失败：${error.message}`);
+    return false;
+  } finally { setOperation(''); }
 }
 async function importFonts(files, options = {}) {
   await window.loadReedenVendor?.("opentype.min.js");
@@ -5227,6 +5324,11 @@ document.addEventListener("keydown", event => {
   search.focus();
 });
 $("#selectAllReview").addEventListener("change", event => toggleAll("review", event.target.checked));
+$("#toggleThemeSelection").addEventListener("click", () => {
+  if (themeSelectionMode || selections.theme.size) { themeSelectionMode = false; selections.theme.clear(); }
+  else themeSelectionMode = true;
+  updateBulkControls();
+});
 $("#selectAllThemes").addEventListener("change", event => toggleAll("theme", event.target.checked));
 $("#selectAllFonts").addEventListener("change", event => toggleAll("font", event.target.checked));
 $("#selectAllAssets").addEventListener("change", event => toggleAll("asset", event.target.checked));
@@ -5362,10 +5464,18 @@ $$('[data-asset-filter]').forEach(button => button.addEventListener("click", () 
 $("#addAssetButton").addEventListener("click", () => { setView("import"); });
 $("#closePreviewDialog").addEventListener("click", () => $("#previewDialog").close());
 $("#closeThemeDialog").addEventListener("click", () => $("#themeDialog").close());
-$("#previewDialog").addEventListener("click", event => {
-  if (event.target !== event.currentTarget) return;
-  const bounds = event.currentTarget.getBoundingClientRect();
-  if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) event.currentTarget.close();
+$$('dialog').forEach(dialog => {
+  let startedOutside = false;
+  const outside = event => {
+    const bounds = dialog.getBoundingClientRect();
+    return event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom;
+  };
+  dialog.addEventListener('pointerdown', event => { startedOutside = event.target === dialog && outside(event); });
+  dialog.addEventListener('click', event => {
+    if (!startedOutside || event.target !== dialog || !outside(event)) return;
+    startedOutside = false;
+    if (dialog.dispatchEvent(new Event('cancel', {cancelable: true}))) dialog.close();
+  });
 });
 $("#storageForm").addEventListener("submit", saveStorage);
 $("#storageForm").addEventListener("input", () => {

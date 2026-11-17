@@ -47,14 +47,14 @@ R2 对象键只保留可读名：`compressed/少女心事-压缩.red`、`origina
 
 主题库、字体库、收藏库共用暖白底、墨色文字和鼠尾草绿强调，用细线分层。支持键盘 `/` 或 `Ctrl+K` 搜索、清空筛选和分页。
 
-- **主题库**：卡片只留作品图、名称、作者和一行压缩结果，没有任何操作按钮堆在下面。点卡片、点名称或右上角 `⋯` 打开「主题细节」弹窗，里面才有体积、压缩比、同步状态、123 备份、资源角色，以及下载主题、下载原始包、同步、更新预览、删除。右上角可在「网格 / 列表」之间切换，手机默认列表；选择会记在本机。
-- **收藏库**：卡片是标题 + 分类标签 + 预览，批量操作只保留全选与「下载所选」（可选打包成 ZIP），分类编辑收在「编辑分类」里。
-- **手机端**：顶栏固定，批量工具条只在有选中项时吸顶，筛选与搜索占两行；主题、字体、收藏在 320px 宽度下都没有横向滚动。
+- **主题库**：图片左下角显示作者，下方只显示主题名与类别；搜索同时匹配名称、作者、标签和源文件名。普通点击卡片打开详情，在详情里点击图片才放大。勾选第一项或点「多选」后，卡片整块用于选择；右上角 `⋯` 仍可查看详情。手机默认双列网格，也可切换列表。
+- **详情**：预览、压缩结果和下载操作优先显示，名称作者、分类标签和文件维护折叠收起。点击弹窗外可关闭；保存完成不会重新打开已关闭的详情。「文件信息与维护 → 更新预览」可手动重建旧图，轮播区域高 400 / 1000 画布；只在点击时读取主题，不在启动时批量重建。
+- **收藏库与手机端**：收藏支持批量下载、删除和标签编辑。手机顶栏固定，有选中项时显示批量操作。布局经 1440、768、390px 浏览器检查。
 
 ## Android APK
 
 `android/` 是一个轻量 WebView 壳：它把同一份 Pages 前端打进 APK，并保留 GitHub Pages origin，因此手机和电脑填写同一个 R2 Worker 后共用同一套主题、字体和预览库。APK 需要联网访问 R2；它不会把 R2 密钥或 123 会话打包进去。文件选择器使用 `ACTION_OPEN_DOCUMENT` 并申请写权限，因此「上传成功后删除本地文件」只能删本次通过应用选择的文件，按显示名与大小匹配；网页层只在本站点 origin 下拿得到 `RedGardenNative` 桥。
 
-没有 Android Studio 时也可以用 `android/build-apk.sh` 手动打包：脚本使用 `android/toolchain/` 下的 JDK 17、build-tools 35 和 platform 35（华为/腾讯镜像均可下载）依次跑 aapt2 → javac → d8 → zipalign → apksigner，产出 `android/build/red-garden-1.1.3.apk`，签名为仓库里的 debug keystore。`android/toolchain/` 与 `android/build/` 已在 `.gitignore` 中，不要提交。
+没有 Android Studio 时也可以在 Windows Git Bash 中用 `android/build-apk.sh` 手动打包：脚本使用 `android/toolchain/` 下的 JDK 17、build-tools 35 和 platform 35，依次跑 aapt2 → javac → d8 → zipalign → apksigner，产出 `android/build/red-garden-1.1.9.apk`，依赖本机 `android/manual-build/debug.keystore`。这条旧脚本仍有本机绝对路径；换电脑建议使用下方 GitHub Actions 构建。工具链、构建目录和签名文件不要提交。
 
 推送仓库后，在 GitHub Actions 运行 **Build Red Garden Android APK**，下载构建产物 `red-garden-android-debug` 里的 `app-debug.apk`。这是 debug 签名包，适合个人安装；如果公开分发，需要换成自己的 release keystore。

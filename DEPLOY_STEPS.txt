@@ -5,10 +5,11 @@
 
 # Mandatory before every publish:
 # 1. node scripts/sync-pages.mjs
-# 2. node scripts/verify-pages.mjs
+# 2. node scripts/verify-pages.mjs --cloudflare
 # 3. node worker/test-worker.mjs
 # 4. node worker/test-private-repack.mjs
-# 5. node scripts/verify-pages.mjs --url=https://red-garden-sync.pages.dev
+# Optional online sampling (reads a library index page and up to 3 previews):
+# node scripts/verify-pages.mjs --url=https://red-garden-sync.pages.dev --preview-limit=3 --skip-download-probe
 
 # Deploy Cloudflare Pages (Wrangler OAuth login is stored on the local machine):
 # npx wrangler@4 login
@@ -27,8 +28,8 @@
 # git -c http.sslBackend=openssl -c http.version=HTTP/1.1 push origin main
 
 # Final acceptance:
-# node scripts/verify-pages.mjs --url=https://red-garden-sync.pages.dev --require-current
-# (the live check also probes /api/download for the streamed ZIP route)
+# node scripts/verify-pages.mjs --url=https://red-garden-sync.pages.dev --require-current --preview-limit=3 --skip-download-probe
+# (omit --skip-download-probe only when testing the streamed ZIP download route)
 # plus a real-browser DOM check of #fonts and #themes.
 
 # Server/CLI upload into the same Worker + R2 (token from the environment only):

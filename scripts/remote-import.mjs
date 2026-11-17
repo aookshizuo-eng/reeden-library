@@ -116,8 +116,8 @@ async function main() {
       const md5 = crypto.createHash("md5").update(bytes).digest("hex");
       const response = await request(options.api + "/api/backup/123", {
         method: "POST",
-        headers: {...auth, "X-Pan123-Token": options.panToken, "X-Pan123-Folder": options.panFolder,
-          "X-Pan123-Filename": name.replace(/[\\/:*?"<>|]/g, "_"), "X-Pan123-Etag": md5},
+        headers: {...auth, "X-Pan123-Token": options.panToken, "X-Pan123-Folder": encodeURIComponent(options.panFolder),
+          "X-Pan123-Filename": encodeURIComponent(name.replace(/[\\/:*?"<>|]/g, "_")), "X-Pan123-Etag": md5},
         body: bytes,
       }, `123 备份 ${name}`);
       const result = await response.json();

@@ -48,6 +48,16 @@ const stale=await handle(new Request("https://app.example/api/themes/theme249",{
 assert.equal(stale.status,409);
 const wrong=await handle(new Request("https://app.example/api/fonts/theme249",{method:"PATCH",headers,body:JSON.stringify({record_sha256:updated.record_sha256,tags:[]})}),env);
 assert.equal(wrong.status,409);
+const previewEdit=await handle(new Request("https://app.example/api/themes/theme249",{method:"PATCH",headers,body:JSON.stringify({record_sha256:updated.record_sha256,preview_light_url:"/api/objects/previews/"+"a".repeat(64)+".jpg",preview_dark_url:"",preview_details:{kind:"shelf_and_splash",renderer_version:2}})}),env);
+assert.equal(previewEdit.status,200);
+const previewItem=(await previewEdit.json()).item;
+assert.equal(previewItem.preview_details.renderer_version,2);
+assert.equal(previewItem.name,updated.name);
+assert.deepEqual(previewItem.tags,updated.tags);
+for(const body of [null,{preview_light_url:"https://untrusted.example/preview.jpg"},{preview_light_url:"/api/objects/originals/"+"a".repeat(64)+".red"},{preview_details:[]}]) {
+  const invalid=await handle(new Request("https://app.example/api/themes/theme249",{method:"PATCH",headers,body:JSON.stringify(body)}),env);
+  assert.equal(invalid.status,400,"invalid preview metadata must be rejected");
+}
 const red=await codec.writeZipEntries([{name:"theme.json",bytes:encoder.encode("{}")}],{store:true});
 const zip=(await codec.writeZipEntries([
   {name:"字体/阅读体.ttf",bytes:encoder.encode("font-content")},

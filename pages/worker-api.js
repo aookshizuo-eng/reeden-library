@@ -704,6 +704,19 @@ async function updateRecordClassification(request, env, kind, id) {
   if (!checkWriteToken(request, env)) return json({error: "分类更新接口需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
   let payload;
   try { payload = await request.json(); } catch { return json({error: "分类数据不是有效 JSON"}, 400, request, env); }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return json({error: "更新数据必须是 JSON 对象"}, 400, request, env);
+  const previewUpdates = {};
+  for (const key of ["preview_light_url", "preview_dark_url"]) {
+    if (!Object.hasOwn(payload, key)) continue;
+    const value = payload[key];
+    const spec = typeof value === "string" && value ? objectSpec(value) : null;
+    if (kind !== "theme" || (value !== "" && spec?.kind !== "previews")) return json({error: "预览地址必须指向本站 previews 对象"}, 400, request, env);
+    previewUpdates[key] = value;
+  }
+  if (Object.hasOwn(payload, "preview_details")) {
+    if (kind !== "theme" || !payload.preview_details || typeof payload.preview_details !== "object" || Array.isArray(payload.preview_details) || JSON.stringify(payload.preview_details).length > 2048) return json({error: "预览信息无效"}, 400, request, env);
+    previewUpdates.preview_details = payload.preview_details;
+  }
   const reference = String(payload.record_sha256 || "");
   if (reference && !SHA256.test(reference)) return json({error: "记录版本无效，请刷新列表"}, 400, request, env);
   let target;
@@ -729,6 +742,7 @@ async function updateRecordClassification(request, env, kind, id) {
   const displayName = normalizeAssetClassification(payload.name);
   const updated = {
     ...record,
+    ...previewUpdates,
     ...(displayName ? {name: displayName} : {}),
     ...Object.fromEntries(["author", "style"].filter(key => Object.hasOwn(payload, key)).map(key => [key, normalizeAssetClassification(payload[key])])),
     tags: normalizeAssetTags(payload.tags ?? record.tags),
@@ -751,9 +765,12 @@ function referencedObjectKeys(value, keys = new Set()) {
     referencedObjectKeys(item, keys);
   }); return keys; }
   if (typeof value !== "string") return keys;
-  const pattern = /(?:https?:\/\/[^/]+)?\/?(?:api\/objects\/)?(originals|compressed|fonts|previews|assets|records)\/([a-f0-9]{64})\.(red|jpg|json|ttf|otf|woff2?|svg|html)(?:[?#].*)?$/i;
-  const match = value.match(pattern);
-  if (match) keys.add(`${match[1].toLowerCase()}/${match[2].toLowerCase()}.${match[3].toLowerCase()}`);
+  let path = value;
+  if (/^https?:\/\//i.test(path)) { try { path = new URL(path).pathname; } catch { return keys; } }
+  path = path.split(/[?#]/)[0];
+  if (/^\/?(originals|compressed|fonts|previews|assets|records)\//.test(path)) path = '/api/objects/' + path.replace(/^\//, '');
+  const spec = objectSpec(path);
+  if (spec && spec.kind !== 'staging') keys.add(spec.key);
   return keys;
 }
 

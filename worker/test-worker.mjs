@@ -127,6 +127,19 @@ assert.equal((await env.ASSETS.get(`assets/${sharedSha}.svg`)) !== null, true);
 const deleteTwo = await handle(new Request("https://worker.example/api/library", {method: "DELETE", headers: headers({"Content-Type": "application/json"}), body: JSON.stringify({items: [{kind: "asset", id: "shared-b"}]}),}), env);
 assert.equal(deleteTwo.status, 200);
 assert.equal((await env.ASSETS.get(`assets/${sharedSha}.svg`)) === null, true);
+// New uploads use readable object names, including Chinese and URL escapes.
+for (const key of ['assets/共享图标.svg', 'assets/仅此一份.html']) await env.ASSETS.put(key, encoder.encode('named-object'));
+for (const id of ['named-a', 'named-b']) {
+  const item = {kind:'asset', id, object_url:'https://worker.example/api/objects/assets/'+encodeURIComponent('共享图标.svg')};
+  if (id === 'named-a') item.preview_url = '/api/objects/assets/'+encodeURIComponent('仅此一份.html');
+  const data = encoder.encode(JSON.stringify(item));await env.ASSETS.put('records/'+await sha256(data)+'.json',data);
+}
+for (const id of ['named-a','named-b']) {
+  const deleted = await handle(new Request('https://worker.example/api/library',{method:'DELETE',headers:headers({'Content-Type':'application/json'}),body:JSON.stringify({items:[{kind:'asset',id}]})}),env);
+  assert.equal(deleted.status,200);
+  assert.equal((await env.ASSETS.get('assets/共享图标.svg')) !== null,id === 'named-a','shared named objects survive until the last reference is deleted');
+  assert.equal(await env.ASSETS.get('assets/仅此一份.html'),null,'unshared named objects are removed');
+}
 // The standalone Worker shares the Pages implementation, so the encrypted
 // RED repack route must exist here too (a 404 would mean the copies drifted).
 const repack = await handle(new Request("https://worker.example/api/private/repack", {method: "POST", headers: {Origin: origin, "Content-Type": "application/json"}, body: "{}"}), env);
