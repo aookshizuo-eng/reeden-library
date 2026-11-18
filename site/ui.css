@@ -127,3 +127,20 @@
 }
 
 .diagnostic-output {white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto;font:12px/1.7 ui-monospace,monospace;color:var(--muted);}
+
+.compression-settings {margin:16px 0;border-block:1px solid var(--border);}
+.compression-settings > summary {display:flex;align-items:center;gap:12px;min-height:48px;padding:10px 2px;cursor:pointer;font-weight:600;}
+.compression-settings > summary .field-help {margin-left:auto;font-weight:400;}
+.compression-settings > summary #compressionSettingsLabel {font-weight:400;color:var(--muted);}
+.compression-settings .compression-panel {margin:0 0 16px;}
+#transferProgress .transfer-progress-head {flex-wrap:wrap;gap:10px;}
+#pauseTransfer {margin-left:auto;}
+#transferElapsed {margin-left:auto;white-space:nowrap;font-variant-numeric:tabular-nums;}
+#removeImportDialog .modal-actions {flex-wrap:wrap;gap:8px;}
+@media(max-width:600px){#removeImportDialog .modal-actions > button {flex:1 1 auto;}#transferProgress .transfer-progress-head strong {flex:1 1 100%;}}
+
+.transfer-track {position:relative;overflow:hidden;border-radius:999px;}
+.transfer-track progress {display:block;width:100%;}
+.transfer-track:has(progress:indeterminate)::after {content:"";position:absolute;inset:0 auto 0 0;width:28%;border-radius:inherit;background:var(--accent);animation:transfer-working 1.6s ease-in-out infinite alternate;}
+@keyframes transfer-working {from {transform:translateX(0);}to {transform:translateX(255%);}}
+@media(prefers-reduced-motion:reduce){.transfer-track:has(progress:indeterminate)::after {animation:none;}}

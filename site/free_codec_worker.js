@@ -1,5 +1,5 @@
 /* Device-local codec worker. Large RED buffers and image encoding stay off the UI thread. */
-importScripts("./omggif.js", "./free_codec.js");
+importScripts("./omggif.js", "./free_codec.js?v=20261118-progress");
 
 const codec = self.ReedenFreeCodec;
 if (!codec) throw new Error("ReedenFreeCodec 未加载");
@@ -35,7 +35,8 @@ function detach(bytes) {
 }
 
 async function dispatch(request) {
-  const {command, options = {}} = request;
+  const {command}=request;
+  const options={...(request.options||{}),...(request.progress?{onProgress:progress=>self.postMessage({id:request.id,progress})}:{})};
   if (["inspectContainer", "compressRed", "inspectFont", "extractPrivatePreviewImages"].includes(command)) {
     const bytes = bytesOf(request.bytes);
     const result = await codec[command](bytes, options);
@@ -47,9 +48,11 @@ async function dispatch(request) {
   }
   if (command === "compressImages") {
     const items = Array.isArray(request.items) ? request.items : [];
+    let done=0;
     const settled = await mapConcurrent(items, poolLimit(options.concurrency), async item => {
       try {
         const result = await codec.compressImage(bytesOf(item.bytes), item.name || "", options);
+        options.onProgress?.({stage:"image",completed:++done,total:items.length,name:item.name});
         const buffer = detach(result.bytes);
         return {ok: true, bytes: buffer, mime: result.mime, decision: result.decision};
       } catch (error) {

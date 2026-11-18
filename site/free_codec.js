@@ -227,6 +227,7 @@
   }
   async function writeZipEntries(entries, options = {}) {
     const local = [], central = []; let offset = 0;
+    let packed=0;
     const prepared = await mapConcurrent(entries, options.concurrency || defaultConcurrency(4), async source => {
       const data = bytesOf(source.bytes), name = textBytes(source.name);
       if (name.length > 65535 || data.length > 0xffffffff) throw new FreeCodecError("资源超过普通 ZIP 上限", "zip_size_limit");
@@ -239,6 +240,7 @@
         if (candidate.length < data.length) { compressed = candidate; method = 8; }
       }
       const crc = crc32(data), comment = source.comment ? bytesOf(source.comment) : new Uint8Array();
+      options.onProgress?.({stage:"pack",completed:++packed,total:entries.length,name:source.name});
       return { source, data, name, compressed, method, crc, comment };
     });
     for (const item of prepared) {
@@ -814,6 +816,8 @@
     const skipPaths = nineSlicePaths(entries);
     const codecOptions = skipPaths.length ? { ...options, skipPaths } : options;
     const replacements = Object.create(null), extensions = Object.create(null), paths = Object.create(null), decisions = [], output = [];
+    let done=0;
+    options.onProgress?.({stage:"image",completed:0,total:entries.length});
     const processed = await mapConcurrent(entries, options.concurrency || defaultConcurrency(3), async entry => {
       const bytes = entry.bytes;
       let result = { bytes, decision: { path: entry.name, mime: mimeFromBytes(bytes, entry.name), used: false, reason: "非图片资源" } };
@@ -827,6 +831,7 @@
         const extension = nextName.match(/\.([A-Za-z0-9]+)$/)?.[0] || "";
         extensions[md5Hex(bytes)] = extension; extensions[oldSha] = extension;
       }
+      options.onProgress?.({stage:"image",completed:++done,total:entries.length,name:entry.name});
       return {entry, result, outputName: result.decision.used ? (result.decision.outputName || entry.name) : entry.name};
     });
     for (const {entry, result, outputName} of processed) { decisions.push(result.decision); output.push({ ...entry, name: outputName, bytes: result.bytes }); }
@@ -836,7 +841,7 @@
         catch { /* Non-JSON resources keep their original bytes. */ }
       }
     }
-    const candidate = await writeZipEntries(output, { concurrency: options.concurrency || defaultConcurrency(3) });
+    const candidate = await writeZipEntries(output, { concurrency: options.concurrency || defaultConcurrency(3),onProgress:options.onProgress });
     const selected = candidate.length < raw.length ? candidate : raw;
     return { bytes: selected, originalBytes: raw.length, compressedBytes: selected.length, savedBytes: raw.length - selected.length, packageSelected: selected !== raw, decisions, format: "red_v4" };
   }

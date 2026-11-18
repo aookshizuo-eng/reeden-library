@@ -584,6 +584,37 @@ function privateSkippedResult(raw, decisions = []) {
 // A small pool of codec workers keeps RED parsing, image decoding and WebP
 // encoding off the UI thread. Every buffer is copied before transfer so the
 // caller keeps its original bytes for the R2 upload and preview generation.
+let transferController=null,transferStartedAt=0,transferClock;
+const codecCalls=new Map();
+function transferSignal(){return commitBatchBusy||transferState.active?transferController?.signal:undefined;}
+function pauseCurrentTransfer(){
+  if(!transferController||!transferState.active)return;
+  transferController.abort(new DOMException('已暂停，文件保留，可继续上传','AbortError'));
+  for(const worker of codecWorkers)worker.terminate();codecWorkers.length=0;
+  operationMessage($('#reviewBatchStatus'),'正在暂停；未完成文件会保留。');$('#pauseTransfer').disabled=true;
+}
+async function transferFetch(url,options={},timeout=45000){
+  const outer=transferSignal(),timer=AbortSignal.timeout(timeout);
+  const signal=outer?AbortSignal.any([outer,timer]):timer;
+  try{return await fetch(url,{...options,signal});}
+  catch(error){if(outer?.aborted)throw outer.reason;if(timer.aborted)throw new Error(`连接超时：${new URL(url,location.href).pathname}；文件已保留，可重试`);throw error;}
+}
+function uploadRequest(url,options,label){
+  return new Promise((resolve,reject)=>{
+    const signal=transferSignal();if(signal?.aborted){reject(signal.reason);return;}
+    const xhr=new XMLHttpRequest();let idle,ended=false;
+    const complete=(error,response)=>{if(ended)return;ended=true;clearTimeout(idle);signal?.removeEventListener('abort',abort);error?reject(error):resolve(response);};
+    const abort=()=>{complete(signal?.reason||new Error('上传已暂停'));xhr.abort();};
+    const touch=()=>{clearTimeout(idle);idle=setTimeout(()=>{complete(new Error('上传连接 60 秒无响应；文件已保留，可重试'));xhr.abort();},60000);};
+    xhr.open(options.method,url);xhr.timeout=600000;
+    for(const [key,value]of new Headers(options.headers))xhr.setRequestHeader(key,value);
+    xhr.upload.onprogress=event=>{touch();if(event.lengthComputable)transferStage(`上传 ${formatBytes(event.loaded)} / ${formatBytes(event.total)}`,label);};
+    xhr.onprogress=touch;
+    xhr.onload=()=>{const headers=new Headers();for(const line of xhr.getAllResponseHeaders().trim().split(/[\r\n]+/)){const at=line.indexOf(':');if(at>0)headers.append(line.slice(0,at),line.slice(at+1).trim());}complete(null,new Response(xhr.responseText,{status:xhr.status,headers}));};
+    xhr.onerror=()=>complete(new Error('上传连接中断；文件已保留，可重试'));xhr.ontimeout=()=>complete(new Error('上传超过 10 分钟；文件已保留，可重试'));xhr.onabort=()=>complete(signal?.reason||new Error('上传已暂停'));
+    signal?.addEventListener('abort',abort,{once:true});touch();xhr.send(options.body);
+  });
+}
 const codecWorkers = [];
 let codecWorkerCursor = 0;
 let codecWorkerSequence = 0;
@@ -595,7 +626,7 @@ function acquireCodecWorker() {
   if (typeof Worker === "undefined" || codecWorkerDisabled) return null;
   const wanted = processingConcurrency();
   for (let index = codecWorkers.length; index < wanted; index++) {
-    try { codecWorkers.push(new Worker("./free_codec_worker.js")); }
+    try { codecWorkers.push(new Worker("./free_codec_worker.js?v=20261118-progress")); }
     catch { codecWorkerDisabled = true; break; }
   }
   if (!codecWorkers.length) { codecWorkerDisabled = true; return null; }
@@ -613,49 +644,27 @@ function normalizeCodecResult(result) {
   if (Array.isArray(list)) for (const item of list) if (item?.bytes instanceof ArrayBuffer) item.bytes = new Uint8Array(item.bytes);
   return result;
 }
-async function callCodecWorker(command, payload) {
-  const worker = acquireCodecWorker();
-  if (!worker) return null;
-  const id = ++codecWorkerSequence;
-  const message = {id, command, options: payload.options || {}};
-  const transfer = [];
-  if (payload.bytes) { const buffer = detachedCopy(payload.bytes); message.bytes = buffer; transfer.push(buffer); }
-  if (payload.items) {
-    message.items = payload.items.map(item => {
-      const buffer = detachedCopy(item.bytes);
-      transfer.push(buffer);
-      return {...item, bytes: buffer};
-    });
-  }
-  return new Promise((resolve, reject) => {
-    const cleanup = () => {
-      clearTimeout(timer);
-      worker.removeEventListener("message", onMessage);
-      worker.removeEventListener("error", onError);
-    };
-    const onMessage = event => {
-      if (event.data?.id !== id) return;
-      cleanup();
-      if (!event.data.ok) { reject(new Error(event.data.error?.message || "本地处理线程失败")); return; }
-      resolve(normalizeCodecResult(event.data.result));
-    };
-    const onError = event => {
-      cleanup();
-      codecWorkers.splice(codecWorkers.indexOf(worker), 1);
-      reject(new Error(event.message || "本地处理线程异常"));
-    };
-    const timer = setTimeout(() => { cleanup(); reject(new Error("本地处理超时")); }, 300000);
-    worker.addEventListener("message", onMessage);
-    worker.addEventListener("error", onError);
-    try { worker.postMessage(message, transfer); } catch (error) { cleanup(); reject(error); }
+async function callCodecWorker(command,payload) {
+  const worker=acquireCodecWorker();if(!worker)return null;
+  const signal=transferSignal();if(signal?.aborted)throw signal.reason;
+  const id=++codecWorkerSequence,message={id,command,options:payload.options||{},progress:true},transfer=[];
+  if(payload.bytes){const buffer=detachedCopy(payload.bytes);message.bytes=buffer;transfer.push(buffer);}
+  if(payload.items)message.items=payload.items.map(item=>{const bytes=detachedCopy(item.bytes);transfer.push(bytes);return {...item,bytes};});
+  return new Promise((resolve,reject)=>{
+    let timer,closed=false;
+    const cleanup=()=>{clearTimeout(timer);codecCalls.delete(id);signal?.removeEventListener('abort',abort);worker.removeEventListener('message',onMessage);worker.removeEventListener('error',onError);};
+    const fail=error=>{if(closed)return;closed=true;cleanup();reject(error);};
+    const abort=()=>fail(signal.reason);
+    const touch=()=>{clearTimeout(timer);timer=setTimeout(()=>{for(const call of [...codecCalls.values()])if(call.worker===worker)call.fail(new Error('压缩线程 90 秒没有进展；文件已保留，可重试'));worker.terminate();const index=codecWorkers.indexOf(worker);if(index>=0)codecWorkers.splice(index,1);},90000);};
+    const onMessage=event=>{if(event.data?.id!==id||closed)return;if(event.data.progress){touch();payload.onProgress?.(event.data.progress);return;}cleanup();closed=true;if(!event.data.ok)reject(new Error(event.data.error?.message||'压缩失败'));else resolve(normalizeCodecResult(event.data.result));};
+    const onError=event=>{for(const call of [...codecCalls.values()])if(call.worker===worker)call.fail(new Error(event.message||'压缩线程中断，文件已保留'));worker.terminate();const index=codecWorkers.indexOf(worker);if(index>=0)codecWorkers.splice(index,1);};
+    codecCalls.set(id,{worker,fail});signal?.addEventListener('abort',abort,{once:true});worker.addEventListener('message',onMessage);worker.addEventListener('error',onError);touch();try{worker.postMessage(message,transfer);}catch(error){fail(error);}
   });
 }
-async function runCodecTask(command, payload, fallback) {
-  if (!codecWorkerDisabled) {
-    try { const result = await callCodecWorker(command, payload); if (result !== null) return result; }
-    catch (error) { if(error.message?.includes("超时"))throw error;console.warn("codec worker 回退到主线程：", error.message); }
-  }
-  return await fallback();
+async function runCodecTask(command,payload,fallback) {
+  if(!codecWorkerDisabled){const result=await callCodecWorker(command,payload);if(result!==null)return result;}
+  if(transferSignal()?.aborted)throw transferSignal().reason;
+  return fallback();
 }
 function privatePrefix(raw) {
   if (raw.length < 12 || raw[0] !== 82 || raw[1] !== 69 || raw[2] !== 68 || raw[3] !== 16) throw new Error("不是 RED v2 加密主题");
@@ -749,7 +758,7 @@ function privatePlainIdentity(raw, from = 0) {
   }
   return name || author ? { name, author } : null;
 }
-async function privateDirectory(prefix) {  const response = await fetch(apiUrl("/api/private/directory"), {
+async function privateDirectory(prefix) {  const response = await transferFetch(apiUrl("/api/private/directory"), {
     method: "POST", headers: requestHeaders({"Content-Type": "application/json"}),
     body: JSON.stringify({prefix_base64: base64Bytes(prefix)}),
   });
@@ -760,7 +769,7 @@ async function privateDirectory(prefix) {  const response = await fetch(apiUrl("
   return data;
 }
 async function privateSeal(prefix, replacements, configs) {
-  const response = await fetch(apiUrl("/api/private/seal"), {
+  const response = await transferFetch(apiUrl("/api/private/seal"), {
     method: "POST", headers: requestHeaders({"Content-Type": "application/json"}),
     body: JSON.stringify({prefix_base64: base64Bytes(prefix), replacements, configs}),
   });
@@ -968,7 +977,7 @@ async function compressPrivateRedLegacy(raw, codec, options = {}) {
     new_md5: hashes.results[index * 2 + 1].md5, new_extension: imageExtensionForMime(item.mime),
     bytes_base64: base64Bytes(item.bytes),
   }));
-  const response = await fetch(apiUrl("/api/private/repack"), {
+  const response = await transferFetch(apiUrl("/api/private/repack"), {
     method: "POST", headers: requestHeaders({"Content-Type": "application/json"}),
     body: JSON.stringify({red_base64: base64Bytes(raw), replacements}),
   });
@@ -1000,7 +1009,7 @@ async function backupOriginalTo123(raw, name, codec) {
   try {
     const md5 = await codec.md5Hex(raw);
     const fileName = (String(name || "theme").replace(/\.red$/i, "").replace(/[\\/:*?"<>|]/g, "_").slice(0, 200) || "theme") + ".red";
-    const response = await fetch(apiUrl("/api/backup/123"), {
+    const response = await transferFetch(apiUrl("/api/backup/123"), {
       method: "POST",
       headers: requestHeaders({
         "Content-Type": "application/octet-stream",
@@ -1381,13 +1390,13 @@ async function withUploadSlot(action) {
 }
 async function uploadBrowserObject(kind, sha, extension, body, contentType, label = "", targetRecord = null) {
   const path = `/api/objects/${encodeURIComponent(kind)}/${encodeURIComponent(objectFileName(sha, extension, label))}`;
-  const request = (method) => fetch(apiUrl(path), {
+  const request = (method) => uploadRequest(apiUrl(path), {
     method,
     headers: requestHeaders({ "Content-Type": contentType || "application/octet-stream", "X-Content-SHA256": sha }),
     body,
-  });
+  },label);
   if(uploadAttempts.has(path+'|'+sha) && kind!=='records' && (body?.byteLength||body?.size||0)>65536) {
-    const head=await fetch(apiUrl(path),{method:'HEAD',headers:requestHeaders()});
+    const head=await transferFetch(apiUrl(path),{method:'HEAD',headers:requestHeaders()});
     if(head.ok&&head.headers.get('X-Content-SHA256')===sha)return path;
   }
   // PUT is the canonical R2 object method. A few WebView proxies and older
@@ -2100,6 +2109,7 @@ function compressionOptions() {
   return { preset, ...fixed };
 }
 function syncCompressionControls() {
+  if($("#compressionSettingsLabel"))$("#compressionSettingsLabel").textContent=COMPRESSION_PRESET_LABELS[document.querySelector("input[name=compressionPreset]:checked")?.value||"max"]||"自选模式";
   const preset = selectedCompressionPreset();
   const custom = $("#compressionCustomFields");
   if (custom) custom.hidden = preset !== "custom";
@@ -2375,7 +2385,7 @@ function updateTransferProgress(patch = {}) {
   const percent = total ? Math.round((completed / total) * 100) : 0;
   const stageText = transferState.stage || "等待开始";
   const currentText = transferState.current || "";
-  const countText = `${completed} / ${total}${transferState.failed ? ` · 失败 ${transferState.failed}` : ""}`;
+  const countText = `已完成 ${completed} / ${total}${transferController?.signal.aborted?" · 已暂停":transferState.failed?` · 失败 ${transferState.failed}`:""}`;
   const paint = (prefix, visible) => {
     const title = $(`#${prefix}Title`);
     const count = $(`#${prefix}Count`);
@@ -2388,23 +2398,28 @@ function updateTransferProgress(patch = {}) {
     if (stage) stage.textContent = stageText;
     if (current) current.textContent = currentText;
     const panel = $(`#${prefix}`);
-    if (panel) { panel.hidden = !visible; panel.classList.toggle("is-error", transferState.failed > 0); panel.classList.toggle("is-complete", !transferState.active && total > 0); }
+    if (panel) { panel.hidden = !visible; panel.classList.toggle("is-error", transferState.failed > 0 && !transferController?.signal.aborted); panel.classList.toggle("is-complete", !transferState.active && total > 0); }
   };
-  // The reviewed batch sits near the bottom of the import view, so its own
-  // panel is painted as well; otherwise the only feedback was in 后台任务.
-  paint("transferProgress", true);
-  // 进度面板已经移出待确认区：项目上传成功后待确认区会隐藏，但进度条必须
-  // 继续留在页面上，否则用户点完「确认」就再也看不到处理到哪一步了。
-  paint("reviewProgress", transferState.active || Boolean(transferState.title));
+  // One shared panel survives clearing the review list.
+  paint("transferProgress", Boolean(transferState.title));
+  if($('#localResumePanel'))$('#localResumePanel').hidden=transferState.active||!localTransferRows.length;
+  $('#pauseTransfer').hidden=!transferState.active||!transferController;$('#pauseTransfer').disabled=!!transferController?.signal.aborted;
+  const settings=$('#compressionSettings');if(settings){settings.hidden=transferState.active;if(transferState.active)settings.open=false;}
+  const bar=$('#transferProgressBar');if(transferState.active)bar.removeAttribute('value');
+
   persistJobProgress({status: transferState.active ? "running" : "completed", stage: stageText,
     current: currentText, completed: transferState.completed, failed: transferState.failed, total});
 }
 function revealTransferProgress() {
-  const panel = $("#reviewProgress");
+  const panel = $("#transferProgress");
   if (!panel || panel.hidden) return;
   try { panel.scrollIntoView({block: "nearest", behavior: "smooth"}); } catch { panel.scrollIntoView(); }
 }
 function beginTransferProgress(title, total, items = []) {
+  if(!transferController || !commitBatchBusy)transferController=new AbortController();
+  transferStartedAt=Date.now();$("#transferElapsed").textContent="已用 0:00";clearInterval(transferClock);transferClock=setInterval(()=>{
+    const seconds=Math.floor((Date.now()-transferStartedAt)/1000);$('#transferElapsed').textContent=`已用 ${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}`;
+  },1000);
   activeCloudJob = null; cloudJobPatch = null; clearTimeout(cloudJobTimer);
   Object.assign(transferState, { active: true, title, total: Math.max(0, Number(total) || 0), completed: 0, failed: 0, stage: "准备处理", current: "" });
   updateTransferProgress();
@@ -2412,13 +2427,15 @@ function beginTransferProgress(title, total, items = []) {
   createCloudJob(title, total, items).catch(() => {});
 }
 function transferStage(stage, current = "") {
+  if(transferController?.signal.aborted)return;
   updateTransferProgress({ active: true, stage, current });
 }
 function transferDone(current = "", failed = false) {
   updateTransferProgress({ completed: transferState.completed + 1, failed: transferState.failed + (failed ? 1 : 0), current });
 }
 function finishTransferProgress(message, failed = transferState.failed) {
-  updateTransferProgress({ active: false, title: message, stage: failed ? "处理完成，但有项目失败" : "全部完成", current: failed ? `失败 ${failed} 项，可查看错误后重试` : "已写入共享 R2" });
+  clearInterval(transferClock);if(transferController?.signal.aborted)message="已暂停，未完成文件保留，可继续上传";
+  updateTransferProgress({ active: false, title: message, stage: transferController?.signal.aborted?"已暂停，文件保留":failed ? "处理完成，但有项目失败" : "全部完成", current: failed ? `失败 ${failed} 项，可查看错误后重试` : "已写入共享 R2" });
   const finalPatch = {...(cloudJobPatch || {}), status: failed ? "partial" : "completed", stage: message,
     completed: transferState.completed, failed, total: transferState.total, result: message};
   cloudJobPatch = null; clearTimeout(cloudJobTimer);
@@ -3232,9 +3249,11 @@ async function commitSelection() {
   const chosen = state.pending.filter(item => selections.review.has(item.id));
   if (!themeIds.length && !chosen.length) { toast("请先勾选要处理的条目，或点「全选」"); return; }
   deferredCleanup.length = 0;
+  transferController=new AbortController();
   commitBatchBusy = true;
   try {
     if (themeIds.length) await commitThemes(themeIds);
+    if(transferController?.signal.aborted)return;
     const fonts = chosen.filter(item => item.kind === "font");
     const assets = chosen.filter(item => item.kind === "asset");
     if (fonts.length) {
@@ -3243,6 +3262,7 @@ async function commitSelection() {
       const failed = new Set(options.failedFiles || []);
       dropPending(fonts.filter(item => !failed.has(item.file)));
     }
+    if(transferController?.signal.aborted)return;
     if (assets.length) {
       const options = {deferCleanup: true};
       await importAssets(assets.map(item => item.file), options);
@@ -3253,7 +3273,7 @@ async function commitSelection() {
     operationMessage($("#unifiedImportStatus"), remaining ? `整批处理结束，仍有 ${remaining} 项待处理或失败，已保留在确认区，可重试。` : "整批上传完成，主题和字体已进入各自资源库，可按最新入库查看。", remaining > 0);
   } finally {
     commitBatchBusy = false;
-    if (deferredCleanup.length) {
+    if (deferredCleanup.length && !transferController?.signal.aborted) {
       const files = [...new Set(deferredCleanup)];
       deferredCleanup.length = 0;
       offerLocalCleanup(files, `本批 ${files.length} 个文件已上传成功，可以删掉本地副本释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
@@ -3286,9 +3306,8 @@ async function removeImportItems(ids=[...selections.review]) {
   const files=[...themes,...pending].map(item=>item.file).filter(Boolean),dialog=$('#removeImportDialog');
   const suspected=themes.filter(item=>item.duplicateKind==='name').length;
   $('#removeImportDescription').textContent=`移除 ${themes.length+pending.length} 项待导入文件，已有资源库不受影响。${suspected?`其中 ${suspected} 项仅同名作者，内容可能不同，请先核对。`:''}${files.some(file=>file.archivePath)?'ZIP 原包会保留，不自动删除。':''}`;
-  $('#removeImportLocal').checked=false;
   const choice=await new Promise(resolve=>{
-    dialog.onclose=()=>resolve(null);const finish=value=>{dialog.close();resolve(value);};$('#removeImportConfirm').onclick=()=>finish({local:$('#removeImportLocal').checked});$('#removeImportCancel').onclick=$('#closeRemoveImport').onclick=()=>finish(null);dialog.oncancel=e=>{e.preventDefault();finish(null);};dialog.showModal();
+    dialog.onclose=()=>resolve(null);const finish=value=>{dialog.close();resolve(value);};$('#removeImportConfirm').onclick=()=>finish({local:false});$('#removeImportWithLocal').onclick=()=>finish({local:true});$('#removeImportCancel').onclick=$('#closeRemoveImport').onclick=()=>finish(null);dialog.oncancel=e=>{e.preventDefault();finish(null);};dialog.showModal();
   });if(!choice)return;
   setOperation('remove-import');
   try {
@@ -3300,7 +3319,8 @@ async function removeImportItems(ids=[...selections.review]) {
   }catch(error){operationMessage($('#reviewBatchStatus'),error.message,true);return;}finally{setOperation('');}
   if(choice.local){
     const {targets}=cleanupTargets(files.filter(file=>!file.archivePath));if(!targets.length){toast('没有可单独清理的本地原件；ZIP 原包保留');return;}
-    const {selected:chosen,bridge}=await openCleanupDialog(targets,'核对后选择要删除的本地原文件。',{checked:false,note:'这些待导入文件没有上传；疑似重复也可能是不同版本。删除本地原件后可能无法恢复，请核对后勾选。'});
+    const {selected:chosen,bridge}=await openCleanupDialog(targets,'核对后选择要删除的本地原文件。',{note:'这些待导入文件没有上传；疑似重复也可能是不同版本。删除本地原件后可能无法恢复，请核对后勾选。'});
+    if(!chosen.length)operationMessage($('#reviewBatchStatus'),'已移出列表，本地原文件保留。');
     if(chosen.length){const result=await performLocalCleanup(chosen,bridge);operationMessage($('#reviewBatchStatus'),`已移除待导入项；本地已删除 ${result.deleted} 个${result.failures.length?'；'+result.failures.map(x=>x.name+'：'+x.reason).join('；'):''}`,!!result.failures.length);}
   }
 }
@@ -3975,7 +3995,7 @@ async function commitThemes(ids = [...selections.review]) {
       const codec = await browserCodec();
       let finished = 0;
       const started=performance.now();
-      const width=Math.min(3,processingConcurrency(),selected.some(item=>(item.file?.size||0)>32*1024*1024)?2:3);
+      const width=Math.min(3,processingConcurrency(),selected.some(item=>(item.file?.size||0)>32*1024*1024)?((Number(navigator.deviceMemory)||4)>=8?2:1):3);
       const results = await mapConcurrent(selected, width, async item => {
         const name = item.info?.source_name || item.info?.name || "主题";
         try {
@@ -3988,7 +4008,7 @@ async function commitThemes(ids = [...selections.review]) {
             ? {preset:options.preset,codec:options.codec,quality:options.quality,maxEdge:options.max_edge,gifColors:options.gif_colors,iconLossless:options.icon_lossless,compressReader:options.compress_reader,concurrency:2}
             : {preset:options.preset,concurrency:2};
           const originalSha=item.original_sha256||await codec.sha256Hex(raw);
-          const compress=()=>encrypted?compressPrivateRedViaWorker(raw,codec,compressionOptions):runCodecTask('compressRed',{bytes:raw,options:compressionOptions},()=>codec.compressRed(raw,compressionOptions));
+          const compress=()=>encrypted?compressPrivateRedViaWorker(raw,codec,compressionOptions):runCodecTask('compressRed',{bytes:raw,options:compressionOptions,onProgress:progress=>transferStage(`${progress.stage==='pack'?'重新封包':'压缩资源'} ${progress.completed}/${progress.total}`,name)},()=>codec.compressRed(raw,compressionOptions));
           const prepare=async()=>{
             transferStage('压缩主题',name);const result=await compress(),compressedBytes=result.bytes;
             const assetSha=await codec.sha256Hex(compressedBytes);
@@ -3997,11 +4017,12 @@ async function commitThemes(ids = [...selections.review]) {
             const previewUpload=async()=>{if(!preview)return '';const bytes=new Uint8Array(await preview.arrayBuffer());return uploadBrowserObject('previews',await codec.sha256Hex(bytes),'jpg',bytes,'image/jpeg',name+'-预览');};
             transferStage('上传压缩包与预览',name);
             const [compressedPath,previewPath]=await Promise.all([uploadBrowserObject('compressed',assetSha,'red',compressedBytes,'application/octet-stream',name+'-压缩'),previewUpload()]);
-            return {compressedBytes,assetSha,compressedPath,previewPath,previewDetails};
+            transferStage('等待原包或备份确认',name);return {compressedBytes,assetSha,compressedPath,previewPath,previewDetails};
           };
           const operations=await Promise.allSettled([prepare(),uploadBrowserObject('originals',originalSha,'red',raw,'application/octet-stream',name+'-原包'),pan123BackupConfig().token?backupOriginalTo123(raw,item.info?.source_name||name,codec):null]);
           const failure=operations.find(result=>result.status==='rejected');if(failure)throw failure.reason;
           const [{compressedBytes,assetSha,compressedPath,previewPath,previewDetails},originalPath,backup]=operations.map(result=>result.value);
+          transferStage("保存资源记录",name);
           const record = await uploadBrowserRecord({
             kind: "theme", id: `theme-${assetSha.slice(0, 16)}`, name: item.info.name || item.info.source_name, author: item.info.author || "作者未记录",
             sha256: assetSha, original_sha256: originalSha, original_size: raw.length, compressed_size: compressedBytes.length,
@@ -4018,7 +4039,7 @@ async function commitThemes(ids = [...selections.review]) {
           operationMessage($("#reviewBatchStatus"), `已完成主题 ${++finished} / ${selected.length}…`);
           return { item, record };
         } catch (error) {
-          item.commitError = error.message || "浏览器处理失败";
+          item.commitError = transferController?.signal.aborted?"已暂停，原文件已保留，可重新确认继续":error.message || "浏览器处理失败";
           transferDone(name, true);
           operationMessage($("#reviewBatchStatus"), `已完成主题 ${++finished} / ${selected.length}…`);
           return { item, error };
@@ -4035,10 +4056,10 @@ async function commitThemes(ids = [...selections.review]) {
       const completedFiles = results.filter(result => result.record && result.item?.file).map(result => result.item.file);
       await completeLocalFiles(completedFiles);
       const elapsed=((performance.now()-started)/1000).toFixed(1);
-      const message = failures.length ? `${completed.length} 个主题已保存到 R2，${failures.length} 个失败，请查看错误后重试。` : `${completed.length} 个主题已保存到 R2，耗时 ${elapsed} 秒${results.some(result=>result.reused)?"（重复原件已跳过）":""}。`;
+      const message = transferController?.signal.aborted?`已暂停，${completed.length} 项已完成，未完成文件保留，可继续上传。`:failures.length ? `${completed.length} 个主题已保存到 R2，${failures.length} 个失败，请查看错误后重试。` : `${completed.length} 个主题已保存到 R2，耗时 ${elapsed} 秒${results.some(result=>result.reused)?"（重复原件已跳过）":""}。`;
       operationMessage($("#reviewBatchStatus"), message, Boolean(failures.length)); toast(message);
       if(commitBatchBusy)deferredCleanup.push(...completedFiles);
-      else offerLocalCleanup(completedFiles, `本次 ${completedFiles.length} 个主题已压缩并保存到 R2，可以删掉本地原包释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
+      else if(!transferController?.signal.aborted)offerLocalCleanup(completedFiles, `本次 ${completedFiles.length} 个主题已压缩并保存到 R2，可以删掉本地原包释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
       return;
     }
     // 本地服务模式也要有看得见的进度：先把条亮出来，再提交任务，随后由
@@ -4059,7 +4080,7 @@ async function commitThemes(ids = [...selections.review]) {
     toast(`${chosen.length} 个主题已加入后台：压缩图片、重新封包并保存`);
     loadJobs().catch(() => {});
   } catch (error) { operationMessage($("#reviewBatchStatus"), `加入后台失败：${error.message}`, true); toast(error.message); }
-  finally { setOperation(""); }
+  finally { if(browserSyncEnabled()&&transferState.active)finishTransferProgress("处理未完成，原文件保留",1);setOperation(""); }
 }
 function redDownloadLabel(record) {
   let title=String(record.name||record.source_name||record.file_name||record.id||'主题').replace(/\.red$/i,'').trim();
@@ -4438,7 +4459,7 @@ async function importFonts(files, options = {}) {
     operationMessage(output, message, Boolean(warning));
     toast(message);
   } catch (error) { options.failedFiles ||= valid; operationMessage(output, `字体导入失败：${error.message}`, true); toast(error.message); }
-  finally { setOperation(""); }
+  finally {if(transferState.active)finishTransferProgress("处理未完成，原文件保留",1);setOperation("");}
 }
 function assetExtension(file) {
   const match = String(file?.name || "").toLowerCase().match(/\.([a-z0-9]+)$/);
@@ -4539,7 +4560,7 @@ async function importAssets(files, options = {}) {
     operationMessage(output, message, Boolean(warning));
     toast(message);
   } catch (error) { options.failedFiles ||= valid; operationMessage(output, `收藏导入失败：${error.message}`, true); toast(error.message); }
-  finally { setOperation(""); }
+  finally {if(transferState.active)finishTransferProgress("处理未完成，原文件保留",1);setOperation("");}
 }
 async function saveStorage(event) {
   event.preventDefault();
@@ -4984,7 +5005,7 @@ async function transferStore(mode,action) {
 async function refreshLocalTransfers() {
   try {localTransferRows=(await transferStore('readonly',store=>store.getAll())).filter(row=>row.apiBase===apiBase);}catch{localTransferRows=[];}
   const panel=$('#localResumePanel');if(!panel)return;
-  panel.hidden=!localTransferRows.length;
+  panel.hidden=!localTransferRows.length||transferState.active;
   $('#localResumeText').textContent=`此设备有 ${localTransferRows.length} 个未完成文件，原文件副本已保存在浏览器，可继续上传。`;
   $('#localResumeNames').textContent=localTransferRows.slice(0,4).map(row=>row.file.name).join('、')+(localTransferRows.length>4?'…':'');
 }
@@ -5169,20 +5190,23 @@ function openCleanupDialog(targets, summary, options={}) {
       $('#cleanupList').innerHTML=targets.map((t,i)=>`<li class="${t.deletable?'':'is-locked'}"><label class="check-label"><input type="checkbox" data-cleanup-index="${i}" ${t.deletable?(options.checked===false?'':'checked'):'disabled'}><span><strong>${escapeHtml(t.name)}</strong><small>${escapeHtml(formatBytes(t.size)+(t.deletable?'':' · 需要文件夹授权'))}</small></span></label></li>`).join('');
       $('#cleanupDialogDescription').textContent=summary;
       const boxes=$$('#cleanupList input'),confirm=$('#cleanupConfirm'),all=$('#cleanupSelectAll');
-      const count=()=>{const picked=boxes.filter(b=>b.checked&&!b.disabled).length;$('#cleanupSummary').textContent=`已选 ${picked} / 可删除 ${deletable.length}`;all.checked=!!deletable.length&&picked===deletable.length;all.disabled=!deletable.length;all.indeterminate=picked>0&&picked<deletable.length;$('#cleanupSelectAllLabel').textContent='全选';confirm.disabled=!!deletable.length&&!picked;confirm.textContent=deletable.length?`删除所选（${picked}）`:'知道了';};
+      const count=()=>{const picked=boxes.filter(b=>b.checked&&!b.disabled).length;$('#cleanupSummary').textContent=`已选 ${picked} / 可删除 ${deletable.length}`;all.checked=!!deletable.length&&picked===deletable.length;all.disabled=!deletable.length;all.indeterminate=picked>0&&picked<deletable.length;$('#cleanupSelectAllLabel').textContent='全选';confirm.disabled=!!deletable.length&&!picked;confirm.textContent=deletable.length?`删除所选（${picked}）`:typeof window.showDirectoryPicker==='function'?'选择原文件夹并删除':'关闭（需手动删除）';};
       boxes.forEach(box=>box.onchange=count);all.onchange=()=>{boxes.forEach(b=>{if(!b.disabled)b.checked=all.checked;});count();};
-      confirm.onclick=()=>finish({selected:targets.filter((t,i)=>boxes[i].checked&&!boxes[i].disabled),bridge:nativeFileBridge()});count();
+      confirm.onclick=async()=>{
+        if(!deletable.length && typeof window.showDirectoryPicker==='function') {await grantFolder();const found=targets.filter(t=>t.deletable);if(found.length)finish({selected:found,bridge:nativeFileBridge()});return;}
+        finish({selected:targets.filter((t,i)=>boxes[i].checked&&!boxes[i].disabled),bridge:nativeFileBridge()});
+      };count();
     };
-    const grant=$('#cleanupGrantFolder');grant.hidden=typeof window.showDirectoryPicker!=='function';grant.onclick=async()=>{
+    const grant=$('#cleanupGrantFolder');grant.hidden=typeof window.showDirectoryPicker!=='function'||targets.every(t=>t.deletable);const grantFolder=async()=>{
       try{const folder=await window.showDirectoryPicker({mode:'readwrite'});grant.disabled=true;
         const entries=await collectDirectoryFiles(folder);let matched=0;
         for(const target of targets.filter(t=>!t.deletable)){
-          const matches=[];for(const entry of entries.filter(e=>e.name===target.name&&e.file.size===target.size))if(await sameLocalFile(entry.file,target.file))matches.push(entry);
+          const matches=[];for(const entry of entries.filter(e=>(e.name||e.file.name)===target.name&&e.file.size===target.size))if(await sameLocalFile(entry.file,target.file))matches.push(entry);
           if(matches.length===1){Object.assign(target,{parent:matches[0].parent,handle:matches[0].handle,deletable:true});matched++;}
         }
-        render();$('#cleanupNote').textContent=matched?`已匹配 ${matched} 个内容相同的文件。删除前会再次核对，云端副本不受影响。`:'没有唯一匹配的文件，请选择原文件所在文件夹。';
+        render();$('#cleanupNote').textContent=matched?`已匹配 ${matched} 个内容相同的文件。${options.note||'删除前会再次核对。'}`:'没有唯一匹配的文件，请选择原文件所在文件夹。';
       }catch(error){if(error.name!=='AbortError')$('#cleanupNote').textContent='授权失败：'+error.message;}finally{grant.disabled=false;}
-    };
+    };grant.onclick=grantFolder;
     $('#cleanupCancel').onclick=$('#closeCleanupDialog').onclick=()=>finish({selected:[],bridge:null});dialog.oncancel=e=>{e.preventDefault();finish({selected:[],bridge:null});};render();dialog.showModal();
   });
 }
@@ -5463,6 +5487,7 @@ $("#selectAllFonts").addEventListener("change", event => toggleAll("font", event
 $("#selectAllAssets").addEventListener("change", event => toggleAll("asset", event.target.checked));
 $('#selectDuplicateImports').addEventListener('click',selectDuplicateImports);
 $('#removeSelectedImports').addEventListener('click',()=>removeImportItems().catch(error=>toast(error.message)));
+$('#pauseTransfer').addEventListener('click',pauseCurrentTransfer);
 $("#commitSelectedThemes").addEventListener("click", () => commitSelection());
 $("#syncSelectedThemes").addEventListener("click", () => syncSelectedAssets("theme"));
 $("#syncSelectedFonts").addEventListener("click", () => syncSelectedAssets("font"));
