@@ -131,8 +131,8 @@ function corsHeaders(request, env) {
   return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET,HEAD,PUT,POST,PATCH,DELETE,OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization,Content-Type,Content-Length,X-Content-SHA256,X-Pan123-Token,X-Pan123-Folder,X-Pan123-Filename,X-Pan123-Etag,If-None-Match",
-    "Access-Control-Expose-Headers": "ETag,X-Content-SHA256",
+    "Access-Control-Allow-Headers": "Authorization,Content-Type,Content-Length,X-Content-SHA256,X-Pan123-Token,X-Pan123-Folder,X-Pan123-Filename,X-Pan123-Etag,If-None-Match,Range,If-Range",
+    "Access-Control-Expose-Headers": "ETag,X-Content-SHA256,Content-Disposition,Content-Length,Content-Range,Accept-Ranges",
     "Access-Control-Max-Age": "600",
     Vary: "Origin",
   };
@@ -531,11 +531,28 @@ async function resolveObjectKey(env, spec, digest) {
 }
 
 async function getObject(request, env, spec) {
-  const object = request.method==='HEAD' && typeof env.ASSETS.head==='function' ? await env.ASSETS.head(spec.key) : await env.ASSETS.get(spec.key);
-  if (!object) return json({error: "对象不存在"}, 404, request, env);
+  let range;
+  if(request.method==='GET' && request.headers.has('Range')) {
+    const head=await env.ASSETS.head(spec.key);if(!head)return json({error:'对象不存在'},404,request,env);
+    const etag=head.httpEtag||'"'+head.etag+'"';
+    if(!request.headers.has('If-Range')||request.headers.get('If-Range')===etag){
+      const match=/^bytes=(\d*)-(\d*)$/.exec(request.headers.get('Range'));
+      const size=head.size;let start,end;
+      if(match&&(match[1]||match[2])){if(!match[1]){start=Math.max(0,size-Number(match[2]));end=size-1;}else{start=Number(match[1]);end=match[2]?Math.min(size-1,Number(match[2])):size-1;}}
+      if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||start>end||start>=size)return response(null,416,request,env,{'Content-Range':'bytes */'+size});
+      range={offset:start,length:end-start+1};
+    }
+  }
+  const object=request.method==='HEAD'?await env.ASSETS.head(spec.key):await env.ASSETS.get(spec.key,{...(range?{range}:{}),onlyIf:request.headers});
+  if(!object)return json({error:'对象不存在'},404,request,env);
   const headers = new Headers(corsHeaders(request, env));
   headers.set("Cache-Control", privateLibrary(env) ? "private, max-age=86400" : "public, max-age=31536000, immutable");
   headers.set("Referrer-Policy", "no-referrer");
+  const etag=object.httpEtag||(object.etag?'"'+object.etag+'"':null);if(etag)headers.set("ETag",etag);
+  headers.set("Accept-Ranges","bytes");
+  if(request.method!=="HEAD" && !object.body)return new Response(null,{status:304,headers});
+  if(range)headers.set("Content-Range",`bytes ${range.offset}-${range.offset+range.length-1}/${object.size}`);
+  headers.set("Content-Length",String(range?range.length:object.size));
   if(object.customMetadata?.sha256)headers.set('X-Content-SHA256',object.customMetadata.sha256);
   headers.set("Content-Type", contentType(spec));
   if (object.httpMetadata?.contentType) headers.set("Content-Type", object.httpMetadata.contentType);
@@ -550,7 +567,7 @@ async function getObject(request, env, spec) {
     const ascii = downloadName.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
     headers.set("Content-Disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(downloadName)}`);
   }
-  return new Response(request.method==='HEAD'?null:object.body, {status: 200, headers});
+  return new Response(request.method==='HEAD'?null:object.body, {status: range?206:200, headers});
 }
 
 /**
@@ -584,16 +601,16 @@ function concatBytes(parts) {
   for (const part of parts) { out.set(part, offset); offset += part.length; }
   return out;
 }
-function zipLocalHeader(name, crc, size) {
+function zipLocalHeader(name, crc, size, flags=0x0800) {
   return concatBytes([
-    new Uint8Array([0x50, 0x4b, 0x03, 0x04]), zipU16(20), zipU16(0x0800), zipU16(0),
+    new Uint8Array([0x50, 0x4b, 0x03, 0x04]), zipU16(20), zipU16(flags), zipU16(0),
     zipU16(0), zipU16(0), zipU32(crc), zipU32(size), zipU32(size),
     zipU16(name.length), zipU16(0), name,
   ]);
 }
-function zipCentralHeader(name, crc, size, offset) {
+function zipCentralHeader(name, crc, size, offset, flags=0x0800) {
   return concatBytes([
-    new Uint8Array([0x50, 0x4b, 0x01, 0x02]), zipU16(20), zipU16(20), zipU16(0x0800), zipU16(0),
+    new Uint8Array([0x50, 0x4b, 0x01, 0x02]), zipU16(20), zipU16(20), zipU16(flags), zipU16(0),
     zipU16(0), zipU16(0), zipU32(crc), zipU32(size), zipU32(size),
     zipU16(name.length), zipU16(0), zipU16(0), zipU16(0), zipU16(0), zipU32(0), zipU32(offset), name,
   ]);
@@ -604,25 +621,31 @@ function zipEndOfCentralDirectory(count, centralSize, localSize) {
     zipU16(count), zipU16(count), zipU32(centralSize), zipU32(localSize), zipU16(0),
   ]);
 }
-async function readObjectBytes(object) {
-  if (typeof object?.arrayBuffer === "function") return new Uint8Array(await object.arrayBuffer());
-  if (object?.body) return new Uint8Array(await new Response(object.body).arrayBuffer());
-  throw new Error("R2 对象没有可读取的数据");
-}
 async function latestLibraryRecords(env,kind=null) {
   const {data}=await loadLibraryIndex(env);return data.records.filter(item=>!kind || item.kind===kind);
 }
 
 // Mirrors downloadableFiles() in the front end so the archive layout stays the
 // same in remote mode and in the browser-only fallback.
-function downloadFileList(kind, record) {
+function redDownloadLabel(record) {
+  let title=String(record.name||record.source_name||record.file_name||record.id||'主题').replace(/\.red$/i,'').trim();
+  const author=String(record.author||'').trim();
+  if(author && author!=='作者未记录') {
+    const escaped=author.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+    title=title.replace(new RegExp('^'+escaped+'\\s*[-–—－]\\s*','i'),'');
+    title=author+' - '+title;
+  }
+  return title.replace(/[\\/:*?"<>|\0\r\n]/g,'_').slice(0,140)||'主题';
+}
+function downloadFileList(kind, record, extras = kind !== "theme") {
   const raw = String(record?.file_name || record?.name || record?.family || record?.id || "item");
-  const label = raw.replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|\0]/g, "_").slice(0, 90) || "item";
+  const label = kind === "theme" ? redDownloadLabel(record) : raw.replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|\0]/g, "_").slice(0, 90) || "item";
   const files = [];
   const add = (path, suffix) => { if (path && !files.some(item => item.path === path)) files.push({path, name: label + suffix}); };
   if (kind === "theme") {
     const compressed = record.compressed_url || record.library_url;
-    add(compressed, ".red");
+    add(compressed || record.original_url, ".red");
+    if(!extras)return files;
     if (record.original_url && record.original_url !== compressed) add(record.original_url, ".original.red");
     if (record.preview_light_url) add(record.preview_light_url, ".preview.jpg");
     if (record.preview_dark_url) add(record.preview_dark_url, ".night.jpg");
@@ -645,10 +668,10 @@ function downloadObjectSpec(path) {
   const spec = objectSpec(pathname);
   return spec?.key ? spec : null;
 }
-function downloadEntries(kind, records) {
+function downloadEntries(kind, records, extras=kind!=="theme") {
   const entries = [], usedKeys = new Set(), usedNames = new Set();
   for (const record of records) {
-    for (const file of downloadFileList(kind, record)) {
+    for (const file of downloadFileList(kind, record, extras)) {
       const spec = downloadObjectSpec(file.path);
       if (!spec || usedKeys.has(spec.key)) continue;
       usedKeys.add(spec.key);
@@ -670,50 +693,28 @@ function streamZip(request, env, kind, entries, stamp) {
     created_at: new Date().toISOString(), kind,
     files: entries.map(item => ({kind, id: item.record_id, name: item.original_name, path: item.name, source: item.path})),
   };
-  const pending = [{name: "manifest.json", bytes: encoder.encode(JSON.stringify(manifest, null, 2))}, ...entries];
-  const central = [];
-  const errors = [];
-  let offset = 0, cursor = 0, emitted = 0, finalized = false, finished = false;
-  let chunks = [];
-  const emit = entry => {
-    const name = encoder.encode(entry.name), data = entry.bytes;
-    if (name.length > 65535 || data.length > 0xffffffff || offset > 0xffffffff || emitted > 0xffff) throw new Error("批量下载超过普通 ZIP 上限");
-    const crc = crc32Bytes(data), header = zipLocalHeader(name, crc, data.length);
-    central.push(zipCentralHeader(name, crc, data.length, offset));
-    offset += header.length + data.length;
-    emitted++;
-    const slices = [header];
-    for (let start = 0; start < data.length; start += 65536) slices.push(data.subarray(start, Math.min(start + 65536, data.length)));
-    if (data.length === 0) slices.push(new Uint8Array());
-    return slices;
-  };
-  const stream = new ReadableStream({
-    async pull(controller) {
-      try {
-        while (!chunks.length) {
-          if (cursor < pending.length) {
-            const item = pending[cursor++];
-            if (item.key) {
-              const object = await env.ASSETS.get(item.key);
-              if (!object) { errors.push({path: item.path, name: item.name, error: "R2 对象不存在"}); continue; }
-              item.bytes = await readObjectBytes(object);
-            }
-            chunks = emit(item);
-          } else if (!finalized) {
-            finalized = true;
-            if (errors.length) {
-              pending.push({name: "__errors.json", bytes: encoder.encode(JSON.stringify({skipped: errors}, null, 2))});
-            }
-          } else if (!finished) {
-            finished = true;
-            const centralBytes = concatBytes(central);
-            chunks = [centralBytes, zipEndOfCentralDirectory(emitted, centralBytes.length, offset)];
-          } else { controller.close(); return; }
-        }
-        controller.enqueue(chunks.shift());
-      } catch (error) { controller.error(error); }
-    },
-  }, {highWaterMark: 1});
+  const pending=[{name:'manifest.json',bytes:encoder.encode(JSON.stringify(manifest,null,2))},...entries];
+  const central=[],errors=[];let offset=0,count=0;
+  async function* chunks() {
+    for(let index=0;index<=pending.length;index++) {
+      if(index===pending.length){if(!errors.length)break;pending.push({name:'__errors.json',bytes:encoder.encode(JSON.stringify({skipped:errors},null,2))});errors.length=0;}
+      const item=pending[index];let object;
+      if(item.key){object=await env.ASSETS.get(item.key);if(!object){errors.push({path:item.path,name:item.name,error:'R2 对象不存在'});continue;}}
+      const name=encoder.encode(item.name),start=offset,flags=0x0808;
+      if(name.length>65535 || offset>0xffffffff || count>=65535)throw new Error('批量下载超过普通 ZIP 上限，请拆分下载');
+      const header=zipLocalHeader(name,0,0,flags);offset+=header.length;yield header;
+      let size=0,crc=0xffffffff;
+      const update=bytes=>{for(let i=0;i<bytes.length;i++)crc=(crc>>>8)^CRC32_TABLE[(crc^bytes[i])&255];size+=bytes.length;offset+=bytes.length;if(size>0xffffffff)throw new Error('文件超过 ZIP 上限');return bytes;};
+      if(object){const reader=object.body.getReader();try{while(true){const part=await reader.read();if(part.done)break;yield update(part.value);}}finally{await reader.cancel().catch(()=>{});reader.releaseLock();}}
+      else yield update(item.bytes);
+      crc=(crc^0xffffffff)>>>0;
+      const descriptor=concatBytes([zipU32(0x08074b50),zipU32(crc),zipU32(size),zipU32(size)]);offset+=descriptor.length;yield descriptor;
+      central.push(zipCentralHeader(name,crc,size,start,flags));count++;
+    }
+    const directory=concatBytes(central);yield directory;yield zipEndOfCentralDirectory(count,directory.length,offset);
+  }
+  const iterator=chunks();
+  const stream=new ReadableStream({async pull(controller){try{const part=await iterator.next();if(part.done)controller.close();else controller.enqueue(part.value);}catch(error){controller.error(error);}},async cancel(){await iterator.return();}},{highWaterMark:1});
   const headers = new Headers(corsHeaders(request, env));
   headers.set("Content-Type", "application/zip");
   headers.set("Cache-Control", "no-store");
@@ -732,7 +733,7 @@ async function downloadSelected(request, env) {
   const records = await latestLibraryRecords(env, kind);
   const chosen = ids.map(id => records.find(record => String(record.id) === id)).filter(Boolean);
   if (!chosen.length) return json({error: "所选记录不存在或已被删除"}, 404, request, env);
-  const entries = downloadEntries(kind, chosen);
+  const entries = downloadEntries(kind, chosen, kind!=="theme" || url.searchParams.get("extras")==="1");
   if (!entries.length) return json({error: "所选记录没有可下载的 R2 对象"}, 404, request, env);
   if (url.searchParams.get("probe") === "1") {
     return json({ok: true, kind, records: chosen.length, count: entries.length,

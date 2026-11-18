@@ -78,3 +78,13 @@ CLI 先建任务、再逐项上传并登记。中断后重新选择同一批文�
 `npm ci` 的 postinstall 会暂时禁用 picomatch 重复 extglob（`+(...)` / `*(...)`），降低已知构建期正则回溯风险；普通 `**/*.js` 不受影响。上游未提供完整修复时 `npm audit` 的版本警告仍会保留，本地缓解不等于上游已修复。生产依赖审计通过。
 
 验证：`node worker/test-worker.mjs`、`node worker/test-private-repack.mjs`、`node scripts/test-library-maintenance.mjs`、`node scripts/test-sync-resume.mjs`、`node scripts/test-compress-references.mjs`；构建后运行 `node scripts/verify-pages.mjs --cloudflare`。新增测试覆盖私有读取、签名资源、并发 CAS、304、核对清理、租约、CLI 中断恢复和构建 glob 缓解。
+
+## RED 下载与批量处理
+
+RED 下载统一命名为「作者 - 主题名.red」，不重复作者前缀并保留标题中的版本号。主题库批量下载默认只包含压缩 RED；勾选「附带原包与预览」才加入这些附件。直接下载支持 Content-Length、ETag / 304、Range / If-Range；ZIP 按数据块输出，私有下载使用签名链接，不再先发一次探测请求。
+
+批量 RED 处理复用识别时的预览，不把全部原包同时留在待处理数组中；压缩、原包上传、压缩包与预览上传并行执行。按设备能力限制工作线程，并将上传请求限制为最多四个；新文件不再逐个多发 HEAD，失败重试仍会检查已上传内容。相同原始 SHA-256 的已入库主题跳过解包和重压缩。
+
+待处理区支持「选中重复」和「移除所选」：主题按 SHA-256 区分完全相同与仅同名作者，字体 / SVG / HTML 按 SHA-256 检查；同批重复保留第一份。移除时默认保留本地文件，可勾选继续核对本地原件，再按文件句柄或授权文件夹删除。仅同名作者可能是不同版本，不能当作相同内容自动删除。ZIP 原包不自动删除。
+
+回归补充：`node scripts/test-transfer-performance.mjs` 验证作者文件名、签名下载、断点与缓存、ZIP 实际内容、默认附件范围及流式读取。

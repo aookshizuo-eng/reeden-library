@@ -8,6 +8,7 @@ const buttonVariants = cva("inline-flex shrink-0 cursor-pointer items-center jus
   variants: {
     variant: {
       default: "bg-[var(--text)] text-white hover:bg-[var(--accent-deep)]",
+      destructive: "bg-[var(--danger)] text-white hover:opacity-90",
       outline: "border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:bg-[var(--raised)]",
       ghost: "bg-transparent text-[var(--muted)] hover:bg-[var(--raised)]",
     },

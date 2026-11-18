@@ -587,9 +587,13 @@ function privateSkippedResult(raw, decisions = []) {
 const codecWorkers = [];
 let codecWorkerCursor = 0;
 let codecWorkerSequence = 0;
+function processingConcurrency() {
+  const cores=Number(navigator.hardwareConcurrency)||2,memory=Number(navigator.deviceMemory)||4;
+  return Math.max(1,Math.min(4,cores-1,memory<=2?1:memory<=4?2:4));
+}
 function acquireCodecWorker() {
   if (typeof Worker === "undefined" || codecWorkerDisabled) return null;
-  const wanted = Math.min(2, Math.max(1, Math.min(4, Number(navigator.hardwareConcurrency) || 2)));
+  const wanted = processingConcurrency();
   for (let index = codecWorkers.length; index < wanted; index++) {
     try { codecWorkers.push(new Worker("./free_codec_worker.js")); }
     catch { codecWorkerDisabled = true; break; }
@@ -649,7 +653,7 @@ async function callCodecWorker(command, payload) {
 async function runCodecTask(command, payload, fallback) {
   if (!codecWorkerDisabled) {
     try { const result = await callCodecWorker(command, payload); if (result !== null) return result; }
-    catch (error) { console.warn("codec worker 回退到主线程：", error.message); }
+    catch (error) { if(error.message?.includes("超时"))throw error;console.warn("codec worker 回退到主线程：", error.message); }
   }
   return await fallback();
 }
@@ -1370,6 +1374,11 @@ function objectFileName(sha, extension, label) {
   const safe = objectLabel(label);
   return safe ? `${safe}.${extension}` : `${sha}.${extension}`;
 }
+let uploadActive=0;const uploadWaiting=[],uploadAttempts=new Set();
+async function withUploadSlot(action) {
+  if(uploadActive>=4)await new Promise(resolve=>uploadWaiting.push(resolve));else uploadActive++;
+  try{return await action();}finally{if(uploadWaiting.length)uploadWaiting.shift()();else uploadActive--;}
+}
 async function uploadBrowserObject(kind, sha, extension, body, contentType, label = "", targetRecord = null) {
   const path = `/api/objects/${encodeURIComponent(kind)}/${encodeURIComponent(objectFileName(sha, extension, label))}`;
   const request = (method) => fetch(apiUrl(path), {
@@ -1377,15 +1386,16 @@ async function uploadBrowserObject(kind, sha, extension, body, contentType, labe
     headers: requestHeaders({ "Content-Type": contentType || "application/octet-stream", "X-Content-SHA256": sha }),
     body,
   });
-  if(kind!=='records' && (body?.byteLength||body?.size||0)>65536) {
+  if(uploadAttempts.has(path+'|'+sha) && kind!=='records' && (body?.byteLength||body?.size||0)>65536) {
     const head=await fetch(apiUrl(path),{method:'HEAD',headers:requestHeaders()});
     if(head.ok&&head.headers.get('X-Content-SHA256')===sha)return path;
   }
   // PUT is the canonical R2 object method. A few WebView proxies and older
   // Worker deployments reject PUT with 405; retrying as POST keeps the same
   // content-addressed endpoint while the Worker accepts both methods.
-  let response = await request("PUT");
-  if (response.status === 405) response = await request("POST");
+  uploadAttempts.add(path+"|"+sha);
+  let response = await withUploadSlot(()=>request("PUT"));
+  if (response.status === 405) response = await withUploadSlot(()=>request("POST"));
   if (!response.ok) {
     const responseText = await response.text();
     let data = {};
@@ -2170,7 +2180,7 @@ function renderCompressionResults() {
   const batch = new Set(state.jobs.filter(job => state.importThemeJobIds.includes(job.id)).flatMap(job => job.ids || []));
   const themes = state.themes.filter(theme => batch.has(theme.source_staging_id));
   $("#themeCompressionResults").innerHTML = themes.map(theme => {
-    const url = downloadUrl(theme.compressed_url || theme.library_url || theme.original_url);
+    const url = downloadUrl(theme.compressed_url || theme.library_url || theme.original_url, redDownloadLabel(theme)+".red");
     return `<article class="compression-result"><div><strong>${escapeHtml(theme.name || theme.source_name || "主题")}</strong><p>${escapeHtml(compressionSummary(theme))}</p><p>${escapeHtml(syncLabel(theme))}</p></div>${url ? `<a class="download-link" href="${escapeHtml(url)}">${requiresOriginalPreservation(theme) ? "下载原样主题" : "下载压缩 RED"}</a>` : ""}</article>`;
   }).join("");
 }
@@ -2513,6 +2523,8 @@ function updateBulkControls() {
     if (selectingThemes) button.setAttribute("aria-pressed", String(selected)); else button.removeAttribute("aria-pressed");
   });
   $$("#themeDialog form input, #themeDialog form button").forEach(input => { input.disabled = Boolean(state.operation); });
+  $("#selectDuplicateImports").disabled=![...state.review,...state.pending].some(item=>item.duplicateKind)||!!state.operation;
+  $("#removeSelectedImports").disabled=!selections.review.size||!!state.operation;
   const chosenReview = state.review.filter(item => selections.review.has(item.staging_id));
   const chosenPending = state.pending.filter(item => selections.review.has(item.id));
   const pendingFonts = chosenPending.filter(item => item.kind === "font").length;
@@ -2958,8 +2970,8 @@ function openThemeDialog(id) {
       <div class="theme-size-summary">${original && compressed && original !== compressed ? `<span>${formatBytes(original)}</span><span aria-label="压缩为">→</span>` : ''}<strong>${compressed || original ? formatBytes(compressed || original) : '体积未记录'}</strong>${reduction ? `<span class="theme-size-saving">${reduction}</span>` : ''}</div>
       ${tags.length ? `<div class="theme-detail-tags">${tags.slice(0, 5).map(tag => `<span class="category-chip">${escapeHtml(tag)}</span>`).join('')}${tags.length > 5 ? `<span class="field-help">另 ${tags.length - 5} 项</span>` : ''}</div>` : ''}
       <div class="theme-dialog-actions">
-        ${themeFile ? `<a class="primary-button" href="${escapeHtml(downloadUrl(themeFile, title + '.red'))}">下载主题</a>` : ''}
-        ${theme.original_url ? `<a class="secondary-button" href="${escapeHtml(downloadUrl(theme.original_url, /\.red$/i.test(theme.source_name || theme.file_name || '') ? theme.source_name || theme.file_name : title + '-原包.red'))}">下载原始包</a>` : ''}
+        ${themeFile ? `<a class="primary-button" href="${escapeHtml(downloadUrl(themeFile, redDownloadLabel(theme) + '.red'))}">下载主题</a>` : ''}
+        ${theme.original_url ? `<a class="secondary-button" href="${escapeHtml(downloadUrl(theme.original_url, redDownloadLabel(theme) + '.original.red'))}">下载原始包</a>` : ''}
         ${themeFile && !savedToCloud(theme) ? '<button class="secondary-button" id="themeDialogSync" type="button">同步到 R2</button>' : ''}
       </div>
       <p class="operation-status" id="themeDialogStatus" role="status" hidden></p>
@@ -3176,12 +3188,13 @@ async function stagePendingFiles(files, kind) {
     : [...(files || [])].filter(file => ["svg", "html", "htm"].includes(assetExtension(file)));
   if (!accepted.length) { toast(kind === "font" ? "请选择 TTF、OTF、WOFF 或 WOFF2 文件" : "请选择 SVG、HTML 或 HTM 文件"); return; }
   await rememberLocalFiles(accepted);
+  const hashes=await mapConcurrent(accepted,3,async file=>{const bytes=await file.arrayBuffer();const hash=await crypto.subtle.digest('SHA-256',bytes);return [...new Uint8Array(hash)].map(x=>x.toString(16).padStart(2,'0')).join('');});
   let added = 0;
-  for (const file of accepted) {
-    const duplicate = state.pending.some(item => item.kind === kind && item.name === file.name && item.size === file.size);
+  for (const [fileIndex,file] of accepted.entries()) {
+    const duplicate = state.pending.some(item => item.file===file);
     if (duplicate) continue;
     const id = `pending-${kind}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    state.pending.push({id, kind, file, name: file.name || `${label}文件`, size: Number(file.size) || 0});
+    state.pending.push({id, kind, file, sha256:hashes[fileIndex], name: file.name || `${label}文件`, size: Number(file.size) || 0});
     // 手动选进来的文件默认勾上：用户选它就是为了上传，不再要求二次勾选。
     selections.review.add(id);
     added++;
@@ -3201,11 +3214,10 @@ function renderPending() {
   list.hidden = state.pending.length === 0;
   list.innerHTML = state.pending.map(item => {
     const label = item.kind === "font" ? "字体" : "收藏";
-    return `<article class="pending-card" data-pending-id="${escapeHtml(item.id)}"><label class="item-heading">${selectInput("review", item.id, `${label} ${item.name}`)}<strong>${escapeHtml(item.name)}</strong></label><span class="badge">${label}</span><span class="pending-size">${formatBytes(item.size)}</span><button class="text-button" type="button" data-pending-remove="${escapeHtml(item.id)}">移除</button></article>`;
+    return `<article class="pending-card" data-pending-id="${escapeHtml(item.id)}"><label class="item-heading">${selectInput("review", item.id, `${label} ${item.name}`)}<strong>${escapeHtml(item.name)}</strong>${item.duplicateKind?'<span class="badge">内容重复</span>':''}</label><span class="badge">${label}</span><span class="pending-size">${formatBytes(item.size)}</span><button class="text-button" type="button" data-pending-remove="${escapeHtml(item.id)}">移除</button></article>`;
   }).join("");
   $$("[data-pending-remove]").forEach(button => button.addEventListener("click", () => {
-    dropPending(state.pending.filter(item => item.id === button.dataset.pendingRemove));
-    toast("已移出待处理");
+    removeImportItems([button.dataset.pendingRemove]).catch(error=>toast(error.message));
   }));
 }
 let commitBatchBusy = false;
@@ -3248,7 +3260,54 @@ async function commitSelection() {
     }
   }
 }
+function reviewDuplicates() {
+  const seenHashes=new Map(),seenNames=new Map();
+  for(const item of state.review){
+    if(!item.file)continue;
+    const hash=item.original_sha256,key=[item.info?.author||'',item.info?.name||''].join('\0');
+    const exact=state.themes.filter(record=>hash&&[record.original_sha256,record.sha256].includes(hash));
+    const same=exact.length?exact:browserDuplicateCandidates(item.info?.name,item.info?.author);
+    const prior=(hash&&seenHashes.get(hash))||seenNames.get(key);
+    item.duplicateKind=exact.length || (hash&&seenHashes.has(hash))?'exact':same.length||prior?'name':'';
+    item.duplicates=[...same.slice(0,3),...(prior?[{name:prior.info.name,preview_light_url:prior.preview_urls?.light}]:[])];
+    if(hash)seenHashes.set(hash,item);if(!seenNames.has(key))seenNames.set(key,item);
+  }
+  const pending=new Set();
+  for(const item of state.pending){const key=item.kind+':'+item.sha256;item.duplicateKind=item.sha256&&(pending.has(key)||state[item.kind==='font'?'fonts':'assets'].some(record=>record.sha256===item.sha256))?'exact':'';pending.add(key);}
+}
+function selectDuplicateImports() {
+  reviewDuplicates();selections.review.clear();
+  state.review.filter(item=>item.duplicateKind).forEach(item=>selections.review.add(item.staging_id));state.pending.filter(item=>item.duplicateKind).forEach(item=>selections.review.add(item.id));updateBulkControls();
+  toast(`已选中 ${selections.review.size} 项重复或疑似重复；同一批保留第一份。`);
+}
+async function removeImportItems(ids=[...selections.review]) {
+  if(state.operation)return;
+  const selected=new Set(ids),themes=state.review.filter(item=>selected.has(item.staging_id)),pending=state.pending.filter(item=>selected.has(item.id));if(!themes.length&&!pending.length)return;
+  const files=[...themes,...pending].map(item=>item.file).filter(Boolean),dialog=$('#removeImportDialog');
+  const suspected=themes.filter(item=>item.duplicateKind==='name').length;
+  $('#removeImportDescription').textContent=`移除 ${themes.length+pending.length} 项待导入文件，已有资源库不受影响。${suspected?`其中 ${suspected} 项仅同名作者，内容可能不同，请先核对。`:''}${files.some(file=>file.archivePath)?'ZIP 原包会保留，不自动删除。':''}`;
+  $('#removeImportLocal').checked=false;
+  const choice=await new Promise(resolve=>{
+    dialog.onclose=()=>resolve(null);const finish=value=>{dialog.close();resolve(value);};$('#removeImportConfirm').onclick=()=>finish({local:$('#removeImportLocal').checked});$('#removeImportCancel').onclick=$('#closeRemoveImport').onclick=()=>finish(null);dialog.oncancel=e=>{e.preventDefault();finish(null);};dialog.showModal();
+  });if(!choice)return;
+  setOperation('remove-import');
+  try {
+    for(const item of themes)if(!String(item.staging_id).startsWith('browser-'))await api(`/api/themes/pending/${encodeURIComponent(item.staging_id)}/dismiss`,{method:'POST'});
+    await completeLocalFiles(files);
+    state.review=state.review.filter(item=>!selected.has(item.staging_id));state.pending=state.pending.filter(item=>!selected.has(item.id));ids.forEach(id=>selections.review.delete(id));
+    for(const item of themes)for(const url of Object.values(item.preview_urls||{}))if(String(url).startsWith('blob:'))URL.revokeObjectURL(url);
+    renderReview();operationMessage($('#reviewBatchStatus'),`已移除 ${themes.length+pending.length} 项待导入文件。`);
+  }catch(error){operationMessage($('#reviewBatchStatus'),error.message,true);return;}finally{setOperation('');}
+  if(choice.local){
+    const {targets}=cleanupTargets(files.filter(file=>!file.archivePath));if(!targets.length){toast('没有可单独清理的本地原件；ZIP 原包保留');return;}
+    const {selected:chosen,bridge}=await openCleanupDialog(targets,'核对后选择要删除的本地原文件。',{checked:false,note:'这些待导入文件没有上传；疑似重复也可能是不同版本。删除本地原件后可能无法恢复，请核对后勾选。'});
+    if(chosen.length){const result=await performLocalCleanup(chosen,bridge);operationMessage($('#reviewBatchStatus'),`已移除待导入项；本地已删除 ${result.deleted} 个${result.failures.length?'；'+result.failures.map(x=>x.name+'：'+x.reason).join('；'):''}`,!!result.failures.length);}
+  }
+}
 function renderReview() {
+  reviewDuplicates();
+  const duplicateCount=[...state.review,...state.pending].filter(item=>item.duplicateKind).length;
+  $("#selectDuplicateImports").textContent=`选中重复（${duplicateCount}）`;$("#selectDuplicateImports").disabled=!duplicateCount||!!state.operation;
   const area = $("#reviewArea");
   const pendingTotal = state.review.length + state.pending.length;
   area.hidden = pendingTotal === 0;
@@ -3270,7 +3329,7 @@ function renderReview() {
         ? `<p class="review-meta">加密主题：图片会在当前设备压缩，再由同步 Worker 认证清单、更新资源哈希并重新封包。</p>`
         : `<p class="review-meta">加密主题：先在「存储设置」填好同步 API 地址与 Token，图片就会在当前设备压缩，再由 Worker 认证清单、更新资源哈希并重新封包；未配置时只保存原包。</p>`)
       : "";
-    return `<article class="review-card" data-review-id="${escapeHtml(item.staging_id)}"><div class="review-top"><div><label class="item-heading">${selectInput("review", item.staging_id, `待确认主题 ${info.name || info.source_name}`)}<span class="review-title">${escapeHtml(info.name || info.source_name)}</span></label><div class="review-meta">${escapeHtml(info.author || "作者未记录")} · ${formatBytes(info.bytes)} · ${escapeHtml(info.source_name)}</div></div><span class="badge ${duplicate ? "" : "is-good"}">${duplicate ? `疑似重复 ${item.duplicates.length}` : "未发现同名作者"}</span></div>${privateNote}${duplicate ? `<div class="duplicate-note">已有库中存在同名作者主题。下面只展示缩略图，是否重复由你确认。</div><div class="duplicate-thumbs">${duplicateThumbs}</div>` : ""}<div class="duplicate-thumbs"><div class="thumb-label">${previewImage(preview.url, `待审核主题${preview.label} · ${previewKind(info.preview_details)}`, "thumb", info.preview_details)}<span>新主题 · ${preview.label}</span><span>${escapeHtml(previewKind(info.preview_details))} · 点击放大</span></div></div>${item.commitError ? `<p class="inline-error">${escapeHtml(item.commitError)}</p>` : ""}<div class="review-actions"><button class="primary-button commit-theme" data-id="${escapeHtml(item.staging_id)}">${privateTheme ? "确认并保存原包（配好同步后可压缩）" : "确认并压缩保存"}${autoSyncEnabled() ? "并后台同步" : "（后台处理）"}</button><button class="secondary-button discard-review" data-id="${escapeHtml(item.staging_id)}">暂不处理</button></div></article>`;
+    return `<article class="review-card" data-review-id="${escapeHtml(item.staging_id)}"><div class="review-top"><div><label class="item-heading">${selectInput("review", item.staging_id, `待确认主题 ${info.name || info.source_name}`)}<span class="review-title">${escapeHtml(info.name || info.source_name)}</span></label><div class="review-meta">${escapeHtml(info.author || "作者未记录")} · ${formatBytes(info.bytes)} · ${escapeHtml(info.source_name)}</div></div><span class="badge ${duplicate ? "" : "is-good"}">${duplicate ? (item.duplicateKind==="exact"?"内容完全相同":`疑似重复 ${item.duplicates.length}`) : "未发现同名作者"}</span></div>${privateNote}${duplicate ? `<div class="duplicate-note">${item.duplicateKind==="exact"?"SHA-256 相同，可移除重复导入项。":"库中或本批有同名作者主题，可能为不同版本，请核对。"}</div><div class="duplicate-thumbs">${duplicateThumbs}</div>` : ""}<div class="duplicate-thumbs"><div class="thumb-label">${previewImage(preview.url, `待审核主题${preview.label} · ${previewKind(info.preview_details)}`, "thumb", info.preview_details)}<span>新主题 · ${preview.label}</span><span>${escapeHtml(previewKind(info.preview_details))} · 点击放大</span></div></div>${item.commitError ? `<p class="inline-error">${escapeHtml(item.commitError)}</p>` : ""}<div class="review-actions"><button class="primary-button commit-theme" data-id="${escapeHtml(item.staging_id)}">${privateTheme ? "确认并保存原包（配好同步后可压缩）" : "确认并压缩保存"}${autoSyncEnabled() ? "并后台同步" : "（后台处理）"}</button><button class="secondary-button discard-review" data-id="${escapeHtml(item.staging_id)}">暂不处理</button></div></article>`;
   }).join("");
   $$(".commit-theme").forEach(button => button.addEventListener("click", () => commitTheme(button.dataset.id)));
   $$(".discard-review").forEach(button => button.addEventListener("click", () => discardReview(button.dataset.id)));
@@ -3657,23 +3716,8 @@ async function loadPendingThemes() {
   state.review.push(...(data.items || []).filter(item => !known.has(item.staging_id)));
   renderReview();
 }
-async function discardReview(id) {
-  if (state.operation) return;
-  setOperation("dismiss-theme");
-  try {
-    // Browser-sync analysis keeps the source only in this tab and uses a
-    // browser-* staging id. There is no server-side pending item to dismiss;
-    // calling the local pending endpoint would turn its expected 404 into a
-    // false "sync API unavailable" state.
-    if (!String(id).startsWith("browser-")) {
-      await api(`/api/themes/pending/${encodeURIComponent(id)}/dismiss`, { method: "POST" });
-    }
-    state.review = state.review.filter(item => item.staging_id !== id);
-    selections.review.delete(id);
-    renderReview();
-  } catch (error) { toast(error.message); }
-  finally { setOperation(""); }
-}
+async function discardReview(id) { return removeImportItems([id]); }
+
 async function loadFonts(force = false) {
   const records = browserSyncEnabled() ? await loadBrowserLibraryRecords(force) : latestRecords((await api("/api/fonts")).items || []);
   state.fonts = records.filter(item => item.kind === "font").map(font => ({ ...font, style: String(font.style || "").trim() || inferFontCategory(font) }));
@@ -3827,6 +3871,9 @@ async function analyzeFiles(files) {
       const items = await mapConcurrent(valid, BROWSER_TASK_CONCURRENCY, async (file, index) => {
         operationMessage($("#reviewBatchStatus"), `正在读取主题 ${index + 1} / ${valid.length}…`);
         const raw = new Uint8Array(await file.arrayBuffer());
+        const originalSha=await codec.sha256Hex(raw);
+        const existing=state.themes.find(record=>record.original_sha256===originalSha||record.sha256===originalSha);
+        if(existing)return {staging_id:'browser-'+crypto.randomUUID(),file,original_sha256:originalSha,info:{...existing,name:themeIdentity(existing).title,source_name:file.name,bytes:file.size},duplicates:[existing],preview_urls:{light:existing.preview_light_url,dark:existing.preview_dark_url}};
         let entries = [];
         let inspection;
         try {
@@ -3853,11 +3900,11 @@ async function analyzeFiles(files) {
           if (plain?.author) identity.author = plain.author;
         }
         identity.name = themeIdentity(identity).title;
-        let previewUrl = "";
+        let previewUrl = "", previewBlob=null;
         let previewDetails = { kind: previewCompositionKind(entries), simulation: true, encrypted_source: inspection.format === "red_private_v2" };
         if (entries.length) {
           const preview = await composeThemePreviewBlob(entries, codec);
-          if (preview) previewUrl = URL.createObjectURL(preview);
+          if (preview) {previewBlob=preview;previewUrl = URL.createObjectURL(preview);}
           previewDetails = { ...previewDetails, kind: previewCompositionKind(entries) };
         }
         const tone = entries.previewTone || null;
@@ -3865,7 +3912,7 @@ async function analyzeFiles(files) {
         const autoCategory = toneCategories[0] || "";
         const info = { ...identity, source_name: file.name, bytes: raw.length, container_format: inspection.format, compression_supported: inspection.compressionSupported !== false, preview_details: previewDetails, preview_tone: tone, auto_category: autoCategory, auto_categories: toneCategories };
         const duplicateRecords = browserDuplicateCandidates(identity.name, identity.author);
-        return { staging_id: `browser-${crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`}`, file, bytes: raw, inspection, info, duplicates: duplicateRecords.map(record => ({ ...record })), preview_urls: { light: previewUrl, dark: "" } };
+        return { staging_id: `browser-${crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`}`, file, original_sha256:originalSha, preview_blob:previewBlob, inspection, info, duplicates: duplicateRecords.map(record => ({ ...record })), preview_urls: { light: previewUrl, dark: "" } };
       });
       state.review.push(...items);
       // 刚解析出来的主题默认勾上：和字体/收藏一致——用户把文件拖进来就是想上传，
@@ -3927,41 +3974,34 @@ async function commitThemes(ids = [...selections.review]) {
       transferStage("加载压缩引擎", "");
       const codec = await browserCodec();
       let finished = 0;
-      const results = await mapConcurrent(selected, 2, async item => {
+      const started=performance.now();
+      const width=Math.min(3,processingConcurrency(),selected.some(item=>(item.file?.size||0)>32*1024*1024)?2:3);
+      const results = await mapConcurrent(selected, width, async item => {
         const name = item.info?.source_name || item.info?.name || "主题";
         try {
           transferStage("读取主题", name);
           const raw = item.bytes || new Uint8Array(await item.file.arrayBuffer());
-          const encrypted = item.info?.compression_supported === false || item.inspection?.format === "red_private_v2";
-          transferStage(encrypted ? "压缩图片并重新封包" : "压缩图片", name);
-          const compressionOptions = options.preset === "custom"
-            ? { preset: options.preset, codec: options.codec, quality: options.quality, maxEdge: options.max_edge, gifColors: options.gif_colors, iconLossless: options.icon_lossless, compressReader: options.compress_reader, concurrency: Math.min(4, Number(navigator.hardwareConcurrency) || 2) }
-            : { preset: options.preset, concurrency: Math.min(4, Number(navigator.hardwareConcurrency) || 2) };
-          const result = encrypted
-            ? await compressPrivateRedViaWorker(raw, codec, compressionOptions)
-            : await runCodecTask("compressRed", { bytes: raw, options: compressionOptions }, () => codec.compressRed(raw, compressionOptions));
-          const compressedBytes = result.bytes;
-          const originalSha = await codec.sha256Hex(raw);
-          transferStage("上传原始主题", name);
-          const originalPath = await uploadBrowserObject("originals", originalSha, "red", raw, "application/octet-stream", `${name}-原包`);
-          const backup = pan123BackupConfig().token ? await backupOriginalTo123(raw, item.info?.source_name || name, codec) : null;
-          const assetSha = await codec.sha256Hex(compressedBytes);
-          transferStage("上传压缩主题", name);
-          const compressedPath = await uploadBrowserObject("compressed", assetSha, "red", compressedBytes, "application/octet-stream", `${name}-压缩`);
-          let previewPath = "";
-          let previewEntries = [];
-          try { previewEntries = encrypted ? await codec.extractPrivatePreviewImages(compressedBytes) : await codec.readZipEntries(compressedBytes); } catch { previewEntries = []; }
-          let previewDetails = item.info.preview_details || { kind: previewCompositionKind(previewEntries), simulation: true };
-          transferStage("生成主题预览", name);
-          const preview = await composeThemePreviewBlob(previewEntries, codec);
-          if (preview) {
-            const previewBytes = new Uint8Array(await preview.arrayBuffer());
-            const previewSha = await codec.sha256Hex(previewBytes);
-            transferStage("上传预览和清单", name);
-            previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg", `${name}-预览`);
-            previewDetails = { ...previewDetails, kind: previewCompositionKind(previewEntries), simulation: true, encrypted_source: encrypted };
-          }
-          if (!preview) transferStage("上传主题清单", name);
+          const existing=state.themes.find(record=>[record.original_sha256,record.sha256].includes(item.original_sha256));
+          if(existing){await completeLocalFiles([item.file]);transferDone(name);finished++;return {item,record:existing,reused:true};}
+          const encrypted=item.info?.compression_supported===false||item.inspection?.format==='red_private_v2';
+          const compressionOptions=options.preset==='custom'
+            ? {preset:options.preset,codec:options.codec,quality:options.quality,maxEdge:options.max_edge,gifColors:options.gif_colors,iconLossless:options.icon_lossless,compressReader:options.compress_reader,concurrency:2}
+            : {preset:options.preset,concurrency:2};
+          const originalSha=item.original_sha256||await codec.sha256Hex(raw);
+          const compress=()=>encrypted?compressPrivateRedViaWorker(raw,codec,compressionOptions):runCodecTask('compressRed',{bytes:raw,options:compressionOptions},()=>codec.compressRed(raw,compressionOptions));
+          const prepare=async()=>{
+            transferStage('压缩主题',name);const result=await compress(),compressedBytes=result.bytes;
+            const assetSha=await codec.sha256Hex(compressedBytes);
+            let preview=item.preview_blob,previewDetails=item.info.preview_details||{};
+            if(!preview){let entries=[];try{entries=encrypted?await codec.extractPrivatePreviewImages(compressedBytes):await codec.readZipEntries(compressedBytes);}catch{}preview=await composeThemePreviewBlob(entries,codec);previewDetails={...previewDetails,kind:previewCompositionKind(entries),simulation:true,encrypted_source:encrypted};}
+            const previewUpload=async()=>{if(!preview)return '';const bytes=new Uint8Array(await preview.arrayBuffer());return uploadBrowserObject('previews',await codec.sha256Hex(bytes),'jpg',bytes,'image/jpeg',name+'-预览');};
+            transferStage('上传压缩包与预览',name);
+            const [compressedPath,previewPath]=await Promise.all([uploadBrowserObject('compressed',assetSha,'red',compressedBytes,'application/octet-stream',name+'-压缩'),previewUpload()]);
+            return {compressedBytes,assetSha,compressedPath,previewPath,previewDetails};
+          };
+          const operations=await Promise.allSettled([prepare(),uploadBrowserObject('originals',originalSha,'red',raw,'application/octet-stream',name+'-原包'),pan123BackupConfig().token?backupOriginalTo123(raw,item.info?.source_name||name,codec):null]);
+          const failure=operations.find(result=>result.status==='rejected');if(failure)throw failure.reason;
+          const [{compressedBytes,assetSha,compressedPath,previewPath,previewDetails},originalPath,backup]=operations.map(result=>result.value);
           const record = await uploadBrowserRecord({
             kind: "theme", id: `theme-${assetSha.slice(0, 16)}`, name: item.info.name || item.info.source_name, author: item.info.author || "作者未记录",
             sha256: assetSha, original_sha256: originalSha, original_size: raw.length, compressed_size: compressedBytes.length,
@@ -3987,14 +4027,15 @@ async function commitThemes(ids = [...selections.review]) {
       const completed = results.filter(result => result.record).map(result => result.record);
       const failures = results.filter(result => result.error);
       finishTransferProgress("主题处理完成", failures.length);
-      state.themes = [...completed, ...state.themes];
+      state.themes = latestRecords([...completed, ...state.themes]);
       // Match completed records back to staging items by insertion order/name;
       // failed items remain visible for retry.
       for (const item of selected) if (!failures.some(entry => entry.item === item)) { state.review = state.review.filter(review => review !== item); selections.review.delete(item.staging_id); }
       renderReview(); renderThemes(); renderJobs();
       const completedFiles = results.filter(result => result.record && result.item?.file).map(result => result.item.file);
       await completeLocalFiles(completedFiles);
-      const message = failures.length ? `${completed.length} 个主题已保存到 R2，${failures.length} 个失败，请查看错误后重试。` : `${completed.length} 个主题已压缩并保存到 R2。`;
+      const elapsed=((performance.now()-started)/1000).toFixed(1);
+      const message = failures.length ? `${completed.length} 个主题已保存到 R2，${failures.length} 个失败，请查看错误后重试。` : `${completed.length} 个主题已保存到 R2，耗时 ${elapsed} 秒${results.some(result=>result.reused)?"（重复原件已跳过）":""}。`;
       operationMessage($("#reviewBatchStatus"), message, Boolean(failures.length)); toast(message);
       if(commitBatchBusy)deferredCleanup.push(...completedFiles);
       else offerLocalCleanup(completedFiles, `本次 ${completedFiles.length} 个主题已压缩并保存到 R2，可以删掉本地原包释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
@@ -4020,14 +4061,25 @@ async function commitThemes(ids = [...selections.review]) {
   } catch (error) { operationMessage($("#reviewBatchStatus"), `加入后台失败：${error.message}`, true); toast(error.message); }
   finally { setOperation(""); }
 }
-function downloadableFiles(kind, record) {
+function redDownloadLabel(record) {
+  let title=String(record.name||record.source_name||record.file_name||record.id||'主题').replace(/\.red$/i,'').trim();
+  const author=String(record.author||'').trim();
+  if(author && author!=='作者未记录') {
+    const escaped=author.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+    title=title.replace(new RegExp('^'+escaped+'\\s*[-–—－]\\s*','i'),'');
+    title=author+' - '+title;
+  }
+  return title.replace(/[\\/:*?"<>|\0\r\n]/g,'_').slice(0,140)||'主题';
+}
+function downloadableFiles(kind, record, extras = kind !== "theme") {
   const raw = String(record?.file_name || record?.name || record?.family || record?.id || "item");
-  const label = raw.replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|\0]/g, "_").slice(0, 90) || "item";
+  const label = kind === "theme" ? redDownloadLabel(record) : raw.replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|\0]/g, "_").slice(0, 90) || "item";
   const files = [];
   const add = (path, suffix) => { if (path && !files.some(item => item.path === path)) files.push({path, name: label + suffix}); };
   if (kind === "theme") {
     const compressed = record.compressed_url || record.library_url;
-    add(compressed, ".red");
+    add(compressed || record.original_url, ".red");
+    if(!extras)return files;
     if (record.original_url && record.original_url !== compressed) add(record.original_url, ".original.red");
     if (record.preview_light_url) add(record.preview_light_url, ".preview.jpg");
     if (record.preview_dark_url) add(record.preview_dark_url, ".night.jpg");
@@ -4065,7 +4117,7 @@ function localDateStamp() {
 async function downloadRecordsSeparately(kind, chosen, output) {
   const files = [];
   for (const record of chosen) {
-    for (const file of downloadableFiles(kind, record)) {
+    for (const file of downloadableFiles(kind, record, document.querySelector(`[data-download-extras="${kind}"]`)?.checked === true || kind!=="theme")) {
       // Previews are handy inside an archive but pure noise in a loose batch.
       if (kind === "theme" && /\.(preview|night)\.jpg$/i.test(file.name)) continue;
       files.push(file);
@@ -4115,7 +4167,9 @@ async function downloadSelectedRecords(kind, ids = [...selections[kind]]) {
     } finally { setOperation(""); }
     return;
   }
-  const query = new URLSearchParams({kind, ids: chosen.map(item => String(item.id)).join(","), date: localDateStamp()}).toString();
+  const extras=kind!=="theme" || document.querySelector(`[data-download-extras="${kind}"]`)?.checked===true;
+  const query = new URLSearchParams({kind, ids: chosen.map(item => String(item.id)).join(","), date: localDateStamp(),extras:extras?"1":"0"}).toString();
+  if(apiBase)await ensureWriteAccess();
   setOperation(`download-${kind}`);
   // Remote mode: the shared Worker streams a Stored ZIP directly from R2.
   // Nothing is pulled into JS memory and already-compressed fonts/RED files
@@ -4124,15 +4178,11 @@ async function downloadSelectedRecords(kind, ids = [...selections[kind]]) {
   if (apiBase && !remoteUnavailable) {
     operationMessage(output, `正在准备 ${chosen.length} 项批量下载…`);
     try {
-      const probe = await fetch(apiUrl(`/api/download?${query}&probe=1`), {headers: requestHeaders()});
-      let info = null;
-      try { info = await probe.json(); } catch {}
-      if (!probe.ok || !info?.ok) throw new Error(info?.error || `HTTP ${probe.status}`);
       const link = document.createElement("a");
-      link.href = apiUrl(`/api/download?${query}`);
+      link.href = assetUrl(`/api/download?${query}`);
       link.download = `reeden-${kind}-${localDateStamp()}.zip`;
       document.body.append(link); link.click(); link.remove();
-      operationMessage(output, `已发起批量下载：${info.count} 个文件由共享库直接打包，可在浏览器下载列表查看进度。`);
+      operationMessage(output, `已发起 ${chosen.length} 项下载${kind==="theme"&&!extras?"（仅压缩 RED）":""}，可在浏览器下载列表查看进度。`);
       toast(`已发起 ${chosen.length} 项批量下载`);
     } catch (error) {
       operationMessage(output, `批量下载失败：${error.message}`, true);
@@ -4148,7 +4198,7 @@ async function downloadSelectedRecords(kind, ids = [...selections[kind]]) {
     const entries = [], manifest = [], failures = [];
     let done = 0;
     await mapConcurrent(chosen, 2, async record => {
-      for (const file of downloadableFiles(kind, record)) {
+      for (const file of downloadableFiles(kind, record, document.querySelector(`[data-download-extras="${kind}"]`)?.checked === true || kind!=="theme")) {
         try {
           const bytes = await fetchDownloadableBytes(file.path);
           const name = `${kind}/${file.name.replace(/[\\/:*?"<>|]/g, "_")}`;
@@ -5107,14 +5157,16 @@ async function sameLocalFile(current,original) {
   const digest=async file=>new Uint8Array(await crypto.subtle.digest('SHA-256',await file.arrayBuffer()));
   const [a,b]=await Promise.all([digest(current),digest(original)]);return a.every((value,index)=>value===b[index]);
 }
-function openCleanupDialog(targets, summary) {
+function openCleanupDialog(targets, summary, options={}) {
   const dialog=$('#cleanupDialog');
   return new Promise(resolve=>{
     if(!dialog?.showModal){resolve({selected:[],bridge:null});return;}
+    dialog.onclose=()=>resolve({selected:[],bridge:null});
     const finish=value=>{dialog.close();resolve(value);};
+    $('#cleanupNote').textContent=options.note||'仅删除本机原件，云端已入库副本保留。';
     const render=()=>{
       const deletable=targets.filter(t=>t.deletable);
-      $('#cleanupList').innerHTML=targets.map((t,i)=>`<li class="${t.deletable?'':'is-locked'}"><label class="check-label"><input type="checkbox" data-cleanup-index="${i}" ${t.deletable?'checked':'disabled'}><span><strong>${escapeHtml(t.name)}</strong><small>${escapeHtml(formatBytes(t.size)+(t.deletable?'':' · 需要文件夹授权'))}</small></span></label></li>`).join('');
+      $('#cleanupList').innerHTML=targets.map((t,i)=>`<li class="${t.deletable?'':'is-locked'}"><label class="check-label"><input type="checkbox" data-cleanup-index="${i}" ${t.deletable?(options.checked===false?'':'checked'):'disabled'}><span><strong>${escapeHtml(t.name)}</strong><small>${escapeHtml(formatBytes(t.size)+(t.deletable?'':' · 需要文件夹授权'))}</small></span></label></li>`).join('');
       $('#cleanupDialogDescription').textContent=summary;
       const boxes=$$('#cleanupList input'),confirm=$('#cleanupConfirm'),all=$('#cleanupSelectAll');
       const count=()=>{const picked=boxes.filter(b=>b.checked&&!b.disabled).length;$('#cleanupSummary').textContent=`已选 ${picked} / 可删除 ${deletable.length}`;all.checked=!!deletable.length&&picked===deletable.length;all.disabled=!deletable.length;all.indeterminate=picked>0&&picked<deletable.length;$('#cleanupSelectAllLabel').textContent='全选';confirm.disabled=!!deletable.length&&!picked;confirm.textContent=deletable.length?`删除所选（${picked}）`:'知道了';};
@@ -5409,6 +5461,8 @@ $("#toggleThemeSelection").addEventListener("click", () => {
 $("#selectAllThemes").addEventListener("change", event => toggleAll("theme", event.target.checked));
 $("#selectAllFonts").addEventListener("change", event => toggleAll("font", event.target.checked));
 $("#selectAllAssets").addEventListener("change", event => toggleAll("asset", event.target.checked));
+$('#selectDuplicateImports').addEventListener('click',selectDuplicateImports);
+$('#removeSelectedImports').addEventListener('click',()=>removeImportItems().catch(error=>toast(error.message)));
 $("#commitSelectedThemes").addEventListener("click", () => commitSelection());
 $("#syncSelectedThemes").addEventListener("click", () => syncSelectedAssets("theme"));
 $("#syncSelectedFonts").addEventListener("click", () => syncSelectedAssets("font"));

@@ -1,0 +1,27 @@
+import assert from 'node:assert/strict';
+import {createRequire} from 'node:module';
+import {handle,__test} from '../pages/worker-api.js';
+import {MemoryR2} from './test-memory-r2.mjs';
+const codec=createRequire(import.meta.url)('../site/free_codec.js');
+const bucket=new MemoryR2(),origin='https://test.example',env={ASSETS:bucket,SYNC_WRITE_TOKEN:'test-token',ALLOWED_ORIGINS:origin};
+const auth={Origin:origin,Authorization:'Bearer test-token'};
+const call=(path,headers={})=>handle(new Request(origin+path,{headers:{...auth,...headers}}),env);
+const compressed=new TextEncoder().encode('red-bytes'.repeat(20000)),original=new Uint8Array(2000000),preview=new Uint8Array(100000);
+for(const [key,bytes]of [['compressed/theme.red',compressed],['originals/theme.red',original],['previews/theme.jpg',preview]])await bucket.put(key,bytes);
+const record={kind:'theme',id:'theme-test',name:'作者 - 作品v1.2',author:'作者',compressed_url:'/api/objects/compressed/theme.red',original_url:'/api/objects/originals/theme.red',preview_light_url:'/api/objects/previews/theme.jpg'};
+const raw=new TextEncoder().encode(JSON.stringify(record)),sha=await __test.digestHex(raw);await bucket.put('records/'+sha+'.json',raw);
+const single=await call('/api/objects/compressed/theme.red?download=1&name='+encodeURIComponent('作者 - 作品v1.2.red'));assert.equal(single.headers.get('Content-Length'),String(compressed.length));assert.equal(single.headers.get('Accept-Ranges'),'bytes');assert.ok(single.headers.get('Content-Disposition').includes(encodeURIComponent('作者 - 作品v1.2.red')));
+const part=await call('/api/objects/compressed/theme.red',{Range:'bytes=3-12'});assert.equal(part.status,206);assert.equal(part.headers.get('Content-Range'),`bytes 3-12/${compressed.length}`);assert.deepEqual(new Uint8Array(await part.arrayBuffer()),compressed.slice(3,13));
+const suffix=await call('/api/objects/compressed/theme.red',{Range:'bytes=-5'});assert.deepEqual(new Uint8Array(await suffix.arrayBuffer()),compressed.slice(-5));
+assert.equal((await call('/api/objects/compressed/theme.red',{Range:'bytes=9999999-'})).status,416);
+assert.equal((await call('/api/objects/compressed/theme.red',{'If-None-Match':single.headers.get('ETag')})).status,304);
+assert.equal((await call('/api/objects/compressed/theme.red',{Range:'bytes=3-12','If-Range':'"old"'})).status,200);
+const ticket=(await (await call('/api/session')).json()).ticket;
+let bytes=await (await handle(new Request(origin+'/api/download?kind=theme&ids=theme-test&access='+ticket),env)).arrayBuffer();
+const entries=await codec.readZipEntries(new Uint8Array(bytes),{standardZip:true});assert.deepEqual(entries.map(x=>x.name),['manifest.json','theme/作者 - 作品v1.2.red']);assert.deepEqual(entries[1].bytes,compressed);
+const full=await (await call('/api/download?kind=theme&ids=theme-test&extras=1')).arrayBuffer();const extras=await codec.readZipEntries(new Uint8Array(full),{standardZip:true});assert.equal(extras.length,4);assert.ok(full.byteLength>bytes.byteLength*10);
+assert.equal(__test.downloadEntries('theme',[{...record,name:'作品v1.2'}])[0].original_name,'作者 - 作品v1.2.red');
+// A large R2 body must remain unread until its local ZIP header has been emitted.
+let consumed=0;const previousGet=bucket.get.bind(bucket);bucket.get=async(key,opts)=>{const object=await previousGet(key,opts);if(key!=='compressed/theme.red')return object;return {...object,get body(){let index=0;return new ReadableStream({pull(c){if(index===compressed.length){c.close();return;}const end=Math.min(index+4096,compressed.length);consumed+=end-index;c.enqueue(compressed.slice(index,end));index=end;}});}};};
+const streaming=await call('/api/download?kind=theme&ids=theme-test'),reader=streaming.body.getReader();for(let i=0;i<4;i++)await reader.read();assert.ok(consumed<compressed.length,'ZIP must not buffer the full file before emitting its header');await reader.cancel();
+console.log(`PASS: author + title + version in ZIP names; signed private download; native Range/If-Range/304/length; opt-in originals; bounded streaming ZIP. Fixture bytes: ${bytes.byteLength} default vs ${full.byteLength} with extras.`);
