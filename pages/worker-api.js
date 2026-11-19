@@ -1127,8 +1127,9 @@ function safeTransferUrl(value) {
 async function pan123Request(token, path, {method = "POST", payload, params, fetchImpl = fetch} = {}) {
   const url = new URL(PAN123_API + path);
   for (const [key, value] of Object.entries(params || {})) url.searchParams.set(key, String(value));
-  const response = await fetchImpl(url.href, {
-    method, redirect: "manual",
+  let response;
+  try { response = await fetchImpl(url.href, {
+    method, redirect: "manual",signal:AbortSignal.timeout(20000),
     headers: {
       "User-Agent": "RedGarden/1.0 (123 web backup)", platform: "web", "app-version": "3",
       Origin: "https://yun.123pan.cn", Referer: "https://yun.123pan.cn/",
@@ -1136,12 +1137,12 @@ async function pan123Request(token, path, {method = "POST", payload, params, fet
       ...(payload === undefined ? {} : {"Content-Type": "application/json"}),
     },
     body: payload === undefined ? undefined : JSON.stringify(payload),
-  });
-  if (response.status === 401 || response.status === 403) throw new Error("123 登录已过期或被拒绝，请在存储设置重新填写会话 Token");
-  if (!response.ok) throw new Error(`123 请求失败（HTTP ${response.status}）`);
+  }); }catch(error){error.stage ||=path;throw error;}
+  if (response.status === 401 || response.status === 403) throw Object.assign(new Error("123 登录已过期或被拒绝，请在存储设置重新填写会话 Token"),{httpStatus:response.status,stage:path});
+  if (!response.ok) throw Object.assign(new Error(`123 请求失败（HTTP ${response.status}）`),{httpStatus:response.status,stage:path});
   let body;
   try { body = await response.json(); } catch { throw new Error("123 未返回有效接口数据"); }
-  if (!body || ![0, 200].includes(body.code)) throw new Error(`123 请求被拒绝（${body?.code ?? "unknown"}）`);
+  if (!body || ![0, 200].includes(body.code)) throw Object.assign(new Error(`123 请求被拒绝（${body?.code ?? "unknown"}）`),{httpStatus:response.status,platformCode:body?.code,stage:path});
   return body.data && typeof body.data === "object" ? body.data : {};
 }
 async function pan123Find(token, parent, name, fetchImpl) {
@@ -1303,23 +1304,49 @@ async function listPan123Backups(request, env, fetchImpl = fetch) {
       truncated: pages >= 10}, 200, request, env);
   } catch (error) { return json({ok: false, error: error?.message || "123 备份清单读取失败"}, 422, request, env); }
 }
+async function savePan123Result(env,source,result,error,md5) {
+  if(!source)return null;
+  return mutateLibraryIndex(env,async data=>{
+    const current=data.records.find(item=>item.kind==='theme'&&item.id===source.id);
+    if(!current||current.original_url!==source.original_url)return null;
+    const updated={...current,original_md5:md5,original_123:result||current.original_123||null,original_123_error:result||current.original_123?.key?'':error||'',updated_at:new Date().toISOString()};delete updated.record_sha256;
+    const bytes=new TextEncoder().encode(JSON.stringify(updated)),sha=await digestHex(bytes);
+    await env.ASSETS.put('records/'+sha+'.json',bytes,{httpMetadata:{contentType:'application/json'}});
+    updated.record_sha256=sha;data.records[data.records.indexOf(current)]=updated;return updated;
+  });
+}
 async function backupOriginalTo123(request, env, fetchImpl = fetch) {
   if (!originAllowed(request, env, {write: true})) return json({error: "Origin 不在允许列表中"}, 403, request, env);
   if (!checkWriteToken(request, env)) return json({error: "123 备份接口需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
-  let token, name, folder, etag;
+  let token, name, folder, etag,sourceRecord,bytes;
   try {
     token = pan123Token(request.headers.get("X-Pan123-Token"));
     name = headerText(request.headers.get("X-Pan123-Filename")).trim();
     const rawFolder = request.headers.get("X-Pan123-Folder");
     // An explicitly empty folder means the 123 root; an absent header uses
     // the conventional backup directory.
-    folder = rawFolder === null ? "Red-Garden-Backup" : String(rawFolder).trim().replace(/^\/+|\/+$/g, "");
+    folder = rawFolder === null ? "Red-Garden-Backup" : headerText(rawFolder).trim().replace(/^\/+|\/+$/g, "");
     etag = String(request.headers.get("X-Pan123-Etag") || "").toLowerCase();
   } catch (error) { return json({error: error.message}, 400, request, env); }
-  if (!name || name.length > 240 || name.includes("/") || name.includes("\\") || !/\.red$/i.test(name)) return json({error: "123 备份文件名无效"}, 400, request, env);
-  if (!/^[a-f0-9]{32}$/.test(etag)) return json({error: "123 备份缺少原包 MD5 校验值"}, 400, request, env);
-  const bytes = new Uint8Array(await request.arrayBuffer());
-  if (!bytes.length || bytes.length > maxUpload(env)) return json({error: "123 备份文件大小超出限制"}, 413, request, env);
+  if((request.headers.get('Content-Type')||'').includes('application/json')) {
+    let payload;try{payload=await request.json();}catch{throw problem(400,'备份请求不是有效 JSON');}
+    sourceRecord=(await latestLibraryRecords(env,'theme')).find(item=>item.id===payload.theme_id);
+    if(!sourceRecord)throw problem(404,'主题记录不存在');
+    const spec=downloadObjectSpec(sourceRecord.original_url);
+    if(!spec||!['originals','compressed'].includes(spec.kind))throw problem(400,'没有可用于备份的 R2 原包');
+    etag=sourceRecord.original_md5||etag;name=name||sourceRecord.source_name||redDownloadLabel(sourceRecord)+'.red';
+    if(!/^[a-f0-9]{32}$/.test(etag))throw problem(400,'旧记录缺少 MD5 校验，请先补齐校验再重试');
+    const object=await env.ASSETS.get(spec.key);if(!object)throw problem(404,'R2 原包不存在');
+    if(object.size>maxUpload(env))throw problem(413,'原包大小超出限制');
+    bytes=new Uint8Array(await new Response(object.body).arrayBuffer());
+  } else bytes=new Uint8Array(await request.arrayBuffer());
+  if (!name || name.length > 240 || name.includes('/') || name.includes('\\') || !/\.red$/i.test(name)) return json({error:'123 备份文件名无效'},400,request,env);
+  if(!/^[a-f0-9]{32}$/.test(etag))return json({error:'123 备份缺少原包 MD5 校验值'},400,request,env);
+  if(!bytes.length||bytes.length>maxUpload(env))return json({error:'123 备份文件大小超出限制'},413,request,env);
+  const reply=async(result,status=200)=>{
+    const item=await savePan123Result(env,sourceRecord,status===200?result:null,result.error,etag);
+    return json({...result,...(item?{item}:{})},status,request,env);
+  };
   try {
     const parent = await pan123Folder(token, folder, fetchImpl);
     const existing = await pan123Find(token, parent, name, fetchImpl);
@@ -1327,7 +1354,7 @@ async function backupOriginalTo123(request, env, fetchImpl = fetch) {
       if (Number(existing.Type) !== 0 || Number(existing.Size) !== bytes.length || String(existing.Etag || "").toLowerCase() !== etag) {
         throw new Error("123 备份目录已有同名但不同的文件，未覆盖");
       }
-      return json({ok: true, provider: "123pan", key: folder ? `${folder}/${name}` : name, fileId: String(existing.FileId), bytes: bytes.length, sha256: await digestHex(bytes), reused: true}, 200, request, env);
+      return reply({ok: true, provider: "123pan", key: folder ? `${folder}/${name}` : name, fileId: String(existing.FileId), bytes: bytes.length, sha256: await digestHex(bytes), reused: true});
     }
     const info = await pan123Request(token, "/file/upload_request", {fetchImpl, payload: {
       driveId: 0, duplicate: 0, etag, fileName: name, parentFileId: parent, size: bytes.length, type: 0,
@@ -1340,7 +1367,7 @@ async function backupOriginalTo123(request, env, fetchImpl = fetch) {
         const auth = await pan123Request(token, parts === 1 ? "/file/s3_upload_object/auth" : "/file/s3_repare_upload_parts_batch", {fetchImpl, payload: {...common, partNumberStart: number, partNumberEnd: number + 1}});
         const url = safeTransferUrl(auth?.presignedUrls?.[String(number)]);
         const chunk = bytes.subarray((number - 1) * PAN123_CHUNK, Math.min(bytes.length, number * PAN123_CHUNK));
-        const upload = await fetchImpl(url, {method: "PUT", body: chunk, redirect: "manual"});
+        const upload = await fetchImpl(url, {method: "PUT", body: chunk, redirect: "manual",signal:AbortSignal.timeout(90000)});
         if (!upload.ok) throw new Error(`123 分块上传失败（HTTP ${upload.status}）`);
       }
       await pan123Request(token, "/file/upload_complete/v2", {fetchImpl, payload: {...common, fileId: info.FileId, fileSize: bytes.length, isMultipart: parts > 1}});
@@ -1349,8 +1376,8 @@ async function backupOriginalTo123(request, env, fetchImpl = fetch) {
     if (!stored || Number(stored.Type) !== 0 || Number(stored.Size) !== bytes.length || String(stored.Etag || "").toLowerCase() !== etag) {
       throw new Error("123 尚未确认原包落盘，未记为成功；R2 副本仍在");
     }
-    return json({ok: true, provider: "123pan", key: folder ? `${folder}/${name}` : name, fileId: String(stored.FileId), bytes: bytes.length, sha256: await digestHex(bytes), reused: false}, 200, request, env);
-  } catch (error) { return json({error: error?.message || "123 备份失败"}, 422, request, env); }
+    return reply({ok: true, provider: "123pan", key: folder ? `${folder}/${name}` : name, fileId: String(stored.FileId), bytes: bytes.length, sha256: await digestHex(bytes), reused: false});
+  } catch (error) { return reply({error:error?.message||"123 备份失败",stage:error?.stage||"123-transfer",upstreamStatus:error?.httpStatus,platformCode:error?.platformCode},422); }
 }
 
 const LOCAL_PROCESSING_NOTICE = {
@@ -1443,6 +1470,10 @@ async function routeRequest(request, env) {
   if (url.pathname === "/api/storage/123/login" && request.method === "POST") return loginPan123(request, env);
   if (url.pathname === "/api/backup/123/verify" && request.method === "POST") return verifyPan123(request, env);
   if (url.pathname === "/api/backup/123/list" && request.method === "POST") return listPan123Backups(request, env);
+  if(url.pathname==='/api/backup/123/from-r2'&&request.method==='POST'){
+    if(!(request.headers.get('Content-Type')||'').includes('application/json'))return json({error:'此接口仅接受 R2 原包记录 JSON'},400,request,env);
+    return backupOriginalTo123(request,env);
+  }
   if (url.pathname === "/api/backup/123" && request.method === "POST") return backupOriginalTo123(request, env);
   const classificationUpdate = url.pathname.match(/^\/api\/(assets|themes|fonts)\/([^/]+)$/);
   if (classificationUpdate && request.method === "PATCH") {

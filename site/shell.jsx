@@ -43,7 +43,7 @@ export default function Shell() {
             <div className="drop-zone unified-drop-zone" id="unifiedDropZone" tabIndex="0" role="button" aria-label="拖入主题、字体或 SVG、HTML 文件">
               <span className="drop-icon">↓</span><strong id="unifiedDropTitle">把 ZIP、主题、字体或收藏文件拖到这里</strong><span>自动按后缀识别并分流</span><small>.zip · .red · .ttf · .otf · .woff · .woff2 · .svg · .html</small>
             </div>
-            <div className="ingest-actions unified-actions"><button className="primary-button" id="chooseUnifiedFiles" type="button">选择文件</button><button className="secondary-button" id="chooseUnifiedFolder" type="button">选择文件夹</button><label className="check-label queue-later-label"><input id="queueForLater" type="checkbox" /><span>后台暂存：先上传原文件到共享库，之后在任意设备打开可继续压缩入库</span></label><label className="check-label queue-later-label"><input id="localCleanupEnabled" type="checkbox" /><span>清理本地文件：选择文件夹时申请写入权限，上传成功后再问你要不要删掉本地副本</span></label></div>
+            <div className="ingest-actions unified-actions"><button className="primary-button" id="chooseUnifiedFiles" type="button">选择文件</button><button className="secondary-button" id="chooseUnifiedFolder" type="button">选择文件夹</button><label className="check-label queue-later-label"><input id="queueForLater" type="checkbox" /><span>后台暂存：先上传原文件到共享库，之后在任意设备打开可继续压缩入库</span></label><label className="check-label queue-later-label"><input id="localCleanupEnabled" type="checkbox" /><span>清理本地文件：选择文件夹时申请写入权限，上传成功后再问你要不要删掉本地副本</span></label><label className="check-label queue-later-label"><input id="backupTo123" type="checkbox" /><span>同时备份到 123（可选，需先连接）</span></label></div>
             <p className="field-help cleanup-hint" id="localCleanupHint"></p>
             <input id="unifiedInput" type="file" accept=".zip,.red,.ttf,.otf,.woff,.woff2,.svg,.html,.htm" multiple hidden /><input id="unifiedFolderInput" type="file" accept=".zip,.red,.ttf,.otf,.woff,.woff2,.svg,.html,.htm" webkitdirectory="" multiple hidden />
             <p className="operation-status" id="archiveImportStatus" role="status" hidden></p>
@@ -203,7 +203,7 @@ export default function Shell() {
                 <button className="secondary-button" id="verifyPan123Backup" type="button">测试连接</button>
                 <button className="secondary-button" id="listPan123Backup" type="button">查看备份清单</button>
                 <button className="secondary-button" id="verifyPan123Write" type="button">验证备份写入</button>
-                <button className="text-button" id="clearPan123Backup" type="button">关闭备份</button>
+                <Button id="retryPan123Backups" variant="outline">重试待备份</Button><button className="text-button" id="clearPan123Backup" type="button">关闭备份</button>
               </div>
               <p className="operation-status" id="pan123BackupStatus" role="status"></p>
               <div className="backup-inventory" id="pan123BackupList" aria-live="polite"></div>
