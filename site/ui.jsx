@@ -41,6 +41,8 @@ export function LibraryTools({kind, refreshId, children}) {
     <select className="catalog-select" data-library-sort={kind} aria-label="排序方式" defaultValue="added">
       <option value="added">最新入库</option><option value="oldest">最早入库</option><option value="recent">最近修改</option><option value="name">按名称</option><option value="size">按大小</option>
     </select>
+    <div className="density-toggle" id={`${kind}Density`} role="group" aria-label="排列方式"><button type="button" className="density-option is-active" data-catalog-density={kind} data-density="grid" aria-pressed="true">网格</button><button type="button" className="density-option" data-catalog-density={kind} data-density="list" aria-pressed="false">列表</button></div>
+    <Button id={`toggle${kind[0].toUpperCase()+kind.slice(1)}Selection`} data-catalog-selection={kind} variant="outline" aria-pressed="false">多选</Button>
     <Button id={refreshId} variant="outline" size="icon" aria-label="刷新资源库" title="刷新资源库"><RefreshCw size={16} aria-hidden="true" /></Button>
   </div>;
 }
@@ -50,5 +52,19 @@ export function LibraryPager({kind}) {
     <Button variant="outline" id={`${kind}PrevPage`}>上一页</Button>
     <span id={`${kind}PageInfo`} aria-live="polite"></span>
     <Button variant="outline" id={`${kind}NextPage`}>下一页</Button>
+    <form className="page-jump" data-page-jump={kind} noValidate><label htmlFor={`${kind}PageInput`}>跳至</label><Input id={`${kind}PageInput`} type="number" min="1" step="1" inputMode="numeric" aria-label="跳转页码" required /><span>页</span><Button variant="outline" type="submit">跳转</Button></form>
   </nav>;
+}
+
+export function LibraryBulk({kind}) {
+  const capital=kind[0].toUpperCase()+kind.slice(1),plural=kind==='asset'?'Assets':capital+'s';
+  return <div className="bulk-toolbar catalog-bulk" id={`${kind}Toolbar`} hidden>
+    <label className="select-label"><input type="checkbox" id={`selectAll${plural}`} />全选结果</label><span className="selection-count" id={`${kind}SelectedCount`}>已选 0 项</span>
+    <label className="select-label bundle-toggle"><input type="checkbox" data-bundle={kind} defaultChecked />打包成 ZIP</label>
+    {kind==='theme'&&<label className="select-label"><input type="checkbox" data-download-extras="theme" />附带原包与预览</label>}
+    <Button variant="outline" id={`downloadSelected${capital}`} disabled>下载所选</Button><Button variant="outline" id={`syncSelected${plural}`} disabled>同步所选</Button>
+    {kind==='theme'&&<Button variant="outline" id="bulkCategoryTheme" disabled>修改类别</Button>}
+    <Button variant="outline" data-bulk-tags={kind}>批量标签</Button><Button variant="destructive" id={`deleteSelected${capital}`} disabled>删除所选</Button><Button variant="ghost" data-clear-selection={kind} hidden>清空已选</Button>
+    <span className="catalog-selection-hint" id={`${kind}SelectionHint`} role="status" hidden>点击卡片选择，点右上角查看详情。</span><span className="bulk-status" id={`${kind}BatchStatus`} role="status"></span>
+  </div>;
 }

@@ -1,5 +1,5 @@
 import {BookOpen, PanelsTopLeft, Type, Bookmark, Upload, ListChecks, Settings, Ellipsis} from "lucide-react";
-import {Button, Input, LibrarySearch, LibraryTools, LibraryPager} from "./ui";
+import {Button, Input, LibrarySearch, LibraryTools, LibraryPager, LibraryBulk} from "./ui";
 
 export default function Shell() {
   return <>
@@ -13,7 +13,7 @@ export default function Shell() {
           <button type="button" className="nav-item" data-view="assets"><Bookmark size={17} aria-hidden="true" />收藏库</button>
           <button type="button" className="nav-item" data-view="import"><Upload size={17} aria-hidden="true" />导入文件</button>
           <button type="button" className="nav-item" data-view="jobs"><ListChecks size={17} aria-hidden="true" />后台任务 <span id="jobNavCount" className="nav-count" hidden></span></button>
-          <button type="button" className="nav-item" data-view="storage"><Settings size={17} aria-hidden="true" />存储设置</button>
+          <button type="button" className="nav-item" data-view="storage"><Settings size={17} aria-hidden="true" />设置</button>
         </nav>
         <div className="sidebar-footer">
           <span className="status-dot"></span>
@@ -119,12 +119,12 @@ export default function Shell() {
             <LibraryTools kind="theme" refreshId="refreshThemes">
               <select className="catalog-select" id="themeCategoryFilter" aria-label="按类别筛选主题"><option value="all">全部类别</option></select>
               <select className="catalog-select" id="themeAuthorFilter" aria-label="按作者筛选主题"><option value="all">全部作者</option></select>
-              <div className="density-toggle" id="themeDensity" role="group" aria-label="主题排列方式"><button type="button" className="density-option is-active" data-density="grid" aria-pressed="true">网格</button><button type="button" className="density-option" data-density="list" aria-pressed="false">列表</button></div>
+
             </LibraryTools>
             <p className="cache-info" data-cache-info></p>
             <p className="catalog-status" data-library-status="theme" role="status">正在读取主题…</p>
-            <div className="bulk-toolbar catalog-bulk" id="themeToolbar" hidden><Button id="toggleThemeSelection" variant="outline" aria-pressed="false">多选</Button><label className="select-label"><input type="checkbox" id="selectAllThemes" />全选结果</label><span className="selection-count" id="themeSelectedCount">已选 0 项</span><label className="select-label bundle-toggle"><input type="checkbox" data-bundle="theme" defaultChecked />打包成 ZIP</label><label className="select-label"><input type="checkbox" data-download-extras="theme" />附带原包与预览</label><button className="secondary-button" id="syncSelectedThemes" type="button" disabled>后台同步所选</button><button className="secondary-button" id="downloadSelectedTheme" type="button" disabled>下载所选</button><button className="secondary-button" id="bulkCategoryTheme" type="button" disabled>修改类别</button><button className="danger-button" id="deleteSelectedTheme" type="button" disabled>删除所选</button><Button variant="outline" data-bulk-tags="theme">批量标签</Button><Button variant="ghost" data-clear-selection="theme" hidden>清空已选</Button><span id="themeSelectionHint" role="status" hidden>点击卡片任意位置选择，点右上角查看详情。</span><span className="bulk-status" id="themeBatchStatus" role="status"></span></div>
-            <div id="themeList" className="theme-list"></div>
+            <LibraryBulk kind="theme" />
+            <div id="themeList" className="theme-list catalog-grid theme-list"></div>
             <LibraryPager kind="theme" />
             <div className="empty-state" id="themeEmpty" hidden>
               <h3>还没有已收录主题</h3>
@@ -137,11 +137,11 @@ export default function Shell() {
         <section className="view" id="fontsView" data-view-panel="fonts" hidden>
           <div className="title-row catalog-title"><div><h1 tabIndex={-1}>字体库</h1><p className="lede">通过样张挑选适合阅读的字体。</p></div><div className="title-meta"><span id="fontCount" aria-live="polite">正在读取…</span></div></div>
           <section className="font-area">
-            <LibrarySearch id="fontSearchInput" label="搜索字体" placeholder="搜索字体名称或文件名" />
-            <LibraryTools kind="font" refreshId="refreshFonts"><div className="font-filters" id="fontCategoryFilters" role="group" aria-label="字体分类"></div></LibraryTools>
+            <LibrarySearch id="fontSearchInput" label="搜索字体" placeholder="搜索字体、作者或标签" />
+            <LibraryTools kind="font" refreshId="refreshFonts"><select className="catalog-select" id="fontCategoryFilters" aria-label="字体分类"><option value="all">全部分类</option></select></LibraryTools>
             <p className="cache-info" data-cache-info></p>
             <p className="catalog-status" data-library-status="font" role="status">正在读取字体…</p>
-            <div className="bulk-toolbar catalog-bulk" id="fontToolbar" hidden><label className="select-label"><input type="checkbox" id="selectAllFonts" />全选结果</label><span className="selection-count" id="fontSelectedCount">已选 0 项</span><label className="select-label bundle-toggle"><input type="checkbox" data-bundle="font" defaultChecked />打包成 ZIP</label><button className="secondary-button" id="syncSelectedFonts" type="button" disabled>后台同步所选</button><button className="secondary-button" id="downloadSelectedFont" type="button" disabled>下载所选</button><button className="danger-button" id="deleteSelectedFont" type="button" disabled>删除所选</button><Button variant="outline" data-bulk-tags="font">批量标签</Button><Button variant="ghost" data-clear-selection="font" hidden>清空已选</Button><span className="bulk-status" id="fontBatchStatus" role="status"></span></div><div id="fontList" className="font-list"></div><LibraryPager kind="font" /><div className="empty-state" id="fontEmpty" hidden><h3>还没有字体</h3><p>从单个文件或文件夹开始建立字体索引。</p><Button variant="outline" data-library-empty="font">导入文件</Button></div>
+            <LibraryBulk kind="font" /><div id="fontList" className="theme-list catalog-grid font-list"></div><LibraryPager kind="font" /><div className="empty-state" id="fontEmpty" hidden><h3>还没有字体</h3><p>从单个文件或文件夹开始建立字体索引。</p><Button variant="outline" data-library-empty="font">导入文件</Button></div>
           </section>
         </section>
 
@@ -150,13 +150,13 @@ export default function Shell() {
           <section className="asset-area">
             <LibrarySearch id="assetSearchInput" label="搜索收藏" placeholder="搜索名称、作者或标签" />
             <LibraryTools kind="asset" refreshId="refreshAssets">
-              <div className="asset-filters" role="group" aria-label="收藏分类筛选"><button className="filter-chip is-active" type="button" data-asset-filter="all">全部</button><button className="filter-chip" type="button" data-asset-filter="ungrouped">未分组</button><button className="filter-chip" type="button" data-asset-filter="author">按作者</button><button className="filter-chip" type="button" data-asset-filter="style">按风格</button></div>
-              <Button variant="outline" id="addAssetButton">添加收藏</Button>
+              <select className="catalog-select" id="assetCategoryFilter" aria-label="收藏筛选"><option value="all">全部收藏</option><option value="ungrouped">未分类</option><option value="author">已填写作者</option><option value="style">已填写风格</option></select>
+
             </LibraryTools>
             <p className="cache-info" data-cache-info></p>
             <p className="catalog-status" data-library-status="asset" role="status">正在读取收藏…</p>
-            <div className="bulk-toolbar catalog-bulk" id="assetToolbar" hidden><label className="select-label"><input type="checkbox" id="selectAllAssets" />全选结果</label><span className="selection-count" id="assetSelectedCount">已选 0 项</span><label className="select-label bundle-toggle"><input type="checkbox" data-bundle="asset" defaultChecked />打包成 ZIP</label><button className="secondary-button" id="downloadSelectedAsset" type="button" disabled>下载所选</button><Button variant="outline" data-bulk-tags="asset">批量标签</Button><Button variant="ghost" data-clear-selection="asset" hidden>清空已选</Button><button className="danger-button" id="deleteSelectedAsset" type="button" disabled>删除所选</button><span className="bulk-status" id="assetBatchStatus" role="status"></span></div>
-            <div id="assetList" className="asset-list asset-library-list"></div>
+            <LibraryBulk kind="asset" />
+            <div id="assetList" className="theme-list catalog-grid asset-list"></div>
             <LibraryPager kind="asset" />
             <div className="empty-state" id="assetEmpty" hidden><h3>还没有收藏</h3><p>导入 SVG 或 HTML 文件开始。</p><Button variant="outline" data-library-empty="asset">导入文件</Button></div>
           </section>
@@ -169,59 +169,71 @@ export default function Shell() {
           <p className="operation-status" id="jobsStatus" role="status"></p><div id="jobList" className="job-list"></div><div className="empty-state" id="jobsEmpty"><h2>暂时没有后台任务</h2><p>确认主题或同步资产后，这里会显示进度和结果。</p></div>
         </section>
 
-        <section className="view" id="storageView" data-view-panel="storage" hidden>
-          <div className="title-row"><div><h1>存储设置</h1><p className="lede">压缩 RED、预览图和字体存入 R2；原始 RED 可另存到 123 云盘。</p></div><div className="title-meta"><span id="storageState">正在读取配置</span></div></div>
-          <section className="settings-grid">
-            <div className="settings-label"><h2>多设备访问</h2><p>GitHub Pages 等静态站点可以把界面连接到单独的同步 API。API 地址只保存在当前浏览器，不在仓库中保存密钥。</p></div>
-            <div className="settings-panel static-api-panel"><label>同步 API 地址<input id="apiBaseInput" type="url" inputMode="url" placeholder="https://red-garden-sync.pages.dev" autoComplete="off" spellCheck="false" /></label><label>私有库访问口令<input id="syncTokenInput" type="password" inputMode="text" placeholder="新设备请导入配置或填写口令" autoComplete="off" spellCheck="false" /></label><p className="field-help">Pages 版本连接私有共享库；填写相同同步地址的设备读取同一个 R2 库。此站无需在每台电脑填写 R2 Access Key。写入 Token 在当前浏览器自动保存；换设备可使用下方加密配置迁移。</p><div className="form-actions"><button className="secondary-button" id="saveApiBase" type="button">保存并连接</button><button className="secondary-button" id="testWriteAccess" type="button">检测写入权限</button><button className="text-button" id="clearApiBase" type="button">恢复默认连接</button></div><p className="operation-status" id="apiBaseStatus" role="status"></p></div>
-            <div className="settings-label"><h2>换设备，一次导入</h2><p>网页地址相同，浏览器里的凭据仍然各自独立。用加密文件迁移同步 Token 和可选的 123 会话，无需重复配置 R2。</p></div>
-            <form className="settings-panel" id="deviceTransferForm">
-              <label>迁移口令<input type="password" name="passphrase" minLength={8} autoComplete="new-password" placeholder="至少 8 位；导入时使用相同口令" required /></label>
-              <label className="check-label"><input type="checkbox" name="include123" /><span>导出时同时包含 123 登录会话（可选）</span></label>
-              <label>导入已加密的配置<input type="file" name="configFile" accept=".json" /></label>
-              <div className="form-actions"><Button type="submit" name="action" value="export" variant="outline">导出加密配置</Button><Button type="submit" name="action" value="import">导入并连接</Button><Button type="submit" value="cloud-save" variant="outline">保存云端密文</Button><Button type="submit" value="cloud-load" variant="outline">恢复云端配置</Button><Button type="submit" value="link" variant="ghost">生成设备接入链接</Button></div>
-              <label id="deviceLinkLabel" hidden>设备接入链接<Input id="deviceConnectLink" readOnly onFocus={event=>event.target.select()} /></label>
-              <p className="field-help">配置在本机用 AES-GCM 加密，文件、接入链接和云端只保存密文。请把迁移口令与接入链接分开传送。每个浏览器导入一次；123 仍可能因到期或平台风控要求重新登录。</p>
-              <p className="operation-status" id="deviceTransferStatus" role="status"></p>
-            </form>
-            <div className="settings-label"><h2>原始 RED 备份到 123 云盘</h2><p>可用账号密码或网页登录，将未压缩的 RED 原包额外备份到 123 云盘。登录会话保存在当前设备。</p></div>
-            <div className="settings-panel">
-              <form className="pan123-quick-login" id="pan123QuickLogin" autoComplete="off">
-                <div className="field-pair">
-                  <label>123 云盘账号<input name="username" autoComplete="username" autoCapitalize="none" spellCheck="false" placeholder="手机号或邮箱" required /></label>
-                  <label>登录密码<input name="password" type="password" autoComplete="current-password" spellCheck="false" required /></label>
-                </div>
-                <div className="form-actions">
-                  <button className="primary-button" type="submit" id="pan123QuickLoginButton">登录并连接</button>
-                  <button className="text-button" id="pan123WebLogin" type="button">改用网页登录</button>
-                </div>
-                <p className="field-help" id="pan123WebLoginHint">连接共享库时，浏览器直接登录 123 云盘。</p>
-              </form>
-              <label>备份目录<input id="pan123BackupFolder" type="text" spellCheck="false" defaultValue="Red-Garden-Backup" /></label>
-              <div className="form-actions">
-                <button className="secondary-button" id="savePan123Backup" type="button">保存备份设置</button>
-                <button className="secondary-button" id="verifyPan123Backup" type="button">测试连接</button>
-                <button className="secondary-button" id="listPan123Backup" type="button">查看备份清单</button>
-                <button className="secondary-button" id="verifyPan123Write" type="button">验证备份写入</button>
-                <Button id="retryPan123Backups" variant="outline">重试待备份</Button><button className="text-button" id="clearPan123Backup" type="button">关闭备份</button>
+        <section className="view settings-view" id="storageView" data-view-panel="storage" hidden>
+          <div className="title-row"><div><h1 tabIndex={-1}>设置</h1><p className="lede">管理资源库连接、备份和设备。</p></div><div className="title-meta"><span id="storageState">正在读取配置</span></div></div>
+          <div className="settings-stack">
+            <section className="settings-section">
+              <div className="settings-section-heading"><h2>资源库连接</h2><p id="storageDestination">主题、字体和收藏共用一个私有库。</p></div>
+              <div className="settings-content"><p className="operation-status" id="apiBaseStatus" role="status"></p>
+                <details className="settings-disclosure" id="connectionDetails"><summary>修改连接</summary><div className="settings-fields static-api-panel">
+                  <label>同步地址<Input id="apiBaseInput" type="url" inputMode="url" placeholder="https://red-garden-sync.pages.dev" autoComplete="off" spellCheck="false" /></label>
+                  <label>访问口令<Input id="syncTokenInput" type="password" placeholder="私有库的访问口令" autoComplete="off" spellCheck="false" /></label>
+                  <div className="form-actions"><Button id="saveApiBase">保存并连接</Button><Button id="clearApiBase" variant="ghost">恢复默认地址</Button></div>
+                </div></details>
               </div>
-              <p className="operation-status" id="pan123BackupStatus" role="status"></p>
-              <div className="backup-inventory" id="pan123BackupList" aria-live="polite"></div>
-              <details className="session-fallback" id="pan123TokenDetails"><summary>已有会话 Token？直接粘贴</summary><div className="session-fallback-content"><label>123 云盘会话 Token<input id="pan123BackupToken" type="password" autoComplete="off" spellCheck="false" placeholder="登录成功后自动填入，也可粘贴会话 Token" /></label><button className="secondary-button" id="pan123PasteToken" type="button">从剪贴板粘贴</button><p className="field-help" id="pan123PasteHint">在 123 网盘登录页复制过 Authorization 的 Bearer 值后，点这里直接填入并验证。</p></div></details>
-              <p className="field-help">需要先填写上方同步 API 地址与写入 Token。备份由同一个 Worker 代转，Token 不会写入仓库或 R2；留空时只保留 R2 原包。「测试连接」和「查看备份清单」只读，不创建任何文件或文件夹。「验证备份写入」会在备份目录下新建 <code>_verify/</code> 子目录并上传 1 个约 40 字节的 <code>reeden-backup-check.red</code> 测试文件（会保留在云盘），用来确认写入链路真的可用。</p>
-            </div>
-            <div className="settings-label"><h2>已有资产与存储地</h2><p>本地文件和已读取的云端清单分别计数。读取 R2 已有库后，新导入主题会与云端记录一起检查重复。</p><p className="settings-note" id="storageDestination">尚未连接云端存储。</p></div>
-            <div className="settings-panel"><div id="storageInventory" className="storage-inventory" aria-live="polite">正在读取本地资产…</div></div>
-            <div className="settings-label" id="r2SettingsLabel"><h2>Cloudflare R2</h2><p>一个私有 Bucket 存放主题文件、预览图、字体和库清单；普通主题可在设备本地压缩，加密主题会先在设备压缩明文图片，再由同步 Worker 认证重封。预览优先组合日间书架，有同模式启动图时一起展示，日间无可用资源才读取夜间。文件使用临时下载地址，Bucket 无需公开。</p><p className="settings-note" id="credentialState">尚未配置 R2 凭据。</p><p className="settings-note"><a className="download-link" href="https://dash.cloudflare.com/?to=/:account/r2/overview" target="_blank" rel="noreferrer">打开 Cloudflare R2 控制台</a></p><p className="settings-note"><a className="download-link" href="https://developers.cloudflare.com/r2/api/tokens/" target="_blank" rel="noreferrer">查看 R2 访问密钥说明</a></p></div>
-            <form className="settings-panel" id="storageForm" autoComplete="off">
+            </section>
+            <details className="settings-section settings-disclosure" id="deviceTransferDetails"><summary><span>连接其他设备<small>通过加密链接或文件迁移配置</small></span></summary>
+              <form className="settings-fields" id="deviceTransferForm">
+                <div className="density-toggle transfer-direction" role="group" aria-label="设备迁移方式"><Button variant="ghost" data-transfer-direction="export" aria-pressed="true">在新设备使用</Button><Button variant="ghost" data-transfer-direction="import" aria-pressed="false">导入已有配置</Button></div>
+                <label>迁移口令<Input type="password" name="passphrase" minLength={8} autoComplete="new-password" placeholder="至少 8 位；两台设备使用相同口令" required /></label>
+                <div data-transfer-panel="export"><label className="check-label"><input type="checkbox" name="include123" /><span>同时迁移 123 登录</span></label><div className="form-actions"><Button type="submit" value="link">生成接入链接</Button><Button type="submit" value="export" variant="outline">导出配置文件</Button></div></div>
+                <div data-transfer-panel="import" hidden><label id="deviceConfigFileLabel">加密配置文件<input type="file" name="configFile" accept=".json" /></label><div className="form-actions"><Button type="submit" value="import">导入并连接</Button></div></div>
+                <label id="deviceLinkLabel" hidden>接入链接<Input id="deviceConnectLink" readOnly onFocus={event=>event.target.select()} /></label>
+                <p className="field-help">请将迁移口令与链接或文件分开传送。</p>
+                <details className="settings-disclosure"><summary>云端配置副本</summary><p className="field-help">仅已连接的设备可用。新设备请使用链接或文件。</p><div className="form-actions"><Button type="submit" value="cloud-save" variant="outline">保存到云端</Button><Button type="submit" value="cloud-load" variant="outline">从云端恢复</Button></div></details>
+                <p className="operation-status" id="deviceTransferStatus" role="status"></p>
+              </form>
+            </details>
+            <section className="settings-section" id="pan123Settings">
+              <div className="settings-section-heading" id="pan123Label"><h2>123 云盘备份</h2><p>可选：额外备份原始 RED。</p><span id="pan123CredentialState" hidden></span></div>
+              <div className="settings-content" id="pan123Panel">
+                <label className="settings-switch" id="settings123ToggleRow"><span><strong>备份原始 RED</strong><small id="pan123SettingsSummary">已关闭</small></span><input id="settingsBackup123Enabled" type="checkbox" role="switch" /></label>
+                <div className="settings-fields" id="pan123BackupControls" hidden>
+                  <label>备份目录<Input id="pan123BackupFolder" spellCheck="false" defaultValue="Red-Garden-Backup" /></label>
+                  <div className="form-actions"><Button id="verifyPan123Backup" variant="outline">检查连接</Button><Button id="listPan123Backup" variant="outline">查看备份</Button><Button id="retryPan123Backups" variant="outline">重试待备份</Button></div>
+                  <p className="operation-status" id="pan123BackupStatus" role="status"></p><div className="backup-inventory" id="pan123BackupList" aria-live="polite"></div>
+                  <details className="settings-disclosure" id="pan123LoginDetails"><summary>连接或重新登录</summary><div className="settings-fields">
+                    <div className="qr-login"><Button id="startPan123Qr" variant="outline">扫码登录</Button><div className="qr-login-code" id="pan123QrCode" hidden><div className="qr-host" id="pan123QrHost"></div><Button id="stopPan123Qr" variant="ghost">取消扫码</Button></div><p className="operation-status" id="pan123QrStatus" role="status"></p></div>
+                    <div id="pan123BrowserLoginMethods"><details className="settings-disclosure"><summary>其他登录方式</summary><div className="settings-fields">
+                      <form id="pan123QuickLogin" autoComplete="off"><div className="field-pair"><label>账号<Input name="username" autoComplete="username" autoCapitalize="none" spellCheck="false" placeholder="手机号或邮箱" required /></label><label>密码<Input name="password" type="password" autoComplete="current-password" required /></label></div><div className="form-actions"><Button type="submit" id="pan123QuickLoginButton">登录</Button><Button id="pan123WebLogin" variant="ghost">网页登录</Button></div><p className="field-help" id="pan123WebLoginHint">遇到验证码时，请到官方网页完成验证。</p></form>
+                      <details className="settings-disclosure" id="pan123TokenDetails"><summary>使用已有会话</summary><div className="settings-fields"><label>会话 Token<Input id="pan123BackupToken" type="password" autoComplete="off" spellCheck="false" placeholder="填写 Bearer 后的内容" /></label><Button id="pan123PasteToken" variant="outline">从剪贴板粘贴</Button><p className="field-help" id="pan123PasteHint">填写后自动保存。</p></div></details>
+                    </div></details></div>
+                    <div id="pan123LocalLoginMethods" hidden><details className="session-fallback" id="pan123PasswordDetails"><summary>使用账号密码登录</summary><div className="session-fallback-content"><form id="pan123LoginForm" className="credential-form" autoComplete="off">
+                <div className="field-pair"><label>123 云盘账号<input name="username" autoComplete="off" autoCapitalize="none" spellCheck="false" required aria-describedby="pan123LoginHelp" /></label><label>登录密码<input name="password" type="password" autoComplete="new-password" spellCheck="false" required aria-describedby="pan123LoginHelp" /></label></div>
+
+                <div className="form-actions"><button className="secondary-button" type="submit">登录并保存会话</button></div>
+              </form></div></details>
+              <details className="session-fallback" id="pan123SessionDetails"><summary>登录需要验证码？使用已有会话</summary><div className="session-fallback-content"><form id="pan123SessionForm" className="credential-form" autoComplete="off"><label>会话 Token<input name="token" type="password" autoComplete="new-password" spellCheck="false" required aria-describedby="pan123TokenHelp" /></label><div className="form-actions"><button className="secondary-button" type="submit">保存会话</button></div></form></div></details>
+</div>
+                    <p className="operation-status" id="pan123Status" role="status"></p>
+                  </div></details>
+                  <details className="settings-disclosure"><summary>连接排查</summary><div className="settings-fields"><div className="form-actions"><Button id="verifyPan123Write" variant="outline">测试备份写入</Button><Button id="copyPan123Diagnostics" variant="outline">复制诊断</Button><a className="download-link" href="https://www.123pan.com/" target="_blank" rel="noreferrer">前往官方网页</a><Button id="clearPan123Backup" variant="ghost">断开连接</Button></div><p className="field-help">写入测试会在 _verify/ 中保留一个约 40 B 的测试文件。</p><pre id="pan123Diagnostics" className="diagnostic-output" hidden></pre><div id="pan123ProbeBlock" hidden><p className="field-help" id="pan123ProbeHelp"></p><Button id="probePan123" variant="outline">测试本机备份</Button></div></div></details>
+                </div>
+              </div>
+            </section>
+            <details className="settings-section settings-disclosure" id="maintenanceDetails"><summary><span>高级与维护<small>存储详情、手动同步和历史清理</small></span></summary><div className="settings-fields">
+              <div id="storageInventory" className="storage-inventory" aria-live="polite"></div>
+              <div className="form-actions"><Button id="pullStorage" variant="outline">刷新云端清单</Button><Button id="syncStorage" variant="outline">同步本地文件</Button></div><p className="operation-status" id="storageOperation" role="status"></p><div id="storageUnindexed" hidden></div>
+              <details className="settings-disclosure"><summary>清理历史文件</summary><p className="field-help">先核对再删除。正在使用或未满 7 天的文件会保留。</p><div className="form-actions"><Button id="maintenancePlan" variant="outline">检查可清理文件</Button><Button id="maintenanceDelete" variant="destructive" hidden>删除已核对文件</Button></div><p className="operation-status" id="maintenanceStatus" role="status"></p><pre id="maintenanceList" className="diagnostic-output"></pre></details>
+              <details className="settings-disclosure" id="localStorageSettings" hidden><summary>本机后端存储</summary><div id="r2SettingsLabel"><p id="credentialState"></p></div><form className="settings-panel" id="storageForm" autoComplete="off">
               <p className="operation-status" id="storageBusyNote" hidden>后台任务正在使用当前存储位置，完成后可修改配置。</p>
               <label>资产存储<select name="libraryProvider"><option value="local">仅本地文件夹</option><option value="cloudflare_r2">Cloudflare R2（S3 兼容）</option></select></label>
               <div id="r2Fields" className="storage-fields">
-                <div className="field-pair"><div className="field-group"><label>Cloudflare Account ID<input name="accountId" placeholder="32 位 Account ID" aria-describedby="accountIdHelp" spellCheck="false" /></label><p className="field-help" id="accountIdHelp">在 Cloudflare 控制台按 Ctrl + K，搜索 Copy account ID 并复制。<a className="download-link" href="https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/" target="_blank" rel="noreferrer">查看查找位置</a></p></div><div className="field-group"><label>Bucket 名称<input name="bucket" placeholder="你的 R2 Bucket 名称" aria-describedby="bucketHelp" spellCheck="false" /></label><p className="field-help" id="bucketHelp">R2 控制台 → Overview，复制已有存储桶的名称。</p></div></div>
-                <label>S3 Endpoint（可选）<input name="endpoint" type="url" placeholder="https://<ACCOUNT_ID>.r2.cloudflarestorage.com" aria-describedby="endpointHelp" spellCheck="false" /></label><p className="field-help" id="endpointHelp">普通 Bucket 留空即可，由 Account ID 自动生成。也可从 R2 Overview 或创建密钥完成页底部复制 S3 API 地址；特殊区域使用控制台给出的地址。</p>
-                <label>库目录前缀<input name="rootPath" placeholder="reeden-library" aria-describedby="rootPathHelp" spellCheck="false" /></label><p className="field-help" id="rootPathHelp">由你指定的库文件夹，默认 reeden-library。读取已有文件时填它们所在目录；若文件在 Bucket 根目录，留空。</p>
+                <div className="field-pair"><div className="field-group"><label>Cloudflare Account ID<input name="accountId" placeholder="32 位 Account ID" aria-describedby="accountIdHelp" spellCheck="false" /></label><p className="field-help" id="accountIdHelp">在 Cloudflare 控制台复制 Account ID。</p></div><div className="field-group"><label>Bucket 名称<input name="bucket" placeholder="你的 R2 Bucket 名称" aria-describedby="bucketHelp" spellCheck="false" /></label><p className="field-help" id="bucketHelp">填写已有存储桶的名称。</p></div></div>
+                <label>S3 Endpoint（可选）<input name="endpoint" type="url" placeholder="https://<ACCOUNT_ID>.r2.cloudflarestorage.com" aria-describedby="endpointHelp" spellCheck="false" /></label><p className="field-help" id="endpointHelp">普通 Bucket 留空即可。</p>
+                <label>库目录前缀<input name="rootPath" placeholder="reeden-library" aria-describedby="rootPathHelp" spellCheck="false" /></label><p className="field-help" id="rootPathHelp">默认 reeden-library；文件在根目录时留空。</p>
                 <div className="field-pair"><label>Access Key ID<input name="accessKeyId" type="password" autoComplete="off" spellCheck="false" aria-describedby="r2KeyHelp" /></label><label>Secret Access Key<input name="secretAccessKey" type="password" autoComplete="off" spellCheck="false" aria-describedby="r2KeyHelp" /></label></div>
-                <p className="field-help" id="r2KeyHelp">R2 Overview → API Tokens 旁的 Manage → 创建 Account 或 User API token。权限选 Object Read &amp; Write，仅授权此 Bucket；创建完成后分别复制 Access Key ID 和 Secret Access Key。Secret 只显示一次，丢失需创建新密钥。这里填写 R2 的 S3 密钥对，不填普通 Cloudflare API Token。密钥仅提交到本机后端，并由 Windows 当前用户加密保存；已有凭据时留空可保留。</p>
+                <p className="field-help" id="r2KeyHelp">使用 R2 的 S3 密钥对；已有凭据时留空保留。</p>
                 <label className="check-label"><input name="autoSync" type="checkbox" /><span>主题确认或字体导入后，自动同步到 R2</span></label>
               </div>
               <div className="archive-fields">
@@ -229,29 +241,15 @@ export default function Shell() {
                 <label>原始包存储<select name="archiveProvider"><option value="local">本地单独保存</option><option value="r2_library">R2 原包目录（复用上方连接）</option><option value="123pan">123 云盘（网页协议）</option><option value="123pan_webdav">旧配置：123 WebDAV（需自行提供服务）</option></select></label>
                 <label>备份目录<input name="archiveRootPath" placeholder="originals" spellCheck="false" aria-describedby="archiveHint" /></label>
                 <label id="archiveEndpointField" hidden>旧 WebDAV 服务地址<input name="archiveEndpoint" type="url" placeholder="https://你的-webdav-endpoint/" spellCheck="false" /></label>
-                <p className="field-help" id="archiveHint">原始 RED 保留在本机，切换到 R2 原包目录可直接上传云端。</p>
+                <p className="field-help" id="archiveHint">原始 RED 单独保存。</p>
                 <label className="check-label"><input name="cloudOnly" type="checkbox" aria-describedby="cloudOnlyHelp" /><span>上传核验后，清理本机处理副本</span></label>
-                <p className="field-help" id="cloudOnlyHelp">需启用 R2 资产存储，并将原包备份到 R2 或 123 云盘。文件上传、回读 SHA-256 核验及清单保存成功后，才清理应用内的原包、压缩包、预览和字体副本；失败会保留。你选择文件前所在的原始文件夹不会被删除。本机仍保留库索引。</p>
+                <p className="field-help" id="cloudOnlyHelp">上传并核验后清理应用内副本，原始文件夹不受影响。</p>
               </div>
               <div className="form-actions"><button className="primary-button" type="submit">保存配置</button><button className="secondary-button" id="testStorage" type="button">测试 R2 连接</button><button className="text-button" id="testArchive" type="button">测试归档连接</button></div>
               <p className="operation-status" id="configStatus" role="status">保存后请测试连接。</p>
-            </form>
-            <div className="settings-label" id="pan123Label" hidden><h2>连接 123 云盘</h2><p>123 云盘只备份原始 RED，压缩 RED、字体和预览仍使用上方的 R2。扫码确认后，登录会话由当前 Windows 用户加密保存。</p><p className="settings-note" id="pan123CredentialState">尚未保存 123 云盘会话。</p><p className="settings-note"><a className="download-link" href="https://www.123pan.com/" target="_blank" rel="noreferrer">打开 123 云盘</a></p></div>
-            <div className="settings-panel" id="pan123Panel" hidden>
-              <div className="qr-login"><h3>扫码登录</h3><p className="field-help">用123云盘App或微信扫码并确认。二维码按需生成，2 分钟内有效。</p><div className="form-actions"><button className="secondary-button" id="startPan123Qr" type="button">扫码连接</button></div><div className="qr-login-code" id="pan123QrCode" hidden><div className="qr-host" id="pan123QrHost"></div><button className="text-button" id="stopPan123Qr" type="button">取消扫码</button></div><p className="operation-status" id="pan123QrStatus" role="status"></p></div>
-              <details className="session-fallback" id="pan123PasswordDetails"><summary>使用账号密码登录</summary><div className="session-fallback-content"><form id="pan123LoginForm" className="credential-form" autoComplete="off">
-                <div className="field-pair"><label>123 云盘账号<input name="username" autoComplete="off" autoCapitalize="none" spellCheck="false" required aria-describedby="pan123LoginHelp" /></label><label>登录密码<input name="password" type="password" autoComplete="new-password" spellCheck="false" required aria-describedby="pan123LoginHelp" /></label></div>
-                <p className="field-help" id="pan123LoginHelp">仅提交给同步 Worker，密码用完即丢弃。账号与密码不会随“保存配置”提交；点击登录后会清空输入。</p>
-                <div className="form-actions"><button className="secondary-button" type="submit">登录并保存会话</button></div>
-              </form></div></details>
-              <details className="session-fallback" id="pan123SessionDetails"><summary>登录需要验证码？使用已有会话</summary><div className="session-fallback-content"><p className="field-help">在你自己的浏览器打开 123 云盘并登录。按 F12 → Network（网络），刷新文件列表，在发往 123 云盘的请求中查找 Authorization 请求头，只复制 Bearer 后的会话 Token。不要粘贴 Cookie 或完整请求。会话等同登录凭据，仅在此处提交给本机服务。</p><form id="pan123SessionForm" className="credential-form" autoComplete="off"><label>会话 Token<input name="token" type="password" autoComplete="new-password" spellCheck="false" required aria-describedby="pan123TokenHelp" /></label><p className="field-help" id="pan123TokenHelp">使用当前 Windows 用户加密保存。提交后清空输入，不会显示已保存的 Token。</p><div className="form-actions"><button className="secondary-button" type="submit">保存会话</button></div></form></div></details>
-              <div className="form-actions"><Button id="copyPan123Diagnostics" type="button" variant="outline">复制 123 诊断</Button><a className="download-link" href="https://www.123pan.com/" target="_blank" rel="noreferrer">前往官方网页完成验证</a></div><pre id="pan123Diagnostics" className="diagnostic-output" hidden></pre><p className="field-help">尚未开通开放平台时继续使用现有会话。遇到验证码请先在官方网页完成；云端无法代替本人验证。</p><p className="operation-status" id="pan123Status" role="status">先保存原始包存储和目录，再验证上传与回读。</p>
-              <div className="archive-probe" id="pan123ProbeBlock"><p className="field-help" id="pan123ProbeHelp">验证会在备份目录的 probes/ 下上传一个随机小文件，再下载并核验。测试目录和文件可能保留在云盘。</p><div className="form-actions"><button className="secondary-button" id="probePan123" type="button" aria-describedby="pan123ProbeHelp">上传测试文件并回读</button><button className="text-button" type="button" data-open-view="jobs">查看上传与恢复</button></div></div>
-              <p className="field-help">连接验证由同步 Worker 转发；文件压缩需要保持页面打开，中断后可从恢复入口继续。</p>
-            </div>
-            <div className="settings-label"><h2>历史文件清理</h2><p>先核对再删除。正在使用的文件和未满 7 天的文件会保留。</p></div><div className="settings-panel"><div className="form-actions"><Button id="maintenancePlan" type="button" variant="outline">生成核对清单</Button><Button id="maintenanceDelete" type="button" variant="destructive" hidden>删除清单中的旧文件</Button></div><p className="operation-status" id="maintenanceStatus" role="status"></p><pre id="maintenanceList" className="diagnostic-output"></pre></div><div className="settings-label"><h2>读取与同步</h2><p>读取已有库会合并主题名、作者、哈希和预览。没有库清单的已有文件会单独列出，不自动下载或覆盖。</p></div>
-            <div className="settings-panel"><div className="form-actions"><button className="secondary-button" id="pullStorage" type="button">读取 R2 已有库</button><button className="secondary-button" id="syncStorage" type="button">同步本地资产到 R2</button></div><p className="operation-status" id="storageOperation" role="status">尚未读取 R2 已有库。</p><div id="storageUnindexed" hidden></div></div>
-          </section>
+            </form></details>
+            </div></details>
+          </div>
         </section>
 
         <footer className="app-footer"><span>Red Garden · 设备本地处理 / R2 同步</span><span>资源用途依据 `.red` 内实际绑定判定</span></footer>
@@ -268,7 +266,7 @@ export default function Shell() {
     <div className="mobile-more" id="mobileMore" hidden>
       <p className="more-hint"><span id="moreRuntimeMode">本地处理模式</span></p>
       <button type="button" data-more-view="jobs">上传与恢复<span className="nav-count" id="moreJobCount" hidden></span></button>
-      <button type="button" data-more-view="storage">存储设置</button>
+      <button type="button" data-more-view="storage">设置</button>
       <button type="button" data-more-action="refresh">刷新当前库</button>
     </div>
 
@@ -287,7 +285,8 @@ export default function Shell() {
     </dialog>
     <dialog className="theme-dialog bulk-category-dialog" id="bulkCategoryDialog" aria-labelledby="bulkCategoryTitle"><div className="theme-dialog-head"><div><h2 id="bulkCategoryTitle">批量修改类别</h2><p id="bulkCategorySub"></p></div><button className="icon-button" id="closeBulkCategory" type="button" aria-label="关闭">×</button></div><div className="theme-dialog-body"><div className="bulk-category-mode" role="radiogroup" aria-label="处理方式"><label><input type="radio" name="bulkCategoryMode" defaultValue="add" defaultChecked /><span>添加类别（保留原有）</span></label><label><input type="radio" name="bulkCategoryMode" defaultValue="replace" /><span>替换为所选类别</span></label></div><div className="bulk-category-picks" id="bulkCategoryPicks"></div><div className="theme-category-add"><input id="bulkCategoryInput" type="text" maxLength="16" placeholder="新类别，例如 深色护眼" aria-label="新建主题类别" /><button className="text-button" id="bulkCategoryAdd" type="button">加入</button></div><p className="field-help">勾选要写入的类别，再点下面的按钮。选择「替换」时，原有分类会被覆盖，可以一个都不选来清空。</p><div className="modal-actions"><button className="secondary-button" id="bulkCategoryCancel" type="button">取消</button><button className="primary-button" id="bulkCategoryApply" type="button">应用到 0 个主题</button></div></div></dialog>
     <dialog className="preview-dialog" id="removeImportDialog" aria-labelledby="removeImportTitle"><div className="preview-dialog-head"><h2 id="removeImportTitle">移除待导入文件</h2><Button id="closeRemoveImport" variant="ghost" aria-label="关闭">×</Button></div><p id="removeImportDescription"></p><p className="field-help">选择移除方式；本地清理需要浏览器授权。ZIP 原包保留。</p><div className="modal-actions"><Button id="removeImportCancel" variant="outline">取消</Button><Button id="removeImportConfirm" variant="outline">仅移出列表</Button><Button id="removeImportWithLocal" variant="destructive">移除并清理本地</Button></div></dialog>
-    <dialog className="preview-dialog cleanup-dialog" id="cleanupDialog" aria-labelledby="cleanupDialogTitle" aria-describedby="cleanupDialogDescription"><div className="preview-dialog-head"><div><h2 id="cleanupDialogTitle">删除本地文件</h2><p className="preview-description" id="cleanupDialogDescription"></p></div><button className="icon-button" id="closeCleanupDialog" type="button" aria-label="关闭">×</button></div><div className="cleanup-toolbar"><label className="check-label"><input id="cleanupSelectAll" type="checkbox" defaultChecked /><span id="cleanupSelectAllLabel">全选</span></label><span id="cleanupSummary" role="status"></span></div><ul className="cleanup-list" id="cleanupList"></ul><p className="cleanup-note" id="cleanupNote" role="status">批量删除只需授权一次所在文件夹；删除前会核对每个文件的内容。</p><div className="modal-actions"><button className="secondary-button" id="cleanupCancel" type="button">保留文件</button><button className="primary-button" id="cleanupConfirm" type="button">删除所选</button></div></dialog>
+          <dialog className="preview-dialog record-dialog" id="recordDialog" aria-labelledby="recordDialogTitle"><div className="preview-dialog-head"><div><h2 id="recordDialogTitle"></h2><p className="preview-description" id="recordDialogDescription"></p></div><Button variant="ghost" id="closeRecordDialog" aria-label="关闭">×</Button></div><div id="recordDialogBody" className="record-dialog-body"></div></dialog>
+<dialog className="preview-dialog cleanup-dialog" id="cleanupDialog" aria-labelledby="cleanupDialogTitle" aria-describedby="cleanupDialogDescription"><div className="preview-dialog-head"><div><h2 id="cleanupDialogTitle">删除本地文件</h2><p className="preview-description" id="cleanupDialogDescription"></p></div><button className="icon-button" id="closeCleanupDialog" type="button" aria-label="关闭">×</button></div><div className="cleanup-toolbar"><label className="check-label"><input id="cleanupSelectAll" type="checkbox" defaultChecked /><span id="cleanupSelectAllLabel">全选</span></label><span id="cleanupSummary" role="status"></span></div><ul className="cleanup-list" id="cleanupList"></ul><p className="cleanup-note" id="cleanupNote" role="status">批量删除只需授权一次所在文件夹；删除前会核对每个文件的内容。</p><div className="modal-actions"><button className="secondary-button" id="cleanupCancel" type="button">保留文件</button><button className="primary-button" id="cleanupConfirm" type="button">删除所选</button></div></dialog>
     <div className="modal-backdrop" id="modalBackdrop" hidden><section className="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div className="modal-head"><div><h2 id="modalTitle">确认主题</h2><p id="modalSubtitle">查看候选后再保存。</p></div><button className="icon-button" id="closeModal" aria-label="关闭">×</button></div><div id="modalBody"></div></section></div>
   </>;
 }

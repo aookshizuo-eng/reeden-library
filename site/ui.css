@@ -112,9 +112,6 @@
 .theme-list.is-selecting .theme-card-hit { cursor: pointer; }
 .theme-card.is-selected { background: var(--accent-soft); }
 .theme-card.is-selected .theme-card-hit { outline: 2px solid var(--accent); outline-offset: -2px; }
-.catalog-bulk:not(.has-selection) > #toggleThemeSelection { display: inline-flex; }
-#toggleThemeSelection { min-height: 32px; height: 32px; font-size: 12px; }
-#themeSelectionHint { color: var(--muted); font-size: 12px; flex-basis: 100%; }
 .theme-dialog-body { scrollbar-width: thin; scrollbar-color: var(--control) transparent; }
 .theme-dialog input { caret-color: var(--accent); }
 @media (min-width: 681px) { .theme-card .item-select { position: relative; } }
@@ -144,3 +141,87 @@
 .transfer-track:has(progress:indeterminate)::after {content:"";position:absolute;inset:0 auto 0 0;width:28%;border-radius:inherit;background:var(--accent);animation:transfer-working 1.6s ease-in-out infinite alternate;}
 @keyframes transfer-working {from {transform:translateX(0);}to {transform:translateX(255%);}}
 @media(prefers-reduced-motion:reduce){.transfer-track:has(progress:indeterminate)::after {animation:none;}}
+
+/* One set of controls and card proportions for all three libraries. */
+.view .catalog-grid {grid-template-columns:repeat(auto-fill,minmax(228px,1fr));gap:20px 16px;align-items:start;}
+.catalog-grid .theme-card {overflow:hidden;display:block;padding:0;gap:0;}
+.catalog-grid .theme-preview {padding:0;min-height:0;position:relative;}
+.catalog-grid .theme-thumbnail,.catalog-grid .preview-empty {width:100%;height:auto;max-height:none;min-height:0;aspect-ratio:16/10;}
+.catalog-grid .font-preview-frame {margin:0;width:100%;height:100%;aspect-ratio:auto;border:0;border-radius:0;}
+.catalog-grid .font-preview-image {width:100%;height:100%;object-fit:contain;}
+.catalog-grid .asset-preview-button,.catalog-grid .asset-html-preview {width:100%;height:100%;min-height:0;max-height:none;aspect-ratio:auto;border:0;border-radius:0;padding:0;pointer-events:none;}
+.catalog-grid .asset-preview-button img {width:100%;height:100%;object-fit:contain;}
+.catalog-grid .theme-meta {justify-content:space-between;gap:8px;}
+.catalog-grid .theme-info .item-select {position:relative;inset:auto;filter:none;flex-shrink:0;}
+.view .catalog-grid.is-list {grid-template-columns:1fr;gap:12px;}
+.catalog-grid.is-list .theme-card {display:grid;grid-template-columns:168px minmax(0,1fr);gap:14px;align-items:center;padding:8px;}
+.catalog-grid.is-list .theme-thumbnail,.catalog-grid.is-list .preview-empty {aspect-ratio:3/2;border-radius:6px;}
+.catalog-bulk .catalog-selection-hint {flex-basis:100%;font-size:12px;color:var(--muted);}
+.library-tools [data-catalog-selection] {height:40px;}
+.pagination {flex-wrap:wrap;gap:10px;}
+.page-jump {display:flex;align-items:center;gap:7px;}
+.page-jump label {font-size:12px;color:var(--muted);}
+.page-jump input {width:66px;text-align:center;padding-inline:6px;}
+.page-jump input::-webkit-inner-spin-button {appearance:none;}
+.record-dialog {width:min(920px,calc(100vw - 32px));}
+.record-dialog-body {display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:24px;padding:20px;max-height:75dvh;overflow:auto;}
+.record-dialog-preview {min-width:0;}
+.record-dialog-preview .font-preview-frame {margin:0;aspect-ratio:4/3;}
+.record-dialog-preview .asset-preview-button,.record-dialog-preview .asset-html-preview {width:100%;height:360px;max-height:56dvh;}
+.record-dialog-preview .asset-preview-button img {object-fit:contain;width:100%;height:100%;}
+.record-dialog-fields {display:grid;gap:20px;align-content:start;min-width:0;}
+.record-dialog-fields form {display:grid;gap:13px;}
+.record-dialog-fields .asset-meta-form {border:0;margin:0;padding:0;}
+.record-dialog-fields input {height:40px;min-width:0;width:100%;border:1px solid var(--border);border-radius:7px;background:var(--surface);color:var(--text);font-size:13px;padding:0 10px;caret-color:var(--accent);}
+.record-dialog-fields label {display:grid;gap:6px;font-size:13px;}
+.record-detail-actions {display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
+.record-dialog-fields details {border-top:1px solid var(--border);padding-top:12px;}
+.record-dialog-fields details p {overflow-wrap:anywhere;}
+
+/* Settings are flat rows; secondary tasks reveal their own controls. */
+.settings-stack {max-width:960px;}
+.settings-stack [hidden] {display:none!important;}
+.settings-section {display:grid;grid-template-columns:200px minmax(0,1fr);gap:32px;padding:25px 0;border-bottom:1px solid var(--border);}
+.settings-section-heading h2 {font-size:15px;margin:0 0 7px;font-weight:600;}
+.settings-section-heading p {font-size:12px;color:var(--muted);line-height:1.6;margin:0;overflow-wrap:anywhere;}
+.settings-content,.settings-fields {display:grid;gap:14px;align-content:start;min-width:0;}
+.settings-fields label {display:grid;gap:7px;font-size:13px;}
+.settings-fields .check-label {display:flex;align-items:center;gap:8px;}
+.settings-fields input[type=file] {max-width:100%;font-size:13px;}
+.settings-section.settings-disclosure {display:block;}
+.settings-disclosure > summary {cursor:pointer;font-size:13px;font-weight:500;line-height:1.6;}
+.settings-disclosure > summary::marker {color:var(--muted);}
+.settings-disclosure > summary small {font-size:12px;color:var(--muted);font-weight:400;margin-left:18px;}
+.settings-section.settings-disclosure > summary {font-size:15px;font-weight:600;}
+.settings-disclosure > .settings-fields,.settings-disclosure > form {margin-top:16px;}
+.settings-section.settings-disclosure > .settings-fields,.settings-section.settings-disclosure > form {margin-left:232px;}
+.settings-switch {display:flex;justify-content:space-between;align-items:center;gap:18px;}
+.settings-switch strong {font-size:13px;font-weight:500;display:block;}
+.settings-switch small {display:block;font-size:12px;color:var(--muted);margin-top:4px;}
+.settings-switch input {appearance:none;width:36px;height:22px;flex-shrink:0;background:var(--border);border:1px solid var(--border);border-radius:20px;position:relative;cursor:pointer;}
+.settings-switch input::before {content:"";position:absolute;width:16px;height:16px;background:var(--surface);border-radius:50%;top:2px;left:2px;transition:transform .15s ease-out;}
+.settings-switch input:checked {background:var(--accent);border-color:var(--accent);}
+.settings-switch input:checked::before {transform:translateX(14px);}
+.settings-stack .form-actions {margin:0;gap:8px;flex-wrap:wrap;}
+.settings-stack .field-help {margin:0;font-size:12px;}
+.settings-stack .operation-status {margin:0;min-height:0;font-size:12px;overflow-wrap:anywhere;}
+.settings-stack .operation-status:empty,.settings-stack .backup-inventory:empty {display:none;}
+.settings-stack pre:empty {display:none;}
+.settings-stack .settings-panel {border:0;background:none;padding:16px 0;}
+.settings-stack .inventory-row {padding:8px 0;}
+.settings-stack .transfer-direction {width:max-content;max-width:100%;}
+.transfer-direction [aria-pressed=true] {background:var(--surface);color:var(--text);}
+.settings-stack #pan123BackupControls {border-top:1px solid var(--border);padding-top:16px;}
+@media(max-width:900px){.settings-section{grid-template-columns:170px minmax(0,1fr);gap:24px;}.settings-section.settings-disclosure > .settings-fields,.settings-section.settings-disclosure > form{margin-left:194px;}}
+@media(max-width:680px){
+  .view .catalog-grid {grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 10px;}
+  .catalog-grid.is-list .theme-card {grid-template-columns:110px minmax(0,1fr);gap:10px;}
+  .catalog-grid .theme-meta {flex-wrap:wrap;}
+  .page-jump {justify-content:center;}
+  .record-dialog-body {grid-template-columns:1fr;gap:16px;padding:16px;}
+  .record-dialog-preview .asset-preview-button,.record-dialog-preview .asset-html-preview {height:250px;}
+  .settings-section {grid-template-columns:1fr;gap:14px;padding:20px 0;}
+  .settings-section.settings-disclosure > .settings-fields,.settings-section.settings-disclosure > form {margin-left:0;}
+  .settings-disclosure > summary small {display:block;margin-left:16px;margin-top:3px;}
+  .settings-stack .form-actions > button {flex:0 1 auto;}
+}

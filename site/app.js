@@ -11,18 +11,20 @@ async function configCryptoKey(password, salt) {
   return crypto.subtle.deriveKey({name: "PBKDF2", salt, iterations: 210000, hash: "SHA-256"}, material, {name: "AES-GCM", length: 256}, false, ["encrypt", "decrypt"]);
 }
 let pendingConnectConfig;
+let connectionDirty=false;
+let connectionSaving=false;
 async function transferDeviceConfig(event) {
   event.preventDefault();
   const form = event.currentTarget, status = $("#deviceTransferStatus");
   const password = form.elements.passphrase.value;
   if (password.length < 8) { operationMessage(status, "请输入至少 8 位的迁移口令，两台设备使用相同口令。", true); return; }
-  const action = event.submitter?.value;
+  const action = event.submitter?.value||($('[data-transfer-direction][aria-pressed="true"]')?.dataset.transferDirection==='import'?'import':'link');
   const buttons = [...form.querySelectorAll("button")];
   buttons.forEach(button => { button.disabled = true; });
   try {
     if (["export","cloud-save","link"].includes(action)) {
       const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
-      const config = {apiBase, syncToken, pan123: form.elements.include123.checked ? pan123BackupConfig() : null};
+      const config = {apiBase, syncToken, pan123: form.elements.include123.checked ? pan123BackupConfig() : null,backup123Enabled:form.elements.include123.checked&&pan123BackupEnabled()};
       const key = await configCryptoKey(password, salt);
       const cipher = await crypto.subtle.encrypt({name: "AES-GCM", iv}, key, new TextEncoder().encode(JSON.stringify(config)));
       const file = {format: "reeden-device-v1", salt: base64Bytes(salt), iv: base64Bytes(iv), cipher: base64Bytes(new Uint8Array(cipher))};
@@ -54,20 +56,22 @@ async function transferDeviceConfig(event) {
       localStorage.setItem(SYNC_TOKEN_STORAGE_KEY, config.syncToken);
       if (config.pan123) {
         localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, normalizePan123Token(config.pan123.token));
+        setBackup123Enabled(config.backup123Enabled!==false);
         localStorage.setItem(PAN123_FOLDER_STORAGE_KEY, String(config.pan123.folder || "Red-Garden-Backup"));
       }
-      pendingConnectConfig=null; privateReadTicket="";
+      pendingConnectConfig=null; privateReadTicket="";connectionDirty=false;
       apiBase = base; syncToken = config.syncToken; remoteUnavailable = false; storageReady = false;
       state.storage = null; browserLibraryRecordsCache = undefined; jobsSnapshotAt = 0;
       state.themes = []; state.fonts = []; state.assets = []; state.jobs = [];
       const pan = pan123BackupConfig();
       $("#pan123BackupToken").value = pan.token; $("#pan123BackupFolder").value = pan.folder;
       updateRuntimeMode();
+      refreshSettingsControls();$('#connectionDetails').open=false;
       operationMessage(status, "配置已导入。正在读取这台设备的资源库；123 会话是否有效可单独测试。");
       await loadLibraryAfterConnection();
     }
   } catch (error) { operationMessage(status, error.message, true); }
-  finally { form.elements.passphrase.value = ""; buttons.forEach(button => { button.disabled = false; }); }
+  finally { form.elements.passphrase.value = ""; buttons.forEach(button => { button.disabled = false; });setTransferDirection($('[data-transfer-direction][aria-pressed="true"]')?.dataset.transferDirection||'import'); }
 }
 function normalizeApiBase(value) {
   const text = String(value || "").trim().replace(/\/+$/, "");
@@ -157,15 +161,15 @@ function updateRuntimeMode() {
   if (note) {
     note.hidden = !apiBase && !remoteUnavailable && !staticHostedWithoutApi();
     note.textContent = staticHostedWithoutApi()
-      ? "当前 APK/静态网页没有本机后端。请在“存储设置 → 多设备访问”填写 Cloudflare Worker 地址和同步 Token 后，手机与电脑才会共用 R2。"
+      ? "当前 APK/静态网页没有本机后端。请在“设置 → 资源库连接”填写 Cloudflare Worker 地址和同步 Token 后，手机与电脑才会共用 R2。"
       : remoteUnavailable
       ? (freeCodecReady() ? "同步 API 暂时不可用，已切换为本地浏览器处理模式。处理结果会在 API 恢复后同步；页面关闭会暂停本地任务。" : "同步 API 不可用；本地浏览器处理器尚未加载，未执行压缩或上传。请检查同步 API 地址与网络后重试；压缩本身在当前设备完成，不需要电脑。")
       : "当前为多设备同步模式：手机和电脑共用同一个 API 与 R2。压缩和重新封包在当前设备浏览器中进行，页面关闭后处理会暂停。";
   }
   const input = $("#apiBaseInput");
-  if (input && document.activeElement !== input) input.value = apiBase;
+  if (input && !connectionDirty && document.activeElement !== input) input.value = apiBase;
   const tokenInput = $("#syncTokenInput");
-  if (tokenInput && document.activeElement !== tokenInput) tokenInput.value = syncToken;
+  if (tokenInput && !connectionDirty && document.activeElement !== tokenInput) tokenInput.value = syncToken;
 }
 function markRemoteUnavailable(reason = "") {
   if (!apiBase) return;
@@ -174,7 +178,8 @@ function markRemoteUnavailable(reason = "") {
   const status = $("#apiBaseStatus");
   if (status && reason) operationMessage(status, `同步 API 不可用：${reason}。未执行压缩或上传。`, true);
 }
-function saveApiBaseSetting() {
+async function saveApiBaseSetting() {
+  if(connectionSaving)return;
   if (state.operation) { toast("请等待当前操作完成再切换连接"); return; }
   const input = $("#apiBaseInput");
   const value = String(input?.value || "").trim();
@@ -184,15 +189,14 @@ function saveApiBaseSetting() {
   }
   const oldBase = apiBase;
   if (!value && apiBase && location.hostname.endsWith(".pages.dev")) { operationMessage($("#apiBaseStatus"), "当前站点已内置 R2 接口，无需清除地址。", true); return; }
-  apiBase = normalizeApiBase(value);
-  syncToken = String($("#syncTokenInput")?.value || "").trim();
-  remoteUnavailable = false;
+  const nextBase=normalizeApiBase(value),nextToken=String($("#syncTokenInput")?.value || "").trim();
   try {
-    if (apiBase) localStorage.setItem(API_BASE_STORAGE_KEY, apiBase);
+    if (nextBase) localStorage.setItem(API_BASE_STORAGE_KEY, nextBase);
     else localStorage.removeItem(API_BASE_STORAGE_KEY);
-    if (apiBase && syncToken) localStorage.setItem(SYNC_TOKEN_STORAGE_KEY, syncToken);
+    if (nextBase && nextToken) localStorage.setItem(SYNC_TOKEN_STORAGE_KEY, nextToken);
     else localStorage.removeItem(SYNC_TOKEN_STORAGE_KEY);
   } catch { operationMessage($("#apiBaseStatus"), "浏览器未允许保存设置，关闭页面后配置可能丢失。请允许网站存储。", true); return; }
+  apiBase=nextBase;syncToken=nextToken;remoteUnavailable=false;connectionDirty=false;
   updateRuntimeMode();
   // 同步地址刚保存完，表单里没有待保存的改动，上传不该再被拦住。
   if ($("#storageForm").hidden) storageDirty = false;
@@ -205,7 +209,8 @@ function saveApiBaseSetting() {
     storageReady = false;
   }
   operationMessage($("#apiBaseStatus"), apiBase ? "已保存同步地址。正在读取共享库…" : "已清除同步地址，当前在本机浏览器内处理。");
-  loadLibraryAfterConnection({fromSave: true});
+  connectionSaving=true;$('#saveApiBase').disabled=true;
+  try{await loadLibraryAfterConnection({fromSave:true});}finally{connectionSaving=false;refreshSettingsControls();}
 }
 let libraryLoadGeneration = 0;
 let libraryStarted = false;
@@ -218,7 +223,6 @@ function librarySummary() {
 async function loadLibraryAfterConnection({fromSave = false} = {}) {
   const generation = ++libraryLoadGeneration;
   const remote = Boolean(apiBase);
-  const started = Date.now();
   const current = () => generation === libraryLoadGeneration;
   const status = (text, failed = false) => {
     if (remote) operationMessage($("#apiBaseStatus"), text, failed);
@@ -245,13 +249,13 @@ async function loadLibraryAfterConnection({fromSave = false} = {}) {
     if (state.activeView === "jobs" || activeJobs().length || (autoResumeQueueEnabled() && (!jobsSnapshotAt || Date.now() - jobsSnapshotAt > 300000))) await loadJobs();
     else renderJobs();
     if (!current()) return;
-    const seconds = ((Date.now() - started) / 1000).toFixed(1);
     const jobsFailed = Boolean($("#jobsStatus")?.classList.contains("is-error"));
     if (remote) {
-      status(`已连接共享库：${librarySummary()}（用时 ${seconds} 秒）。${jobsFailed ? "任务进度读取失败，请查看任务页提示。" : ""}`, jobsFailed);
+      status(`已连接共享库：${librarySummary()}。${jobsFailed ? "任务读取失败，请在任务页重试。" : ""}`, jobsFailed);
     } else {
       toast(`已读取本机库：${librarySummary()}`);
     }
+    refreshSettingsControls();
   } catch (error) {
     if (!current()) return;
     for (const kind of Object.keys(libraryKinds)) {
@@ -261,7 +265,7 @@ async function loadLibraryAfterConnection({fromSave = false} = {}) {
         $(`#${kind}Count`).textContent = "读取失败";
       }
     }
-    if (remote) status(`连接共享库失败：${error.message}`, true);
+    if (remote) {status(`连接共享库失败：${error.message}`, true);$('#connectionDetails').open=true;}
     else toast(`读取本机库失败：${error.message}`);
   }
 }
@@ -281,8 +285,8 @@ async function ensureWriteAccess() {
   if (response.status === 404) return true; // compatible with previous Worker
   const data = await response.json().catch(() => ({}));
   if (!response.ok || !data.canWrite) {
-    const message = syncToken ? "此设备的访问口令无效。请从已连接设备生成接入链接或导出加密配置。" : "此设备尚未连接私有库。请打开接入链接并输入迁移口令，或在存储设置导入加密配置。";
-    operationMessage($("#apiBaseStatus"), message, true);
+    const message = syncToken ? "此设备的访问口令无效。请从已连接设备生成接入链接或导出加密配置。" : "此设备尚未连接私有库。请打开接入链接并输入迁移口令，或在设置导入加密配置。";
+    operationMessage($("#apiBaseStatus"), message, true);$('#connectionDetails').open=true;
     toast(message);
     throw new Error(message);
   }
@@ -298,7 +302,7 @@ function requestHeaders(headers = {}) {
 }
 const THEME_PAGE_SIZE = 24;
 const state = { themes: [], fonts: [], assets: [], review: [], pending: [], jobs: [], activeView: "themes", themeDensity: "grid", importKind: "theme", themeSearch: "", themeAuthor: "all", themeCategory: "all", assetFilter: "all", assetSearch: "", fontSearch: "", fontFilter: "all", storage: null, operation: "", importFontIds: readSessionIds("reeden-import-fonts"), importThemeJobIds: readSessionIds("reeden-import-theme-jobs"), importAssetIds: readSessionIds("reeden-import-assets") };
-let themeSelectionMode = false;
+const selectionModes = {theme:false,font:false,asset:false};
 const selections = { review: new Set(), theme: new Set(), font: new Set(), asset: new Set() };
 // 本地服务模式下「确认上传」是提交后台任务；记住这批 job id，轮询回来时把
 // 进度写进用户眼前那条进度条，而不是让用户只看见一句「已加入后台」。
@@ -403,7 +407,7 @@ const LIBRARY_CACHE_TTL = 30 * 60 * 1000;
 let storageDirty = false;
 // /api/storage 至少成功读过一次。之前刷新完页面、配置还没读回来时，
 // browserSyncEnabled() 会是 false，于是上传被当成「本机后端」发到同步 Worker，
-// 直接 404 —— 用户只能手动再保存一次存储设置才恢复。这里记住读取状态，
+// 直接 404 —— 用户只能手动再保存一次设置才恢复。这里记住读取状态，
 // 需要判断同步模式时先等它回来。
 let storageReady = false;
 let storageReadyPromise = null;
@@ -494,7 +498,7 @@ function fetchWithReadTimeout(url, request, timeoutMs) {
 }
 async function api(path, options = {}) {
   if (staticHostedWithoutApi()) {
-    throw new Error("当前 APK/静态网页尚未连接同步服务；请到“存储设置 → 多设备访问”填写 Worker 地址和同步 Token");
+    throw new Error("当前 APK/静态网页尚未连接同步服务；请到“设置 → 资源库连接”填写 Worker 地址和同步 Token");
   }
   if (apiBase && remoteUnavailable) throw new Error("同步 API 不可用，未执行远程操作；请检查同步地址与网络后重试");
   const request = { ...options, headers: requestHeaders(options.headers || {}) };
@@ -529,7 +533,7 @@ async function api(path, options = {}) {
       throw new Error("当前设备缺少正确的写入 Token。请导入已有设备的加密配置或填写正确 Token；重复保存同一个错误 Token 不会恢复权限。");
     }
     if (response.status === 405) {
-      const message = "同步地址返回 405：请在“设置 → 多设备访问”填写 Cloudflare Worker 的 workers.dev 地址，而不是 GitHub Pages 网页地址或 Cloudflare 控制台地址；修改 Worker 后还要重新部署。";
+      const message = "同步地址返回 405：请在“设置 → 资源库连接”填写 Cloudflare Worker 的 workers.dev 地址，而不是 GitHub Pages 网页地址或 Cloudflare 控制台地址；修改 Worker 后还要重新部署。";
       if (apiBase) markRemoteUnavailable(message);
       throw new Error(message);
     }
@@ -1111,6 +1115,7 @@ async function verifyPan123Backup() {
     const nickname = String(info.Nickname || info.nickname || info.UserName || info.userName || "");
     localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, token);
     localStorage.setItem(PAN123_FOLDER_STORAGE_KEY, folder);
+    refreshSettingsControls();
     operationMessage(output, `已连接 123 云盘${nickname ? `（${nickname}）` : ""}，备份目录 ${folder}。会话已保存，无需每次登录。`);
     return true;
   } catch (error) {
@@ -1157,6 +1162,7 @@ async function acceptPan123Tokens(payload) {
   const input = $("#pan123BackupToken");
   if (input) input.value = tokens[0].token;
   try { localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, tokens[0].token); } catch {}
+  refreshSettingsControls();
 
   const source = String(tokens[0].source || "");
   operationMessage(output, source === "scan" || source === "password"
@@ -1166,7 +1172,6 @@ async function acceptPan123Tokens(payload) {
     if (index >= tokens.length) {
       // Keep the specific failure from verifyPan123Backup visible.
       return false;
-      return;
     }
     if (input) input.value = tokens[index].token;
     try { localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, tokens[index].token); } catch {}
@@ -2471,7 +2476,7 @@ function finishTransferProgress(message, failed = transferState.failed) {
 }
 function r2Enabled() { return browserSyncEnabled() || state.storage?.library?.provider === "cloudflare_r2"; }
 /**
- * 存储设置是否真的有「没保存的修改」。
+ * 设置是否真的有「没保存的修改」。
  * 浏览器同步模式下这张表单是隐藏的，它的字段根本不参与上传，
  * 这时残留的 storageDirty 不该再拦住上传（那正是「刷新后必须重新保存一次」的老毛病）。
  */
@@ -2503,6 +2508,7 @@ function bulkHint(button) {
   return hint;
 }
 function updateBulkControls() {
+  if(state.storage)refreshSettingsControls();
   const toolbars = [
     ["review", "selectAllReview", "reviewSelectedCount", "commitSelectedThemes"],
     ["theme", "selectAllThemes", "themeSelectedCount", "syncSelectedThemes"],
@@ -2537,9 +2543,9 @@ function updateBulkControls() {
       // 按钮不可用时必须把原因摆在明面上。
       const reason = state.operation ? "正在处理中，请等当前任务结束"
         : !storageReady ? "正在读取存储配置，请稍候…"
-        : storageSettingsPending() ? "存储设置有未保存的修改，先在「存储设置」保存再上传"
+        : storageSettingsPending() ? "设置有未保存的修改，先在「设置」保存再上传"
         : !syncCount ? (count ? "所选条目暂时不能上传，请重新勾选" : "先勾选要处理的条目，或点「全选」")
-        : (["theme", "font", "asset"].includes(kind) && !r2Enabled()) ? "未连接共享库，先在「存储设置」填写同步 API 地址"
+        : (["theme", "font", "asset"].includes(kind) && !r2Enabled()) ? "未连接共享库，先在「设置」填写同步 API 地址"
         : "";
       syncButton.title = reason;
       const hint = bulkHint(syncButton);
@@ -2552,21 +2558,22 @@ function updateBulkControls() {
     // Phones pin the bulk bar only while something is selected; otherwise it
     // would eat 96px at the top of every scroll for nothing.
     const bar = $("#" + kind + "Toolbar");
-    if (bar) bar.classList.toggle("has-selection", count > 0);
+    if (bar) bar.classList.toggle("has-selection", count > 0 || Boolean(selectionModes[kind]));
   });
-  const selectingThemes = themeSelectionMode || selections.theme.size > 0;
-  $("#themeList").classList.toggle("is-selecting", selectingThemes);
-  $("#toggleThemeSelection").textContent = selectingThemes ? "退出多选" : "多选";
-  $("#toggleThemeSelection").setAttribute("aria-pressed", String(selectingThemes));
-  $("#toggleThemeSelection").disabled = Boolean(state.operation);
-  $("#themeSelectionHint").hidden = !selectingThemes;
-  $$("#themeList [data-theme-open]").forEach(button => {
-    const theme = state.themes.find(item => String(item.id) === button.dataset.themeOpen);
-    const selected = selections.theme.has(button.dataset.themeOpen);
-    button.setAttribute("aria-label", selectingThemes ? `${selected ? "取消选择" : "选择"} ${themeIdentity(theme).title}` : `查看 ${themeIdentity(theme).title} 的详情`);
-    if (selectingThemes) button.setAttribute("aria-pressed", String(selected)); else button.removeAttribute("aria-pressed");
-  });
-  $$("#themeDialog form input, #themeDialog form button").forEach(input => { input.disabled = Boolean(state.operation); });
+  for(const kind of ['theme','font','asset']) {
+    const selecting=selectionModes[kind]||selections[kind].size>0;
+    $(`#${kind}List`).classList.toggle('is-selecting',selecting);
+    const toggle=$(`[data-catalog-selection="${kind}"]`);
+    toggle.textContent=selecting?'退出多选':'多选';toggle.setAttribute('aria-pressed',String(selecting));toggle.disabled=Boolean(state.operation);
+    $(`#${kind}SelectionHint`).hidden=!selecting;
+    $$(`#${kind}List .theme-card-hit`).forEach(button=>{
+      const id=button.dataset.themeOpen||button.dataset.recordId,record=state[kind+'s'].find(item=>String(item.id)===id);
+      const name=kind==='theme'?themeIdentity(record).title:(kind==='font'?record?.family:record?.name)||record?.file_name||'';
+      button.setAttribute('aria-label',selecting?`${selections[kind].has(id)?'取消选择':'选择'} ${name}`:`查看 ${name} 的详情`);
+      if(selecting)button.setAttribute('aria-pressed',String(selections[kind].has(id)));else button.removeAttribute('aria-pressed');
+    });
+  }
+  $$("#themeDialog form input, #themeDialog form button, #recordDialog form input, #recordDialog form button, #recordDialog [data-record-sync], #recordDialog [data-record-delete]").forEach(input => { input.disabled = Boolean(state.operation); });
   if($("#backupTo123"))$("#backupTo123").disabled=!!state.operation;
   if($("#retryPan123Backups"))$("#retryPan123Backups").disabled=!!state.operation||!state.themes.some(item=>item.original_url&&!item.original_123?.key);
   $("#selectDuplicateImports").disabled=![...state.review,...state.pending].some(item=>item.duplicateKind)||!!state.operation;
@@ -2603,10 +2610,10 @@ function updateBulkControls() {
   });
   $$(".sync-theme, .sync-font, .sync-asset").forEach(button => { const kind = button.classList.contains("sync-font") ? "font" : button.classList.contains("sync-asset") ? "asset" : "theme"; button.disabled = Boolean(state.operation) || !r2Enabled() || storageSettingsPending() || button.dataset.completed === "true" || isAssetBusy(kind, button.dataset.id); });
   $$(".delete-record").forEach(button => { const kind = button.dataset.kind; button.disabled = Boolean(state.operation) || isAssetBusy(kind, button.dataset.id); });
-  $$(".commit-theme, .discard-review, .rebuild-preview, #chooseThemes, #chooseThemeFolder, #indexThemeFolder, #addThemeButton, #chooseFonts, #chooseFontFolder, #chooseAssets, #chooseAssetFolder, #addAssetButton, #chooseUnifiedFiles, #chooseUnifiedFolder, #scanButton, #indexExistingCloud, #storageForm button[type='submit']").forEach(button => { button.disabled = Boolean(state.operation); });
+  $$(".commit-theme, .discard-review, .rebuild-preview, #chooseThemes, #chooseThemeFolder, #indexThemeFolder, #addThemeButton, #chooseFonts, #chooseFontFolder, #chooseAssets, #chooseAssetFolder, #chooseUnifiedFiles, #chooseUnifiedFolder, #scanButton, #indexExistingCloud, #storageForm button[type='submit']").forEach(button => { button.disabled = Boolean(state.operation); });
   $$(".rebuild-preview").forEach(button => { button.disabled = Boolean(state.operation) || isAssetBusy("theme", button.dataset.id); });
   $("#storageForm button[type='submit']").disabled = Boolean(state.operation) || activeJobs().length > 0;
-  $$(".commit-theme").forEach(button => { button.disabled = Boolean(state.operation) || storageSettingsPending(); button.title = storageSettingsPending() ? "请先保存存储设置" : ""; });
+  $$(".commit-theme").forEach(button => { button.disabled = Boolean(state.operation) || storageSettingsPending(); button.title = storageSettingsPending() ? "请先保存设置" : ""; });
   $$(".retry-job").forEach(button => { button.disabled = Boolean(state.operation) || activeJobs().some(job => (job.parent_id || job.retry_of) === button.dataset.retryJob); });
   $$(".drop-zone").forEach(zone => zone.setAttribute("aria-disabled", String(Boolean(state.operation))));
   updateStorageControls();
@@ -2621,7 +2628,7 @@ function toggleAll(kind, checked) {
   }
   updateBulkControls();
 }
-const viewNames = { import: "导入", themes: "主题库", fonts: "字体库", assets: "收藏库", jobs: "后台任务", storage: "存储设置" };
+const viewNames = { import: "导入", themes: "主题库", fonts: "字体库", assets: "收藏库", jobs: "后台任务", storage: "设置" };
 function setView(view, replace = false) {
   if (!Object.hasOwn(viewNames, view)) view = "themes";
   const changed = state.activeView !== view;
@@ -2636,7 +2643,7 @@ function setView(view, replace = false) {
     if (active) item.setAttribute("aria-current", "page");
     else item.removeAttribute("aria-current");
   });
-  // 底部 tab 只有五个入口，后台任务与存储设置归到「更多」。
+  // 底部 tab 只有五个入口，后台任务与设置归到「更多」。
   const tabFor = ["jobs", "storage"].includes(view) ? "more" : view;
   $$(".mobile-tabs .tab-item").forEach(item => {
     const active = item.dataset.tab === tabFor;
@@ -2710,7 +2717,8 @@ function renderFontFilters() {
   });
   const categories = fontCategoryOptions();
   if (state.fontFilter !== "all" && !categories.includes(state.fontFilter)) state.fontFilter = "all";
-  container.innerHTML = [`<button class="filter-chip font-filter-chip ${state.fontFilter === "all" ? "is-active" : ""}" type="button" data-font-filter="all" aria-pressed="${state.fontFilter === "all"}">全部 <span>${state.fonts.length}</span></button>`, ...categories.map(category => `<button class="filter-chip font-filter-chip ${state.fontFilter === category ? "is-active" : ""}" type="button" data-font-filter="${escapeHtml(category)}" aria-pressed="${state.fontFilter === category}" ${counts.get(category) ? "" : "disabled"}>${escapeHtml(category)} <span>${counts.get(category) || 0}</span></button>`)].join("");
+  container.innerHTML=`<option value="all">全部分类 (${state.fonts.length})</option>`+categories.filter(category=>counts.get(category)).map(category=>`<option value="${escapeHtml(category)}">${escapeHtml(category)} (${counts.get(category)})</option>`).join('');
+  container.value=state.fontFilter;
 }
 function fontClassificationEditor(font) {
   const style = fontCategory(font);
@@ -2727,14 +2735,16 @@ function fontPreviewMarkup(font) {
   return `<div class="font-preview-frame" data-font-id="${escapeHtml(font.id || "")}">${image}${specimen}</div>`;
 }
 function loadFontPreviewFace(font) {
+  if(!font?.id)return;
   const url = assetUrl(font?.view_url || font?.url);
-  if (!url || !font?.id || loadedFontFaces.has(font.id) || typeof FontFace === "undefined") return;
+  const apply=()=>$$(`[data-font-preview-id="${CSS.escape(font.id)}"]`).forEach(specimen=>{specimen.style.fontFamily=`font-${font.id}, sans-serif`;});
+  if(loadedFontFaces.has(font.id)){apply();return;}
+  if (!url || !font?.id || typeof FontFace === "undefined") return;
   const face = new FontFace(`font-${font.id}`, `url(${JSON.stringify(url)})`);
   face.load().then(loaded => {
     document.fonts.add(loaded);
     loadedFontFaces.add(font.id);
-    const specimen = $(`[data-font-preview-id="${CSS.escape(font.id)}"]`);
-    if (specimen) specimen.style.fontFamily = `font-${font.id}, sans-serif`;
+    apply();
   }).catch(() => {});
 }
 function recoverFontPreviewImage(image) {
@@ -2747,6 +2757,7 @@ function recoverFontPreviewImage(image) {
   if (font) loadFontPreviewFace(font);
 }
 function fontCard(font, imported = false) {
+  if(!imported)return libraryRecordCard('font',font,fontPreviewMarkup(font),font.author||(font.extension||'font').toUpperCase());
   const name = font.family || font.file_name || "未命名字体";
   const category = fontCategory(font);
   const selection = imported ? "" : selectInput("font", font.id, `字体 ${name}`, isAssetBusy("font", font.id));
@@ -3175,6 +3186,7 @@ function catalogPage(kind) {
   $(`#${kind}PageInfo`).textContent = `第 ${page} / ${pageCount} 页 · 共 ${visible.length} 项`;
   $(`#${kind}PrevPage`).disabled = page <= 1;
   $(`#${kind}NextPage`).disabled = page >= pageCount;
+  const jump=$(`#${kind}PageInput`);jump.max=String(pageCount);jump.value=String(page);jump.setCustomValidity('');
   return visible.slice((page - 1) * THEME_PAGE_SIZE, page * THEME_PAGE_SIZE);
 }
 async function refreshCatalog(kind) {
@@ -3214,7 +3226,7 @@ function renderThemes() {
   $$('#themeList [data-theme-open]').forEach(button => button.addEventListener('click', event => {
     const id = button.dataset.themeOpen;
     if (state.operation || isAssetBusy('theme', id)) { toast('请等待当前任务完成'); return; }
-    if (themeSelectionMode || selections.theme.size || event.ctrlKey || event.metaKey) {
+    if (selectionModes.theme || selections.theme.size || event.ctrlKey || event.metaKey) {
       if (selections.theme.has(id)) selections.theme.delete(id); else selections.theme.add(id);
       updateBulkControls();
     } else openThemeDialog(id);
@@ -3273,7 +3285,7 @@ async function commitSelection() {
   if (state.operation) { toast("正在处理中，请等当前任务结束后再试"); return; }
   await whenStorageReady();
   try { await ensureWriteAccess(); } catch { return; }
-  if (storageSettingsPending()) { toast("存储设置有未保存的修改，请先在「存储设置」保存后再上传"); return; }
+  if (storageSettingsPending()) { toast("设置有未保存的修改，请先在「设置」保存后再上传"); return; }
   const themeIds = state.review.filter(item => selections.review.has(item.staging_id)).map(item => item.staging_id);
   const chosen = state.pending.filter(item => selections.review.has(item.id));
   if (!themeIds.length && !chosen.length) { toast("请先勾选要处理的条目，或点「全选」"); return; }
@@ -3377,7 +3389,7 @@ function renderReview() {
     const privateNote = info.container_format === "red_private_v2"
       ? (browserPrivateCompressionEnabled()
         ? `<p class="review-meta">加密主题：图片会在当前设备压缩，再由同步 Worker 认证清单、更新资源哈希并重新封包。</p>`
-        : `<p class="review-meta">加密主题：先在「存储设置」填好同步 API 地址与 Token，图片就会在当前设备压缩，再由 Worker 认证清单、更新资源哈希并重新封包；未配置时只保存原包。</p>`)
+        : `<p class="review-meta">加密主题：先在「设置」填好同步 API 地址与 Token，图片就会在当前设备压缩，再由 Worker 认证清单、更新资源哈希并重新封包；未配置时只保存原包。</p>`)
       : "";
     return `<article class="review-card" data-review-id="${escapeHtml(item.staging_id)}"><div class="review-top"><div><label class="item-heading">${selectInput("review", item.staging_id, `待确认主题 ${info.name || info.source_name}`)}<span class="review-title">${escapeHtml(info.name || info.source_name)}</span></label><div class="review-meta">${escapeHtml(info.author || "作者未记录")} · ${formatBytes(info.bytes)} · ${escapeHtml(info.source_name)}</div></div><span class="badge ${duplicate ? "" : "is-good"}">${duplicate ? (item.duplicateKind==="exact"?"内容完全相同":`疑似重复 ${item.duplicates.length}`) : "未发现同名作者"}</span></div>${privateNote}${duplicate ? `<div class="duplicate-note">${item.duplicateKind==="exact"?"SHA-256 相同，可移除重复导入项。":"库中或本批有同名作者主题，可能为不同版本，请核对。"}</div><div class="duplicate-thumbs">${duplicateThumbs}</div>` : ""}<div class="duplicate-thumbs"><div class="thumb-label">${previewImage(preview.url, `待审核主题${preview.label} · ${previewKind(info.preview_details)}`, "thumb", info.preview_details)}<span>新主题 · ${preview.label}</span><span>${escapeHtml(previewKind(info.preview_details))} · 点击放大</span></div></div>${item.commitError ? `<p class="inline-error">${escapeHtml(item.commitError)}</p>` : ""}<div class="review-actions"><button class="primary-button commit-theme" data-id="${escapeHtml(item.staging_id)}">${privateTheme ? "确认并保存原包（配好同步后可压缩）" : "确认并压缩保存"}${autoSyncEnabled() ? "并后台同步" : "（后台处理）"}</button><button class="secondary-button discard-review" data-id="${escapeHtml(item.staging_id)}">暂不处理</button></div></article>`;
   }).join("");
@@ -3405,7 +3417,7 @@ function renderFonts() {
 function fontMatchesSearch(font) {
   const needle = String(state.fontSearch || "").trim().toLocaleLowerCase("zh-CN");
   if (!needle) return true;
-  return [font.family, font.file_name]
+  return [font.family,font.name,font.file_name,font.author,fontCategory(font),...recordTags(font)]
     .some(value => String(value || "").toLocaleLowerCase("zh-CN").includes(needle));
 }
 function fontMatchesCategory(font) {
@@ -3432,7 +3444,29 @@ function assetPreview(asset, compact = false) {
   // allowing CSS and markup to render for a useful thumbnail.
   return `<iframe class="asset-html-preview ${compact ? "is-compact" : ""}" title="${escapeHtml(asset.name || asset.file_name || "HTML")} 预览" src="${escapeHtml(url)}" sandbox="" loading="lazy"></iframe>`;
 }
+function libraryRecordCard(kind,record,preview,caption) {
+  const name=(kind==='font'?record.family:record.name)||record.name||record.file_name||'未命名',tags=recordTags(record),id=escapeHtml(record.id);
+  return `<article class="theme-card catalog-card ${kind}-card" data-record-card="${kind}" data-${kind}-id="${id}">
+    <button class="theme-card-hit" type="button" data-record-open="${kind}" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情"></button>
+    <div class="theme-preview"><div class="theme-thumbnail catalog-${kind}-preview">${preview}</div><span class="preview-caption">${escapeHtml(caption)}</span><button class="theme-more" type="button" data-record-details="${kind}" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情">⋯</button></div>
+    <div class="theme-info">${isNewArrival(record)?'<span class="arrival-label">新入库</span>':''}<div class="item-heading">${selectInput(kind,record.id,name,isAssetBusy(kind,record.id))}<h3 class="theme-title">${escapeHtml(name)}</h3></div><div class="theme-meta"><span class="theme-categories">${[...(kind==='font'?[fontCategory(record)]:record.style?[record.style]:[]),...tags.slice(0,2)].map(tag=>`<em>${escapeHtml(tag)}</em>`).join('')}</span><span>${formatBytes(record.bytes)}</span></div>${record.sync_error?`<p class="inline-error">${escapeHtml(typeof record.sync_error==='string'?record.sync_error:Object.values(record.sync_error).join('；'))}</p>`:''}</div>
+  </article>`;
+}
+function openRecordDialog(kind,id) {
+  const record=state[kind+'s'].find(item=>String(item.id)===String(id));if(!record)return;
+  const name=(kind==='font'?record.family:record.name)||record.name||record.file_name||'未命名',dialog=$('#recordDialog'),body=$('#recordDialogBody'),font=kind==='font';
+  $('#recordDialogTitle').textContent=name;
+  $('#recordDialogDescription').textContent=`${font?'字体':assetTypeLabel(record)} · ${formatBytes(record.bytes)} · ${syncLabel(record)}`;
+  const url=downloadUrl(record.download_url||record.object_url||record.url||'',record.file_name||name);
+  body.innerHTML=`<div class="record-dialog-preview">${font?fontPreviewMarkup(record):assetPreview(record)}</div><div class="record-dialog-fields"><form class="asset-meta-form" data-record-form="${escapeHtml(record.id)}" data-record-kind="${kind}">${font?'':`<label>作者<input name="author" value="${escapeHtml(record.author||'')}" /></label>`}<label>${font?'分类':'风格'}<input name="style" value="${escapeHtml(font?fontCategory(record):record.style||'')}" /></label><label>标签<input name="tags" value="${escapeHtml(recordTags(record).join(', '))}" placeholder="用逗号分隔" /></label><button class="secondary-button" type="submit">保存分类</button></form><div class="record-detail-actions">${url?`<a class="primary-button" href="${escapeHtml(url)}" download="${escapeHtml(record.file_name||name)}">${font?'下载字体':'下载文件'}</a>`:''}${savedToCloud(record)?'':`<button class="secondary-button" data-record-sync>同步到 R2</button>`}<button class="text-button danger-text" data-record-delete>删除</button></div><details><summary>文件信息</summary><p class="field-help">${escapeHtml(record.file_name||'')}<br>SHA ${escapeHtml(record.sha256||'未记录')}</p>${record.cleanup_warning?`<p class="inline-error">${escapeHtml(typeof record.cleanup_warning==='string'?record.cleanup_warning:Object.values(record.cleanup_warning).join('；'))}</p>`:''}</details></div>`;
+  const sync=$('[data-record-sync]',body);if(sync)sync.onclick=async()=>{sync.disabled=true;try{await(font?syncFont(id):syncAsset(id));openRecordDialog(kind,id);}finally{sync.disabled=false;}};
+  $('[data-record-delete]',body).onclick=async()=>{await deleteSelectedRecords(kind,[id]);if(!state[kind+'s'].some(item=>String(item.id)===String(id)))dialog.close();};
+  if(font){$$('.font-preview-image',body).forEach(image=>{image.addEventListener('error',()=>recoverFontPreviewImage(image),{once:true});if(image.complete&&image.naturalWidth===0)recoverFontPreviewImage(image);});if(!record.preview_url)loadFontPreviewFace(record);}
+  if(!dialog.open)dialog.showModal();
+  updateBulkControls();
+}
 function assetCard(asset, imported = false) {
+  if(!imported)return libraryRecordCard('asset',asset,assetPreview(asset,true),asset.author||assetTypeLabel(asset));
   const author = String(asset.author || "").trim();
   const style = String(asset.style || "").trim();
   const tags = Array.isArray(asset.tags) ? asset.tags.filter(Boolean) : [];
@@ -3452,11 +3486,7 @@ function renderAssets() {
   const list = $("#assetList");
   const visible = catalogPage("asset");
   list.innerHTML = visible.map(asset => assetCard(asset)).join("");
-  $$(".asset-filters .filter-chip").forEach(button => {
-    const active = button.dataset.assetFilter === state.assetFilter;
-    button.classList.toggle("is-active", active);
-    button.setAttribute("aria-pressed", String(active));
-  });
+  $('#assetCategoryFilter').value=state.assetFilter;
   $$(".sync-asset").forEach(button => button.addEventListener("click", () => syncAsset(button.dataset.id)));
   $$(".delete-record[data-kind='asset']").forEach(button => button.addEventListener("click", () => deleteSelectedRecords("asset", [button.dataset.id])));
   updateBulkControls();
@@ -3817,28 +3847,47 @@ async function fetchStorage() {
 /**
  * 等存储配置读回来再决定走哪条上传链路。
  * 刷新后立刻点上传时，旧逻辑会误判成「本机后端模式」把请求发给同步 Worker，
- * 结果是 404，用户只能再手动保存一次存储设置。
+ * 结果是 404，用户只能再手动保存一次设置。
  */
 function whenStorageReady() {
   if (storageReady) return Promise.resolve();
   return loadStorage();
 }
+function setBackup123Enabled(enabled) {
+  localStorage.setItem('reeden-backup-123-enabled',enabled?'on':'off');
+  if(!enabled)stopPan123Qr();
+  $('#backupTo123').checked=enabled;refreshSettingsControls();
+}
+function refreshSettingsControls() {
+  const browser=state.storage?.mode==='browser-local',config=pan123BackupConfig();
+  const enabled=browser?$('#backupTo123').checked:state.storage?.archive?.provider==='123pan';
+  $('#settingsBackup123Enabled').checked=enabled;$('#settingsBackup123Enabled').disabled=Boolean(state.operation);
+  $('#settings123ToggleRow').hidden=!browser;$('#pan123BackupControls').hidden=!enabled;
+  $('#pan123SettingsSummary').textContent=!enabled?'已关闭':config.token?'已保存登录 · '+config.folder:'尚未连接，请先登录';
+  $('#pan123BrowserLoginMethods').hidden=!browser;$('#pan123LocalLoginMethods').hidden=browser;
+  $('#pan123PasswordDetails').hidden=browser;$('#pan123SessionDetails').hidden=browser;$('#pan123ProbeBlock').hidden=browser;
+  $('#localStorageSettings').hidden=browser;$('#syncStorage').hidden=browser;
+  if(browser){
+    $('#pullStorage').disabled=Boolean(state.operation);
+    $('#pan123Settings').hidden=false;$('#pan123Label').hidden=false;$('#pan123Panel').hidden=false;
+    $('#storageInventory').innerHTML=['theme','font','asset'].map(kind=>`<div class="inventory-row"><strong>${libraryKinds[kind].name}</strong><span>${state[kind+'s'].length} 项</span></div>`).join('');
+  }
+  if(enabled&&!(browser?config.token:state.storage?.pan123?.configured))$('#pan123LoginDetails').open=true;
+  const details=$('#connectionDetails');
+  if(!details.dataset.initialized){details.open=!syncToken;details.dataset.initialized='1';}
+  $('summary',details).textContent=syncToken?'修改连接':'连接资源库';
+  $('#saveApiBase').disabled=Boolean(state.operation)||connectionSaving;
+}
 function renderStorageSummary(data) {
   if (data.mode === "browser-local") {
-    $("#storageInventory").innerHTML = `<div class="inventory-row"><div><strong>共享 R2 库</strong><span>记录、压缩主题、字体、SVG / HTML 收藏和预览</span></div><div><strong>同一 Worker</strong><span>手机与电脑共用</span></div></div><p class="inventory-summary">免费模式：压缩、重新封包、预览和 SHA-256 查重都在当前浏览器执行；Worker 只负责 R2 对象读写和记录索引。</p>`;
-    $("#storageDestination").textContent = "Cloudflare R2：通过当前同步 API 公开读取、令牌写入。原始 RED 目前按确认后的压缩/原样对象保存。";
+    $("#storageDestination").textContent = '私有 R2 · '+(apiBase?new URL(apiBase).hostname:'尚未连接');
     $("#storageHint").textContent = "浏览器本地处理 · 多设备共享 R2";
-    $("#storageState").textContent = "免费浏览器同步已启用";
-    $("#credentialState").textContent = syncToken ? "同步写入令牌已填写（仅保存在本机浏览器）。" : "尚未填写同步写入令牌；读取可用，上传会被 Worker 拒绝。";
-    $("#pan123CredentialState").textContent = "会话只保存在本机浏览器；登录和测试连接由浏览器直连；备份上传由同步 Worker 代转，Token 不写入仓库或 R2。";
+    $("#storageState").textContent = "R2 私有库";
     $("#storageForm").hidden = true;
     $("#r2SettingsLabel").hidden = true;
     // 静态模式没有本机后端，但 123 的登录与扫码接口允许跨域，浏览器可以自己
     // 直连，请求从用户自己的网络出口发出。平台仍可能要求验证。
     $("#pan123Label").hidden = false;
-    $("#pan123Label h2").textContent = "连接 123 云盘";
-    const labelNote = $("#pan123Label p:first-of-type");
-    if (labelNote) labelNote.textContent = "可选：123 云盘只备份原始 RED，压缩 RED、字体和预览仍存 R2。扫码或账号密码登录都由本机浏览器直接连 123 完成，会话 Token 只保存在本机浏览器，登录和测试连接由浏览器直连；备份上传由同步 Worker 代转。";
     // 主 WebView 不允许离开本站，这个外链点了也只会被拦下；登录入口在上方面板里。
     const labelLink = $("#pan123Label .download-link");
     if (labelLink) labelLink.hidden = true;
@@ -3848,6 +3897,7 @@ function renderStorageSummary(data) {
     $("#pan123PasswordDetails").hidden = true;
     $("#pan123SessionDetails").hidden = true;
     $("#pan123ProbeBlock").hidden = true;
+    refreshSettingsControls();
     return;
   }
   $("#storageForm").hidden = false;
@@ -3869,11 +3919,12 @@ function renderStorageSummary(data) {
   $("#credentialState").textContent = credentials.configured ? `R2 凭据：${sources[credentials.source] || "已配置"}。` : "尚未配置 R2 访问密钥。";
   const pan123 = data.pan123 || {};
   $("#pan123CredentialState").textContent = pan123.configured ? `123 云盘会话：${sources[pan123.source] || "已保存"}。是否有效请运行上传验证。` : "尚未保存 123 云盘会话。可直接登录，或使用已有会话 Token。";
+  refreshSettingsControls();
 }
 function updateStorageControls() {
   // 免费/静态模式没有本机后端表单；123 说明块与网页登录面板由
   // renderStorageSummary 决定显示，这里再跑一遍会把它重新藏起来。
-  if (state.storage?.mode === "browser-local") return;
+  if (state.storage?.mode === "browser-local") {refreshSettingsControls();return;}
   const form = $("#storageForm");
   const locked = Boolean(state.operation) || activeJobs().length > 0;
   $("#storageBusyNote").hidden = !activeJobs().length;
@@ -3882,6 +3933,7 @@ function updateStorageControls() {
   const r2 = form.elements.libraryProvider.value === "cloudflare_r2";
   const archive = form.elements.archiveProvider.value;
   const pan123 = archive === "123pan";
+  $('#pan123Settings').hidden=!pan123;
   $("#r2Fields").hidden = !r2;
   $("#archiveEndpointField").hidden = archive !== "123pan_webdav";
   $("#archiveHint").textContent = archive === "r2_library" ? "复用上方 Bucket 和访问密钥，原始 RED 存入库目录下的独立原包目录，默认 originals。网页可通过临时签名地址下载；同一平台的目录隔离不属于异地备份。" : pan123 ? "使用 123 云盘网页协议备份原始 RED，默认备份根目录 Red-Garden-Backup，原包存入其中的 originals/。服务地址固定，无需填写 Endpoint。保存配置后，在下方登录并验证上传。" : archive === "123pan_webdav" ? "仅兼容已有 WebDAV 服务配置，普通网盘分享链接不能填在这里。此账号是否有可用接口需自行核实；用户名和密码由后端环境变量提供。" : "原始 RED 保留在应用本机目录。可切换到 R2 或 123 云盘，由程序直接上传备份。";
@@ -4007,7 +4059,7 @@ async function commitTheme(stagingId) { return commitThemes([stagingId]); }
 async function commitThemes(ids = [...selections.review]) {
   if (state.operation) { toast("正在处理中，请等当前任务结束后再试"); return; }
   await whenStorageReady();
-  if (storageSettingsPending()) { toast("存储设置有未保存的修改，请先在「存储设置」保存后再上传"); return; }
+  if (storageSettingsPending()) { toast("设置有未保存的修改，请先在「设置」保存后再上传"); return; }
   if (!ids.length) { toast("请先勾选要处理的条目，或点「全选」"); return; }
   const eligible = new Set(eligibleIds("review"));
   const chosen = [...new Set(ids)].filter(id => eligible.has(id));
@@ -4323,8 +4375,8 @@ async function syncSelectedAssets(kind, ids = [...selections[kind]]) {
   // 早退都要说明原因，否则按钮看起来就是「按了没反应」。
   if (state.operation) { toast("正在处理中，请等当前任务结束后再试"); return; }
   await whenStorageReady();
-  if (!r2Enabled()) { toast("未连接共享库，请先在「存储设置」填写同步 API 地址"); return; }
-  if (storageSettingsPending()) { toast("存储设置有未保存的修改，请先在「存储设置」保存后再同步"); return; }
+  if (!r2Enabled()) { toast("未连接共享库，请先在「设置」填写同步 API 地址"); return; }
+  if (storageSettingsPending()) { toast("设置有未保存的修改，请先在「设置」保存后再同步"); return; }
   if (!ids.length) { toast("请先勾选要处理的条目，或点「全选」"); return; }
   if (browserSyncEnabled()) {
     const output = $(kind === "theme" ? "#themeBatchStatus" : kind === "font" ? "#fontBatchStatus" : "#assetBatchStatus");
@@ -4872,9 +4924,14 @@ async function cloudOperation(action, button) {
   buttons.forEach(item => item.disabled = true);
   operationMessage(output, action === "pull" ? "正在读取 R2 已有库清单…" : "正在加入后台同步队列…");
   try {
+    if(browserSyncEnabled()&&action==='pull'){
+      await ensureWriteAccess();await loadBrowserLibraryRecords(true);
+      await Promise.all([loadThemes(),loadFonts(),loadAssets()]);renderStorageSummary(state.storage);
+      operationMessage(output,`已刷新：${librarySummary()}。`);return;
+    }
     const result = action === "pull" ? await api("/api/storage/pull", { method: "POST" }) : await api("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "sync-all" }) });
     if (action !== "pull") { rememberJob(result.job); renderJobs(); operationMessage(output, "已加入后台同步。可以切换页面或关闭网页，在后台任务中查看进度。"); return; }
-    await Promise.all([loadThemes(), loadFonts(), loadStorage()]);
+    await Promise.all([loadThemes(), loadFonts(),loadAssets(),loadStorage()]);
     if (action === "pull") {
       const count = result.themes ?? result.theme_count ?? result.addedThemes ?? result.added?.themes ?? 0;
       const fonts = result.fonts ?? result.font_count ?? result.addedFonts ?? result.added?.fonts ?? 0;
@@ -5471,7 +5528,7 @@ $("#chooseUnifiedFiles").addEventListener("click", () => { if (!state.operation)
 $("#chooseUnifiedFolder").addEventListener("click", () => { if (!state.operation) pickFolderWithAccess("unifiedFolderInput", importUnifiedFiles); });
 $("#unifiedFolderInput").addEventListener("change", async event => { await importUnifiedFiles(event.target.files); event.target.value = ""; });
 $('#backupTo123').checked=localStorage.getItem('reeden-backup-123-enabled')==='on'||(localStorage.getItem('reeden-backup-123-enabled')===null&&!!pan123BackupConfig().token);
-$('#backupTo123').addEventListener('change',event=>localStorage.setItem('reeden-backup-123-enabled',event.target.checked?'on':'off'));
+$('#backupTo123').addEventListener('change',event=>setBackup123Enabled(event.target.checked));
 $('#retryPan123Backups').addEventListener('click',()=>retryPan123Backups().catch(error=>operationMessage($('#pan123BackupStatus'),error.message,true)));
 $("#localCleanupEnabled").checked = localCleanupEnabled();
 $("#localCleanupEnabled").addEventListener("change", event => {
@@ -5515,6 +5572,14 @@ for (const [kind, {render}] of Object.entries(libraryKinds)) {
       window.scrollTo(0, 0);
     });
   }
+  const jump=$(`[data-page-jump="${kind}"]`),pageInput=$(`#${kind}PageInput`);
+  pageInput.addEventListener('input',()=>pageInput.setCustomValidity(''));
+  jump.addEventListener('submit',event=>{
+    event.preventDefault();const value=Number(pageInput.value);
+    if(!pageInput.value||!Number.isInteger(value)){pageInput.setCustomValidity('请输入整数页码');pageInput.reportValidity();return;}
+    libraryPage[kind]=Math.max(1,Math.min(Number(pageInput.max)||1,value));render();
+    input.closest('.view').querySelector('h1').focus({preventScroll:true});window.scrollTo(0,0);
+  });
   $(`[data-clear-selection="${kind}"]`).addEventListener("click", () => {
     selections[kind].clear();
     updateBulkControls();
@@ -5543,11 +5608,11 @@ document.addEventListener("keydown", event => {
   search.focus();
 });
 $("#selectAllReview").addEventListener("change", event => toggleAll("review", event.target.checked));
-$("#toggleThemeSelection").addEventListener("click", () => {
-  if (themeSelectionMode || selections.theme.size) { themeSelectionMode = false; selections.theme.clear(); }
-  else themeSelectionMode = true;
+$$('[data-catalog-selection]').forEach(button=>button.addEventListener('click',()=>{
+  const kind=button.dataset.catalogSelection;
+  if(selectionModes[kind]||selections[kind].size){selectionModes[kind]=false;selections[kind].clear();}else selectionModes[kind]=true;
   updateBulkControls();
-});
+}));
 $("#selectAllThemes").addEventListener("change", event => toggleAll("theme", event.target.checked));
 $("#selectAllFonts").addEventListener("change", event => toggleAll("font", event.target.checked));
 $("#selectAllAssets").addEventListener("change", event => toggleAll("asset", event.target.checked));
@@ -5580,7 +5645,7 @@ document.addEventListener("change", event => {
 });
 $("#scanButton").addEventListener("click", () => $("#indexInput").click());
 $("#indexInput").addEventListener("change", async event => { const file = event.target.files?.[0]; if (!file) return; try { if (browserSyncEnabled()) throw new Error("免费同步模式通过 R2 records 自动读取清单，无需导入本地索引文件"); const value = JSON.parse(await file.text()); const result = await api("/api/index/import", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(value) }); await loadThemes(); toast(`已导入 ${result.count} 条已有清单`); } catch (error) { toast(`清单导入失败：${error.message}`); } event.target.value = ""; });
-// 手机底部导航：五个拇指能够到的入口，「更多」里放后台任务与存储设置。
+// 手机底部导航：五个拇指能够到的入口，「更多」里放后台任务与设置。
 function closeMobileMore() {
   const panel = $("#mobileMore");
   if (panel && !panel.hidden) panel.hidden = true;
@@ -5666,14 +5731,6 @@ $$("[data-import-kind]").forEach(button => {
   });
 });
 document.addEventListener("click", event => {
-  const fontFilter = event.target.closest("[data-font-filter]");
-  if (fontFilter && !fontFilter.disabled) {
-    state.fontFilter = fontFilter.dataset.fontFilter || "all";
-    libraryPage.font = 1;
-    renderFonts();
-    $$('.font-filter-chip').find(button => button.dataset.fontFilter === state.fontFilter)?.focus({preventScroll: true});
-    return;
-  }
   const openView = event.target.closest("[data-open-view]");
   if (openView) setView(openView.dataset.openView);
   const retry = event.target.closest("[data-retry-job]");
@@ -5689,8 +5746,21 @@ document.addEventListener("submit", event => {
   const recordForm = event.target.closest("[data-record-form]");
   if (recordForm) { event.preventDefault(); saveRecordClassification(recordForm); }
 });
-$$('[data-asset-filter]').forEach(button => button.addEventListener("click", () => { state.assetFilter = button.dataset.assetFilter || "all"; libraryPage.asset = 1; renderAssets(); }));
-$("#addAssetButton").addEventListener("click", () => { setView("import"); });
+$('#fontCategoryFilters').addEventListener('change',event=>{state.fontFilter=event.target.value;libraryPage.font=1;renderFonts();});
+$('#assetCategoryFilter').addEventListener('change',event=>{state.assetFilter=event.target.value;libraryPage.asset=1;renderAssets();});
+$('#closeRecordDialog').addEventListener('click',()=>$('#recordDialog').close());
+document.addEventListener('click',event=>{
+  const button=event.target.closest('[data-record-open],[data-record-details]');if(!button)return;
+  const kind=button.dataset.recordOpen||button.dataset.recordDetails,id=button.dataset.recordId;
+  if(button.dataset.recordOpen){
+    if(state.operation||isAssetBusy(kind,id))return;
+    if(selectionModes[kind]||selections[kind].size||event.ctrlKey||event.metaKey){
+      const box=$(`#${kind}List input[data-selection="${kind}"][data-id="${CSS.escape(id)}"]`);
+      if(box&&!box.disabled){box.checked=!box.checked;box.dispatchEvent(new Event('change',{bubbles:true}));}return;
+    }
+  }
+  openRecordDialog(kind,id);
+});
 $("#closePreviewDialog").addEventListener("click", () => $("#previewDialog").close());
 $("#closeThemeDialog").addEventListener("click", () => $("#themeDialog").close());
 $$('dialog').forEach(dialog => {
@@ -5745,18 +5815,20 @@ $('#maintenancePlan').addEventListener('click',async()=>{
  }catch(error){operationMessage(status,error.message,true);}finally{button.disabled=false;}
 });
 $("#deviceTransferForm").addEventListener("submit", transferDeviceConfig);
-$("#testWriteAccess").addEventListener("click", async event => {
-  const button = event.currentTarget; button.disabled = true; writeAccess.at = 0;
-  try { await ensureWriteAccess(); } catch (error) { operationMessage($("#apiBaseStatus"), error.message, true); }
-  finally { button.disabled = false; }
-});
-for (const id of ["apiBaseInput", "syncTokenInput"]) $(`#${id}`).addEventListener("change", saveApiBaseSetting);
+for(const id of ['apiBaseInput','syncTokenInput'])$(`#${id}`).addEventListener('input',()=>{connectionDirty=true;});
+$$('[data-transfer-direction]').forEach(button=>button.addEventListener('click',()=>setTransferDirection(button.dataset.transferDirection)));
+function setTransferDirection(direction){
+  $$('[data-transfer-direction]').forEach(button=>{const active=button.dataset.transferDirection===direction;button.setAttribute('aria-pressed',String(active));button.classList.toggle('is-active',active);});
+  $$('[data-transfer-panel]').forEach(panel=>{panel.hidden=panel.dataset.transferPanel!==direction;$$('button',panel).forEach(button=>button.disabled=panel.hidden);});
+  $('#deviceConfigFileLabel').hidden=Boolean(pendingConnectConfig);
+}
+$('#settingsBackup123Enabled').addEventListener('change',event=>setBackup123Enabled(event.target.checked));
 for (const id of ["pan123BackupToken", "pan123BackupFolder"]) $(`#${id}`).addEventListener("change", () => {
   try {
     const token = normalizePan123Token($("#pan123BackupToken").value);
     localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, token);
     localStorage.setItem(PAN123_FOLDER_STORAGE_KEY, $("#pan123BackupFolder").value.trim() || "Red-Garden-Backup");
-    operationMessage($("#pan123BackupStatus"), "123 设置已自动保存在当前设备；可点测试连接验证会话。");
+    operationMessage($("#pan123BackupStatus"), "已自动保存。");refreshSettingsControls();
   } catch { operationMessage($("#pan123BackupStatus"), "浏览器阻止保存设置，请允许网站存储。", true); }
 });
 for (const kind of Object.keys(libraryKinds)) {
@@ -5766,28 +5838,13 @@ $("#bulkTagForm").addEventListener("submit", applyBulkTags);
 $("#closeBulkTags").addEventListener("click", () => { if (!state.operation) $("#bulkTagDialog").close(); });
 $("#bulkTagDialog").addEventListener("cancel", event => { if (state.operation) event.preventDefault(); });
 $("#saveApiBase").addEventListener("click", saveApiBaseSetting);
-$("#clearApiBase").addEventListener("click", () => { $("#apiBaseInput").value = normalizeApiBase(window.REEDEN_API_BASE); saveApiBaseSetting(); });
+$("#clearApiBase").addEventListener("click",()=>{$('#apiBaseInput').value=normalizeApiBase(window.REEDEN_API_BASE||(location.hostname.endsWith('.pages.dev')?location.origin:FALLBACK_API_BASE));connectionDirty=true;});
 (() => {
   const config = pan123BackupConfig();
   $("#pan123BackupToken").value = config.token;
   $("#pan123BackupFolder").value = config.folder;
   if (config.token) operationMessage($("#pan123BackupStatus"), "已保存 123 云盘会话 Token；点击「测试连接」可验证会话是否仍然有效。");
 })();
-$("#savePan123Backup").addEventListener("click", () => {
-  const token = String($("#pan123BackupToken").value || "").trim();
-  const folder = String($("#pan123BackupFolder").value || "").trim() || "Red-Garden-Backup";
-  try {
-    localStorage.setItem(PAN123_TOKEN_STORAGE_KEY, token);
-    localStorage.setItem(PAN123_FOLDER_STORAGE_KEY, folder);
-    if (token) {
-      toast("123 云盘设置已保存，正在验证连接");
-      verifyPan123Backup();
-    } else {
-      operationMessage($("#pan123BackupStatus"), "会话 Token 为空，当前只保留 R2 原包。");
-      toast("123 云盘备份已关闭");
-    }
-  } catch { operationMessage($("#pan123BackupStatus"), "当前浏览器无法保存设置，请检查隐私模式设置。", true); }
-});
 $("#verifyPan123Backup").addEventListener("click", () => { verifyPan123Backup(); });
 $("#pan123PasteToken")?.addEventListener("click", () => { pastePan123Token(); });
 $("#pan123QuickLogin")?.addEventListener("submit", loginPan123Quick);
@@ -5797,26 +5854,35 @@ $("#pan123WebLogin")?.addEventListener("click", webLoginPan123);
   if (!hint) return;
   hint.textContent = nativeAppBridge()?.caps?.pan123Login
     ? "登录请求由本机浏览器直接连 123，不经过 Worker，会保留 123 返回的验证提示；在应用内登录页完成后会自动取回会话。"
-    : "扫码与账号密码都由本机浏览器直接连 123，会保留 123 返回的验证提示；也可在 123 网页复制会话 Token，回到本页点「从剪贴板粘贴」。";
+    : "遇到验证码时，请到官方网页完成验证。";
 })();
 $("#listPan123Backup").addEventListener("click", () => { refreshPan123BackupList(); });
 $("#verifyPan123Write").addEventListener("click", () => { verifyPan123Write(); });
 $("#clearPan123Backup").addEventListener("click", () => {
   try { localStorage.removeItem(PAN123_TOKEN_STORAGE_KEY); } catch {}
   $("#pan123BackupToken").value = "";
-  operationMessage($("#pan123BackupStatus"), "已关闭 123 云盘备份，原包仍会存入 R2。");
+  setBackup123Enabled(false);toast('已断开 123 云盘');operationMessage($("#pan123BackupStatus"), "已断开 123 云盘。");
 });
 $("#testStorage").addEventListener("click", event => testStorage("library", event.currentTarget));
 $("#testArchive").addEventListener("click", event => testStorage("archive", event.currentTarget));
 $("#pullStorage").addEventListener("click", event => cloudOperation("pull", event.currentTarget));
 $("#syncStorage").addEventListener("click", event => cloudOperation("sync", event.currentTarget));
 $$('.nav-item').forEach(item => item.addEventListener('click', () => { setView(item.dataset.view); $(".sidebar").classList.remove("is-open"); }));
-$$("#themeDensity .density-option").forEach(button => button.addEventListener("click", () => applyThemeDensity(button.dataset.density)));
+function applyCatalogDensity(kind,mode,persist=true){
+  if(kind==='theme'){applyThemeDensity(mode,persist);return;}
+  const density=mode==='list'?'list':'grid';$(`#${kind}List`).classList.toggle('is-list',density==='list');
+  $$(`[data-catalog-density="${kind}"]`).forEach(button=>{const active=button.dataset.density===density;button.classList.toggle('is-active',active);button.setAttribute('aria-pressed',String(active));});
+  if(persist)try{localStorage.setItem('reeden-'+kind+'-density',density);}catch{}
+}
+$$('[data-catalog-density]').forEach(button=>button.addEventListener('click',()=>applyCatalogDensity(button.dataset.catalogDensity,button.dataset.density)));
+for(const kind of ['font','asset']){let saved;try{saved=localStorage.getItem('reeden-'+kind+'-density');}catch{}applyCatalogDensity(kind,saved,false);}
 restoreThemeDensity();
 let initialView=location.hash.slice(1);
 if(initialView.startsWith('connect=')) {
   try{pendingConnectConfig=JSON.parse(new TextDecoder().decode(bytesFromBase64(initialView.slice(8).replace(/-/g,'+').replace(/_/g,'/'))));initialView='storage';history.replaceState(null,'',location.pathname+location.search+'#storage');operationMessage($('#deviceTransferStatus'),'已收到加密接入配置，请输入迁移口令并点击导入。');}catch{initialView='storage';toast('接入链接无效，请重新生成');}
 }
+setTransferDirection(pendingConnectConfig||!syncToken?'import':'export');
+if(pendingConnectConfig){$('#deviceTransferDetails').open=true;$('#deviceConfigFileLabel').hidden=true;}
 hydrateLocalSnapshots();
 try {
   const saved = JSON.parse(localStorage.getItem("reeden-browse-v1") || "null");
