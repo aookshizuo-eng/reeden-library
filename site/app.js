@@ -5045,10 +5045,10 @@ async function rememberLocalFiles(files) {
   for(const file of files) {
     if(localFileIds.has(file))continue;
     const source=pickedFileSources.get(file)?.entry;
-    const row={id:crypto.randomUUID(),apiBase,file,archivePath:file.archivePath||'',created_at:Date.now(),handle:source?.handle||null,parent:source?.parent||null,path:source?.path||file.name};
+    const row={id:crypto.randomUUID(),apiBase,file,archivePath:file.archivePath||'',created_at:Date.now(),handle:source?.handle||null,parent:source?.parent||null,directory:source?.directory||null,path:source?.path||file.name};
     try {await transferStore('readwrite',store=>store.put(row));}
     catch(error) {
-      if(error?.name==='DataCloneError'){row.handle=null;row.parent=null;try{await transferStore('readwrite',store=>store.put(row));}catch{throw new Error('浏览器空间不足，无法保存恢复副本。请分批导入或使用云端暂存。');}}
+      if(error?.name==='DataCloneError'){row.handle=null;row.parent=null;row.directory=null;try{await transferStore('readwrite',store=>store.put(row));}catch{throw new Error('浏览器空间不足，无法保存恢复副本。请分批导入或使用云端暂存。');}}
       else throw new Error('浏览器未能保存恢复副本，请检查存储空间与网站权限后重试。');
     }
     localFileIds.set(file,row.id);
@@ -5068,7 +5068,7 @@ async function resumeLocalTransfers() {
   for(const row of localTransferRows) {
     if(loaded.has(row.id))continue;
     const file=row.file;localFileIds.set(file,row.id);if(row.archivePath)file.archivePath=row.archivePath;
-    registerPickedFiles([{file,handle:row.handle,parent:row.parent,path:row.path}]);files.push(file);
+    registerPickedFiles([{file,handle:row.handle,parent:row.parent,directory:row.directory,path:row.path}]);files.push(file);
   }
   setView('import');
   const oldResuming=resumingStaged;resumingStaged=true;
@@ -5104,7 +5104,7 @@ function refreshCleanupHint() {
   hint.textContent = mode === "app"
     ? "本机文件删除：可用。上传成功后弹窗询问，删除由应用通过系统文件接口完成，系统可能再确认一次。"
     : mode === "picker"
-      ? "本机文件删除：可用。勾选上面的开关后，「选择文件」和「选择文件夹」都会申请写入权限，上传成功后弹窗询问是否删掉本地副本。"
+      ? "本机文件删除：可用。批量清理只需授权一次所在文件夹，不会逐个弹出保存提示。使用「选择文件夹」导入，可同时完成授权；每次删除前都会核对文件内容。"
       : "本机文件删除：当前浏览器不允许网页删除本机文件，上传后会列出清单让你手动清理（手机 APK 与桌面 Chrome/Edge 支持自动删除）。";
 }
 function registerPickedFiles(items, source = null) {
@@ -5120,26 +5120,26 @@ function registerPickedFiles(items, source = null) {
       path: item.path || file.webkitRelativePath || file.name || "",
       parent: item.parent || null,
       handle: item.handle || null,
+      directory: item.directory || source?.directory || item.parent || null,
     };
     pickedFileSources.set(file, { batch, entry });
     batch.entries.push(entry);
   }
   return batch;
 }
-async function collectDirectoryFiles(handle, prefix = "") {
+async function collectDirectoryFiles(handle, prefix = "", names = null) {
   const collected = [];
   for await (const child of handle.values()) {
-    if (child.kind === "directory") { collected.push(...await collectDirectoryFiles(child, `${prefix}${child.name}/`)); continue; }
+    if (child.kind === "directory") { collected.push(...await collectDirectoryFiles(child, `${prefix}${child.name}/`, names)); continue; }
+    if(names&&!names.has(child.name))continue;
     let file;
     try { file = await child.getFile(); } catch { continue; }
-    collected.push({ file, path: `${prefix}${child.name}`, parent: handle });
+    collected.push({ file, path: `${prefix}${child.name}`, parent: handle, handle: child });
   }
   return collected;
 }
-// Folder picking has two modes on purpose: the writable directory handle (so a
-// later delete is actually possible) and the plain webkitdirectory input.
-// 单选文件也要能拿到可写句柄：<input type="file"> 只给一份只读快照，
-// 上传成功后网页没法删掉本地副本；showOpenFilePicker 给的是真句柄，可以删。
+// File handles are read-only import sources. Batch deletion uses one writable
+// directory grant; requesting write permission per file loses user activation.
 async function pickFilesWithAccess(inputId, handler) {
   const input = $("#" + inputId);
   if (!input) return;
@@ -5149,7 +5149,7 @@ async function pickFilesWithAccess(inputId, handler) {
     handles = await window.showOpenFilePicker({ multiple: true, id: `reeden-${inputId}` });
   } catch (error) {
     if (error?.name === "AbortError") return;
-    toast(`无法申请文件写入权限，改用普通选择：${error?.message || error?.name || "未知原因"}`);
+    toast(`无法打开文件选择器，改用普通选择：${error?.message || error?.name || "未知原因"}`);
     input.click();
     return;
   }
@@ -5200,7 +5200,8 @@ function cleanupTargets(files) {
       path: entry?.path || file.webkitRelativePath || file.name || "",
       parent: entry?.parent || null,
       handle: entry?.handle || null,
-      deletable: Boolean(entry?.parent || typeof entry?.handle?.remove === 'function' || bridge),
+      directory: entry?.directory || entry?.parent || null,
+      deletable: Boolean(bridge),
     });
   }
   return { targets, bridge };
@@ -5210,73 +5211,103 @@ async function sameLocalFile(current,original) {
   const digest=async file=>new Uint8Array(await crypto.subtle.digest('SHA-256',await file.arrayBuffer()));
   const [a,b]=await Promise.all([digest(current),digest(original)]);return a.every((value,index)=>value===b[index]);
 }
-function openCleanupDialog(targets, summary, options={}) {
+async function directoryWriteGranted(directory) {
+  if (!directory) return false;
+  try { return typeof directory.queryPermission !== 'function' || await directory.queryPermission({mode:'readwrite'}) === 'granted'; }
+  catch { return false; }
+}
+async function openCleanupDialog(targets, summary, options={}) {
   const dialog=$('#cleanupDialog');
+  const bridge=nativeFileBridge(),canChoose=supportsDirectoryHandle();
+  // Query only, once per root. Permission requests belong to the picker button's
+  // direct click, never to a loop or a restored background transfer.
+  const permissions=new Map();
+  for(const target of targets) {
+    const directory=target.directory||target.parent;
+    if(directory&&!permissions.has(directory))permissions.set(directory,directoryWriteGranted(directory));
+  }
+  await Promise.all([...permissions].map(async([directory,pending])=>permissions.set(directory,await pending)));
+  for(const target of targets)target.deletable=Boolean(bridge||target.parent&&permissions.get(target.directory||target.parent));
   return new Promise(resolve=>{
     if(!dialog?.showModal){resolve({selected:[],bridge:null});return;}
-    dialog.onclose=()=>resolve({selected:[],bridge:null});
-    const finish=value=>{dialog.close();resolve(value);};
+    let closed=false,busy=false;
+    const selected=new Set(options.checked===false?[]:targets.filter(t=>t.deletable||canChoose));
+    const finish=value=>{if(closed)return;closed=true;dialog.close();resolve(value);};
+    dialog.onclose=()=>finish({selected:[],bridge:null});
     $('#cleanupNote').textContent=options.note||'仅删除本机原件，云端已入库副本保留。';
     const render=()=>{
-      const deletable=targets.filter(t=>t.deletable);
-      $('#cleanupList').innerHTML=targets.map((t,i)=>`<li class="${t.deletable?'':'is-locked'}"><label class="check-label"><input type="checkbox" data-cleanup-index="${i}" ${t.deletable?(options.checked===false?'':'checked'):'disabled'}><span><strong>${escapeHtml(t.name)}</strong><small>${escapeHtml(formatBytes(t.size)+(t.deletable?'':' · 需要文件夹授权'))}</small></span></label></li>`).join('');
+      const available=targets.filter(t=>t.deletable||canChoose);
+      $('#cleanupList').innerHTML=targets.map((t,i)=>`<li class="${t.deletable||canChoose?'':'is-locked'}"><label class="check-label"><input type="checkbox" data-cleanup-index="${i}" ${selected.has(t)?'checked':''} ${busy||!t.deletable&&!canChoose?'disabled':''}><span><strong>${escapeHtml(t.name)}</strong><small>${escapeHtml(formatBytes(t.size)+(t.deletable?'':' · 需要文件夹授权'))}</small></span></label></li>`).join('');
       $('#cleanupDialogDescription').textContent=summary;
       const boxes=$$('#cleanupList input'),confirm=$('#cleanupConfirm'),all=$('#cleanupSelectAll');
-      const count=()=>{const picked=boxes.filter(b=>b.checked&&!b.disabled).length;$('#cleanupSummary').textContent=`已选 ${picked} / 可删除 ${deletable.length}`;all.checked=!!deletable.length&&picked===deletable.length;all.disabled=!deletable.length;all.indeterminate=picked>0&&picked<deletable.length;$('#cleanupSelectAllLabel').textContent='全选';confirm.disabled=!!deletable.length&&!picked;confirm.textContent=deletable.length?`删除所选（${picked}）`:typeof window.showDirectoryPicker==='function'?'选择原文件夹并删除':'关闭（需手动删除）';};
-      boxes.forEach(box=>box.onchange=count);all.onchange=()=>{boxes.forEach(b=>{if(!b.disabled)b.checked=all.checked;});count();};
+      const count=()=>{
+        const picked=targets.filter(t=>selected.has(t)),need=picked.filter(t=>!t.deletable).length;
+        $('#cleanupSummary').textContent=`已选 ${picked.length} / ${targets.length}${need?` · ${need} 个待授权`:''}`;
+        all.checked=!!available.length&&picked.length===available.length;all.disabled=busy||!available.length;
+        all.indeterminate=picked.length>0&&picked.length<available.length;$('#cleanupSelectAllLabel').textContent='全选';
+        confirm.disabled=busy||!!available.length&&!picked.length;
+        confirm.textContent=busy?'正在核对文件…':need?`授权文件夹并删除（${picked.length}）`:picked.length?`删除所选（${picked.length}）`:'关闭（需手动删除）';
+      };
+      boxes.forEach((box,i)=>box.onchange=()=>{if(box.checked)selected.add(targets[i]);else selected.delete(targets[i]);count();});
+      all.onchange=()=>{available.forEach(t=>{if(all.checked)selected.add(t);else selected.delete(t);});render();};
       confirm.onclick=async()=>{
-        if(!deletable.length && typeof window.showDirectoryPicker==='function') {await grantFolder();const found=targets.filter(t=>t.deletable);if(found.length)finish({selected:found,bridge:nativeFileBridge()});return;}
-        finish({selected:targets.filter((t,i)=>boxes[i].checked&&!boxes[i].disabled),bridge:nativeFileBridge()});
+        if(busy)return;
+        if(targets.some(t=>selected.has(t)&&!t.deletable)) {if(!await grantFolder())return;}
+        if(!closed&&!targets.some(t=>selected.has(t)&&!t.deletable))finish({selected:targets.filter(t=>selected.has(t)),bridge});
       };count();
     };
-    const grant=$('#cleanupGrantFolder');grant.hidden=typeof window.showDirectoryPicker!=='function'||targets.every(t=>t.deletable);const grantFolder=async()=>{
-      try{const folder=await window.showDirectoryPicker({mode:'readwrite'});grant.disabled=true;
-        const entries=await collectDirectoryFiles(folder);let matched=0;
-        for(const target of targets.filter(t=>!t.deletable)){
-          const matches=[];for(const entry of entries.filter(e=>(e.name||e.file.name)===target.name&&e.file.size===target.size))if(await sameLocalFile(entry.file,target.file))matches.push(entry);
-          if(matches.length===1){Object.assign(target,{parent:matches[0].parent,handle:matches[0].handle,deletable:true});matched++;}
+    const grantFolder=async()=>{
+      if(busy||closed)return false;
+      busy=true;render();
+      try{
+        // This call must happen before the first await in the click handler.
+        const folder=await window.showDirectoryPicker({id:'reeden-import',mode:'readwrite'});
+        if(!await directoryWriteGranted(folder))throw new Error('未获得文件夹的写入权限，请重新选择并允许修改。');
+        const entries=await collectDirectoryFiles(folder,'',new Set(targets.filter(t=>selected.has(t)&&!t.deletable).map(t=>t.name)));let matched=0;
+        for(const target of targets.filter(t=>selected.has(t)&&!t.deletable)){
+          let candidates=entries.filter(e=>e.file.name===target.name&&e.file.size===target.size);
+          if(target.handle?.isSameEntry){
+            const exact=[];
+            for(const entry of candidates)if(await target.handle.isSameEntry(entry.handle))exact.push(entry);
+            candidates=exact;
+          }
+          const matches=[];
+          for(const entry of candidates)if(await sameLocalFile(entry.file,target.file))matches.push(entry);
+          if(matches.length===1){
+            const entry=matches[0];Object.assign(target,{parent:entry.parent,handle:entry.handle,directory:folder,deletable:true});
+            const source=pickedFileSources.get(target.file)?.entry;
+            if(source)Object.assign(source,{parent:entry.parent,handle:entry.handle,directory:folder});
+            matched++;
+          }
         }
-        render();$('#cleanupNote').textContent=matched?`已匹配 ${matched} 个内容相同的文件。${options.note||'删除前会再次核对。'}`:'没有唯一匹配的文件，请选择原文件所在文件夹。';
-      }catch(error){if(error.name!=='AbortError')$('#cleanupNote').textContent='授权失败：'+error.message;}finally{grant.disabled=false;}
-    };grant.onclick=grantFolder;
+        const remaining=targets.filter(t=>selected.has(t)&&!t.deletable).length;
+        if(!closed)$('#cleanupNote').textContent=remaining?`本次匹配 ${matched} 个，仍有 ${remaining} 个未匹配。请选择其余文件所在文件夹，或取消勾选；重名不唯一、内容已改变的文件会保留。`:`已核对 ${matched} 个文件。${options.note||'删除前会再次核对内容。'}`;
+        return !closed;
+      }catch(error){if(!closed&&error.name!=='AbortError')$('#cleanupNote').textContent='授权失败：'+error.message;return false;}
+      finally{busy=false;if(!closed)render();}
+    };
     $('#cleanupCancel').onclick=$('#closeCleanupDialog').onclick=()=>finish({selected:[],bridge:null});dialog.oncancel=e=>{e.preventDefault();finish({selected:[],bridge:null});};render();dialog.showModal();
   });
 }
 async function removeDirectoryEntry(target) {
   const parent = target.parent;
-  let permission = "granted";
-  if (typeof parent.queryPermission === "function") permission = await parent.queryPermission({ mode: "readwrite" });
-  if (permission !== "granted" && typeof parent.requestPermission === "function") permission = await parent.requestPermission({ mode: "readwrite" });
-  if (permission !== "granted") throw new Error("未获得该文件夹的写入授权");
   const current=await (await parent.getFileHandle(target.name)).getFile();
   if(!await sameLocalFile(current,target.file))throw new Error('文件内容已改变，已保留');
   await parent.removeEntry(target.name);
 }
-async function removeFileHandle(target) {
-  const handle = target.handle;
-  if (!handle) throw new Error("没有文件句柄");
-  if (typeof handle.queryPermission === "function") {
-    let permission = await handle.queryPermission({ mode: "readwrite" });
-    if (permission !== "granted" && typeof handle.requestPermission === "function") permission = await handle.requestPermission({ mode: "readwrite" });
-    if (permission !== "granted") throw new Error("未获得该文件的写入授权");
-  }
-  if (typeof handle.remove !== "function") throw new Error("当前浏览器不支持用文件句柄删除");
-  if(!await sameLocalFile(await handle.getFile(),target.file))throw new Error('文件内容已改变，已保留');
-  await handle.remove();
-}
 async function performLocalCleanup(selected, bridge) {
   const byHandle = selected.filter(target => target.parent);
-  const byFileHandle = selected.filter(target => !target.parent && typeof target.handle?.remove === "function");
-  const byNative = selected.filter(target => !target.parent && typeof target.handle?.remove !== "function" && bridge);
+  const byNative = selected.filter(target => !target.parent && bridge);
   let deleted = 0;
   const failures = [];
-  for (const target of selected.filter(target => !target.parent && !target.handle && !bridge)) failures.push({name: target.name, reason: '没有删除权限；请选择所在文件夹授权，或手动删除'});
+  const permissions=new Map();
+  for(const target of byHandle){const root=target.directory||target.parent;if(!permissions.has(root))permissions.set(root,await directoryWriteGranted(root));}
+  for (const target of selected.filter(target => !target.parent && !bridge)) failures.push({name: target.name, reason: '没有删除权限；请选择所在文件夹授权，或手动删除'});
   for (const target of byHandle) {
-    try { await removeDirectoryEntry(target); deleted++; }
-    catch (error) { failures.push({ name: target.name, reason: error?.message || "删除失败" }); }
-  }
-  for (const target of byFileHandle) {
-    try { await removeFileHandle(target); deleted++; }
+    try {
+      if(!permissions.get(target.directory||target.parent))throw new Error('文件夹授权已失效，请重新选择所在文件夹后再清理');
+      await removeDirectoryEntry(target); deleted++;
+    }
     catch (error) { failures.push({ name: target.name, reason: error?.message || "删除失败" }); }
   }
   if (byNative.length) {
