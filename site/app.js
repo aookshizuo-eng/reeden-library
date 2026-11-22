@@ -308,6 +308,10 @@ const selections = { review: new Set(), theme: new Set(), font: new Set(), asset
 // 进度写进用户眼前那条进度条，而不是让用户只看见一句「已加入后台」。
 const trackedJobIds = new Set();
 const loadedFontFaces = new Set();
+// 大字体 load() 可能要几秒，期间每次渲染都会再建一个 FontFace 并重复下载。
+// 同步占位 + 失败负缓存：同一 id 全程只加载一次，失败也不在每次渲染时重试。
+const loadingFontFaces = new Set();
+const failedFontFaces = new Set();
 const recentUploadIds = new Set();
 const recentOnly = {theme: false, font: false, asset: false};
 // 启动时先用本机快照恢复存储配置与库记录，这样刷新后按钮状态、已保存的
@@ -2118,7 +2122,7 @@ function inkProfile(context, width, height) {
   };
 }
 async function analyzeFontGlyphs(bytes, fileName, fallbackStyle) {
-  const fallback = {style: fallbackStyle || inferFontCategory({family: fileName}), source: "filename", method: "none", error: "", features: null, specimen: null};
+  const fallback = {style: fallbackStyle || inferFontCategory({family: fileName}), source: "filename", method: "none", error: "", features: null, specimen: null, family: "", subfamily: ""};
   if (typeof document === "undefined") return fallback;
   const family = `rg-glyph-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const createCanvas = (width, height) => {
@@ -2160,6 +2164,10 @@ async function analyzeFontGlyphs(bytes, fileName, fallbackStyle) {
       const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
       const parsed = parser.parse(buffer);
       fallback.method = "opentype";
+      // 解析已成功，顺手用字体内部名称替代文件名，并清掉 FontFace 阶段的残留错误。
+      fallback.family = String(parsed?.names?.fontFamily || "").trim();
+      fallback.subfamily = String(parsed?.names?.fontSubfamily || "").trim();
+      fallback.error = "";
       advanceOf = (text, size) => parsed.getAdvanceWidth(text, size);
       renderer = (text, size, width, height) => {
         const {canvas, context} = createCanvas(width, height);
@@ -2867,14 +2875,16 @@ function fontCategoryOptions() {
 function renderFontFilters() {
   const container = $("#fontCategoryFilters");
   if (!container) return;
+  // 计数跟当前搜索结果走，否则搜到 2 个黑体却显示「黑体 (120)」。
+  const searched = state.fonts.filter(fontMatchesSearch);
   const counts = new Map();
-  state.fonts.forEach(font => {
+  searched.forEach(font => {
     const category = fontCategory(font);
     counts.set(category, (counts.get(category) || 0) + 1);
   });
   const categories = fontCategoryOptions();
   if (state.fontFilter !== "all" && !categories.includes(state.fontFilter)) state.fontFilter = "all";
-  container.innerHTML=`<option value="all">全部分类 (${state.fonts.length})</option>`+categories.filter(category=>counts.get(category)).map(category=>`<option value="${escapeHtml(category)}">${escapeHtml(category)} (${counts.get(category)})</option>`).join('');
+  container.innerHTML=`<option value="all">全部分类 (${searched.length})</option>`+categories.filter(category=>counts.get(category)).map(category=>`<option value="${escapeHtml(category)}">${escapeHtml(category)} (${counts.get(category)})</option>`).join('');
   container.value=state.fontFilter;
 }
 function fontClassificationEditor(font) {
@@ -2893,16 +2903,22 @@ function fontPreviewMarkup(font) {
 }
 function loadFontPreviewFace(font) {
   if(!font?.id)return;
-  const url = assetUrl(font?.view_url || font?.url);
   const apply=()=>$$(`[data-font-preview-id="${CSS.escape(font.id)}"]`).forEach(specimen=>{specimen.style.fontFamily=`font-${font.id}, sans-serif`;});
   if(loadedFontFaces.has(font.id)){apply();return;}
-  if (!url || !font?.id || typeof FontFace === "undefined") return;
+  if(loadingFontFaces.has(font.id)||failedFontFaces.has(font.id))return;
+  const url = assetUrl(font?.view_url || font?.url);
+  if (!url || typeof FontFace === "undefined") return;
+  loadingFontFaces.add(font.id);
   const face = new FontFace(`font-${font.id}`, `url(${JSON.stringify(url)})`);
   face.load().then(loaded => {
     document.fonts.add(loaded);
     loadedFontFaces.add(font.id);
     apply();
-  }).catch(() => {});
+  }).catch(() => {
+    failedFontFaces.add(font.id);
+  }).finally(() => {
+    loadingFontFaces.delete(font.id);
+  });
 }
 function recoverFontPreviewImage(image) {
   const frame = image.closest(".font-preview-frame");
@@ -3755,7 +3771,8 @@ async function saveRecordClassification(form) {
   const kind = form.dataset.recordKind;
   const id = form.dataset.recordForm;
   const collection = kind === "theme" ? state.themes : kind === "font" ? state.fonts : state.assets;
-  const record = collection.find(item => item.id === id);
+  // 表单属性取到的 id 是字符串，后端可能返回数字 id；严格相等会静默不保存。
+  const record = collection.find(item => String(item.id) === String(id));
   if (!record || state.operation) return;
   const fields = new FormData(form);
   const next = {
@@ -3774,7 +3791,7 @@ async function saveRecordClassification(form) {
     });
     Object.assign(next, result.item || result.record || result.asset || {});
     if (browserSyncEnabled()) saveDeviceSnapshot();
-    const index = collection.findIndex(item => item.id === id);
+    const index = collection.findIndex(item => String(item.id) === String(id));
     if (index >= 0) collection[index] = next;
     updateCachedRecord(next);
     if (kind === "theme") { renderThemes(); if ($("#themeDialog").open && $("#themeDialog").dataset.themeId === id) { openThemeDialog(id); operationMessage($("#themeDialogStatus"), "标签已保存"); } } else if (kind === "font") renderFonts(); else renderAssets();
@@ -4629,7 +4646,14 @@ async function deleteSelectedRecords(kind, ids = [...selections[kind]]) {
     const result = await api("/api/library", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items: chosen.map(item => ({ kind, id: item.id })) }) });
     const deletedIds = new Set((result.deleted || []).map(item => String(item.id)));
     if (kind === "theme") state.themes = state.themes.filter(item => !deletedIds.has(String(item.id)));
-    if (kind === "font") state.fonts = state.fonts.filter(item => !deletedIds.has(String(item.id)));
+    if (kind === "font") {
+      state.fonts = state.fonts.filter(item => !deletedIds.has(String(item.id)));
+      // 同 sha256 的字体删后重新导入时 id 不变，清掉旧 FontFace 避免用到失效字体。
+      deletedIds.forEach(id => {
+        loadedFontFaces.delete(id); failedFontFaces.delete(id); loadingFontFaces.delete(id);
+        for (const face of [...document.fonts]) if (face.family === `font-${id}`) document.fonts.delete(face);
+      });
+    }
     if (kind === "asset") state.assets = state.assets.filter(item => !deletedIds.has(String(item.id)));
     chosen.forEach(item => selections[kind].delete(item.id));
     browserLibraryRecordsCache=latestRecords([...state.themes,...state.fonts,...state.assets]);saveDeviceSnapshot();
@@ -4772,7 +4796,7 @@ async function importFonts(files, options = {}) {
           transferStage("写入字体清单", file.name);
           const record = await uploadBrowserRecord({
             kind: "font", id: `font-${info.sha256.slice(0, 16)}`, sha256: info.sha256, file_name: file.name,
-            family: file.name.replace(/\.[^.]+$/, ""), subfamily: "Regular", extension: info.extension, bytes: info.bytes,
+            family: analysis.family || file.name.replace(/\.[^.]+$/, ""), subfamily: analysis.subfamily || "Regular", extension: info.extension, bytes: info.bytes,
             style: analysis.style, style_source: analysis.source, glyph_method: analysis.method, glyph_error: analysis.error || "", glyph_analysis: analysis.features, tags: [],
             url: fontPath, view_url: fontPath, preview_url: previewPath, preview_state: previewPath ? "generated" : "disabled", preview_error: "", saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
           }, codec);
