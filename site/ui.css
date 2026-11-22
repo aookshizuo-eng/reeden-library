@@ -156,10 +156,11 @@
 .catalog-grid .theme-preview {padding:0;min-height:0;position:relative;}
 .catalog-grid .theme-thumbnail,.catalog-grid .preview-empty {width:100%;height:auto;max-height:none;min-height:0;aspect-ratio:16/10;}
 .catalog-grid .font-preview-frame {margin:0;width:100%;height:100%;aspect-ratio:auto;border:0;border-radius:0;}
-/* 特异性必须压过 styles.css 的 .font-preview-image：这里的 contain 曾把
-   700x300 样张缩成小字并上下留白，和「放大字形」的样式意图相反。 */
-.catalog-grid .font-preview-image {width:100%;height:100%;object-fit:cover;object-position:50% 50%;}
-/* 手机上父容器按 16/10 定高，124px 的 min-height 会把样张底部顶出卡片被裁掉。 */
+/* 网格里富样张与 JPG 兜底都铺满预览框，JPG 用 contain 完整显示不裁字。 */
+.catalog-grid .font-preview-image,.catalog-grid .font-specimen {width:100%;height:100%;}
+.catalog-grid .theme-thumbnail .font-preview-image {object-fit:contain;object-position:50% 50%;}
+.catalog-grid .font-specimen .specimen-hero {font-size:clamp(30px,4.6vw,52px);}
+/* 手机上父容器按 16/10 定高，min-height 会把样张底部顶出卡片被裁掉。 */
 @media(max-width:680px){.catalog-grid .font-preview-frame {min-height:0;}}
 .catalog-grid .asset-preview-button,.catalog-grid .asset-html-preview {width:100%;height:100%;min-height:0;max-height:none;aspect-ratio:auto;border:0;border-radius:0;padding:0;pointer-events:none;}
 .catalog-grid .asset-preview-button img {width:100%;height:100%;object-fit:contain;}

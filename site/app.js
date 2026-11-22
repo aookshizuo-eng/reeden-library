@@ -2895,19 +2895,63 @@ function fontClassificationEditor(font) {
 }
 function fontPreviewMarkup(font) {
   const name = font.family || font.file_name || "字体";
-  // The specimen text always exists in the DOM. A broken preview image or a
-  // failed FontFace load must never leave an empty card.
-  const specimen = `<span class="font-preview-fallback" data-font-preview-id="${escapeHtml(font.id || "")}"${font.preview_url ? " hidden" : ""}>Aa 中文 你好 123</span>`;
+  const fid = escapeHtml(font.id || "");
+  // 富样张：进入视口后用真实字体渲染多行文字，能同时看清单字、中文词句、
+  // 拉丁字母和数字，比入库时那张单行 JPG 更能判断字体风格。JPG 只在字体
+  // 尚未加载或加载失败时兜底，避免大字体下载期间卡片空白。
+  const specimen = `<div class="font-specimen" data-font-preview-id="${fid}" hidden><strong class="specimen-hero">中文</strong><span class="specimen-cjk">永和九年 · 岁在癸丑</span><span class="specimen-latin">ABCDEFG abcdefg</span><span class="specimen-digits">0123456789 ，。！？</span></div>`;
+  // 兜底文本始终留在 DOM：JPG 坏掉且 FontFace 也失败时仍有可读字形。
+  const fallback = `<span class="font-preview-fallback" data-font-preview-id="${fid}" hidden>Aa 中文 你好 123</span>`;
   const image = font.preview_url ? `<img class="font-preview-image" src="${escapeHtml(assetUrl(font.preview_url))}" alt="${escapeHtml(name)} 字形预览" loading="lazy" />` : "";
-  return `<div class="font-preview-frame" data-font-id="${escapeHtml(font.id || "")}">${image}${specimen}</div>`;
+  return `<div class="font-preview-frame" data-font-id="${fid}">${image}${specimen}${fallback}</div>`;
 }
-function loadFontPreviewFace(font) {
-  if(!font?.id)return;
-  const apply=()=>$$(`[data-font-preview-id="${CSS.escape(font.id)}"]`).forEach(specimen=>{specimen.style.fontFamily=`font-${font.id}, sans-serif`;});
-  if(loadedFontFaces.has(font.id)){apply();return;}
-  if(loadingFontFaces.has(font.id)||failedFontFaces.has(font.id))return;
+// 富样张按视口懒加载，且同时最多下载 3 个字体文件（单个可达数十 MB），
+// 避免一进字体库就把整库字体拉下来。已加载/失败/在途的字体只入队一次。
+const fontPreviewQueue=[];
+let fontPreviewActive=0;
+function pumpFontPreviewQueue() {
+  while(fontPreviewActive<3 && fontPreviewQueue.length) {
+    const font=fontPreviewQueue.shift();
+    fontPreviewActive++;
+    loadFontPreviewFace(font,()=>{fontPreviewActive--;pumpFontPreviewQueue();});
+  }
+}
+function enqueueFontPreview(font) {
+  if(!font?.id || loadedFontFaces.has(font.id) || loadingFontFaces.has(font.id) || failedFontFaces.has(font.id))return;
+  if(fontPreviewQueue.some(item=>item.id===font.id))return;
+  fontPreviewQueue.push(font);
+  pumpFontPreviewQueue();
+}
+let fontPreviewObserver;
+function observeFontPreviews() {
+  if(fontPreviewObserver)fontPreviewObserver.disconnect();
+  const frames=$$("#fontList .font-preview-frame");
+  if(typeof IntersectionObserver==="undefined"){frames.forEach(frame=>{const font=state.fonts.find(item=>String(item.id)===String(frame.dataset.fontId));if(font)enqueueFontPreview(font);});return;}
+  fontPreviewObserver=new IntersectionObserver(entries=>{
+    for(const entry of entries) {
+      if(!entry.isIntersecting)continue;
+      fontPreviewObserver.unobserve(entry.target);
+      const font=state.fonts.find(item=>String(item.id)===String(entry.target.dataset.fontId));
+      if(font)enqueueFontPreview(font);
+    }
+  },{rootMargin:"120px"});
+  frames.forEach(frame=>fontPreviewObserver.observe(frame));
+}
+function loadFontPreviewFace(font, done) {
+  const finish=()=>{if(typeof done==="function")done();};
+  if(!font?.id){finish();return;}
+  const apply=()=>$$(`[data-font-id="${CSS.escape(font.id)}"]`).forEach(frame=>{
+    const specimen=frame.querySelector(".font-specimen");
+    const image=frame.querySelector(".font-preview-image");
+    const fallback=frame.querySelector(".font-preview-fallback");
+    if(specimen){specimen.style.fontFamily=`font-${font.id}, sans-serif`;specimen.hidden=false;}
+    if(image)image.hidden=true;
+    if(fallback)fallback.hidden=true;
+  });
+  if(loadedFontFaces.has(font.id)){apply();finish();return;}
+  if(loadingFontFaces.has(font.id)||failedFontFaces.has(font.id)){finish();return;}
   const url = assetUrl(font?.view_url || font?.url);
-  if (!url || typeof FontFace === "undefined") return;
+  if (!url || typeof FontFace === "undefined") {finish();return;}
   loadingFontFaces.add(font.id);
   const face = new FontFace(`font-${font.id}`, `url(${JSON.stringify(url)})`);
   face.load().then(loaded => {
@@ -2918,14 +2962,15 @@ function loadFontPreviewFace(font) {
     failedFontFaces.add(font.id);
   }).finally(() => {
     loadingFontFaces.delete(font.id);
+    finish();
   });
 }
 function recoverFontPreviewImage(image) {
   const frame = image.closest(".font-preview-frame");
-  const fallback = frame?.querySelector(".font-preview-fallback");
-  if (!frame || !fallback) return;
+  if (!frame) return;
   image.remove();
-  fallback.hidden = false;
+  const fallback=frame.querySelector(".font-preview-fallback");
+  if(fallback)fallback.hidden=false;
   const font = state.fonts.find(item => String(item.id) === String(frame.dataset.fontId));
   if (font) loadFontPreviewFace(font);
 }
@@ -3653,9 +3698,9 @@ function renderFonts() {
     image.addEventListener("error", () => recoverFontPreviewImage(image), {once: true});
     if (image.complete && image.naturalWidth === 0) recoverFontPreviewImage(image);
   });
-  // Only fonts without a generated specimen need the original font file.
-  // Cards with a preview image must not download a multi-megabyte TTF/WOFF.
-  visible.filter(font => !font.preview_url).forEach(loadFontPreviewFace);
+  // 富样张按视口懒加载：滚动到哪加载到哪，同一时刻最多 3 个，避免整库字体
+  // 一起下载。已加载过的字体由 loadedFontFaces 去重，不再重复拉取。
+  observeFontPreviews();
   $$(".sync-font").forEach(button => button.addEventListener("click", () => syncFont(button.dataset.id)));
   $$(".delete-record[data-kind='font']").forEach(button => button.addEventListener("click", () => deleteSelectedRecords("font", [button.dataset.id])));
   renderImportedFonts();
@@ -3693,10 +3738,14 @@ function assetPreview(asset, compact = false) {
 }
 function libraryRecordCard(kind,record,preview,caption) {
   const name=(kind==='font'?record.family:record.name)||record.name||record.file_name||'未命名',tags=recordTags(record),id=escapeHtml(record.id);
+  // 字体卡片直接放下载入口，不必先点开详情。网络字体用 downloadUrl 的下载
+  // 语义（download=1 + name=），本地未同步的字体无地址则不显示按钮。
+  const fontDownload=kind==='font' ? downloadUrl(record.download_url||record.object_url||record.url||'',record.file_name||name) : '';
+  const downloadAction=fontDownload?`<a class="download-link catalog-download" href="${escapeHtml(fontDownload)}" download="${escapeHtml(record.file_name||name)}" aria-label="下载字体 ${escapeHtml(name)}">下载</a>`:'';
   return `<article class="theme-card catalog-card ${kind}-card" data-record-card="${kind}" data-${kind}-id="${id}">
     <button class="theme-card-hit" type="button" data-record-open="${kind}" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情"></button>
     <div class="theme-preview"><div class="theme-thumbnail catalog-${kind}-preview">${preview}</div><span class="preview-caption">${escapeHtml(caption)}</span><button class="theme-more" type="button" data-record-details="${kind}" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情">⋯</button></div>
-    <div class="theme-info">${isNewArrival(record)?'<span class="arrival-label">新入库</span>':''}<div class="item-heading">${selectInput(kind,record.id,name,isAssetBusy(kind,record.id))}<h3 class="theme-title">${escapeHtml(name)}</h3></div><div class="theme-meta"><span class="theme-categories">${[...(kind==='font'?[fontCategory(record)]:record.style?[record.style]:[]),...tags.slice(0,2)].map(tag=>`<em>${escapeHtml(tag)}</em>`).join('')}</span><span>${formatBytes(record.bytes)}</span></div>${record.sync_error?`<p class="inline-error">${escapeHtml(typeof record.sync_error==='string'?record.sync_error:Object.values(record.sync_error).join('；'))}</p>`:''}</div>
+    <div class="theme-info">${isNewArrival(record)?'<span class="arrival-label">新入库</span>':''}<div class="item-heading">${selectInput(kind,record.id,name,isAssetBusy(kind,record.id))}<h3 class="theme-title">${escapeHtml(name)}</h3></div><div class="theme-meta"><span class="theme-categories">${[...(kind==='font'?[fontCategory(record)]:record.style?[record.style]:[]),...tags.slice(0,2)].map(tag=>`<em>${escapeHtml(tag)}</em>`).join('')}</span><span>${formatBytes(record.bytes)}</span>${downloadAction}</div>${record.sync_error?`<p class="inline-error">${escapeHtml(typeof record.sync_error==='string'?record.sync_error:Object.values(record.sync_error).join('；'))}</p>`:''}</div>
   </article>`;
 }
 function openRecordDialog(kind,id) {
@@ -3708,7 +3757,7 @@ function openRecordDialog(kind,id) {
   body.innerHTML=`<div class="record-dialog-preview">${font?fontPreviewMarkup(record):assetPreview(record)}</div><div class="record-dialog-fields"><form class="asset-meta-form" data-record-form="${escapeHtml(record.id)}" data-record-kind="${kind}">${font?'':`<label>作者<input name="author" value="${escapeHtml(record.author||'')}" /></label>`}<label>${font?'分类':'风格'}<input name="style" value="${escapeHtml(font?fontCategory(record):record.style||'')}" /></label><label>标签<input name="tags" value="${escapeHtml(recordTags(record).join(', '))}" placeholder="用逗号分隔" /></label><button class="secondary-button" type="submit">保存分类</button></form><div class="record-detail-actions">${url?`<a class="primary-button" href="${escapeHtml(url)}" download="${escapeHtml(record.file_name||name)}">${font?'下载字体':'下载文件'}</a>`:''}${savedToCloud(record)?'':`<button class="secondary-button" data-record-sync>同步到 R2</button>`}<button class="text-button danger-text" data-record-delete>删除</button></div><details><summary>文件信息</summary><p class="field-help">${escapeHtml(record.file_name||'')}<br>SHA ${escapeHtml(record.sha256||'未记录')}</p>${record.cleanup_warning?`<p class="inline-error">${escapeHtml(typeof record.cleanup_warning==='string'?record.cleanup_warning:Object.values(record.cleanup_warning).join('；'))}</p>`:''}</details></div>`;
   const sync=$('[data-record-sync]',body);if(sync)sync.onclick=async()=>{sync.disabled=true;try{await(font?syncFont(id):syncAsset(id));openRecordDialog(kind,id);}finally{sync.disabled=false;}};
   $('[data-record-delete]',body).onclick=async()=>{await deleteSelectedRecords(kind,[id]);if(!state[kind+'s'].some(item=>String(item.id)===String(id)))dialog.close();};
-  if(font){$$('.font-preview-image',body).forEach(image=>{image.addEventListener('error',()=>recoverFontPreviewImage(image),{once:true});if(image.complete&&image.naturalWidth===0)recoverFontPreviewImage(image);});if(!record.preview_url)loadFontPreviewFace(record);}
+  if(font){$$('.font-preview-image',body).forEach(image=>{image.addEventListener('error',()=>recoverFontPreviewImage(image),{once:true});if(image.complete&&image.naturalWidth===0)recoverFontPreviewImage(image);});loadFontPreviewFace(record);}
   if(!dialog.open)dialog.showModal();
   updateBulkControls();
 }

@@ -1,8 +1,9 @@
 // 字体库端到端回归：
-//   1) 样张在网格里用 cover 铺满，不再 contain 留白；
+//   1) JPG 兜底样张用 contain 完整显示不裁字，富样张结构存在；
 //   2) 反复搜索渲染时同一字体只创建一个 FontFace（无重复下载）；
 //   3) 字体分类下拉计数跟随当前搜索结果；
-//   4) 数字 id 字体的分类能保存（字符串 id 比较修复）。
+//   4) 数字 id 字体的分类能保存（字符串 id 比较修复）；
+//   5) 库卡片上直接显示下载按钮，指向带 download 语义的地址。
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {createServer} from 'node:http';
@@ -66,7 +67,11 @@ try{
   await p.waitForFunction(()=>document.querySelector('#apiBaseStatus')?.textContent.includes('已连接共享库'),{},{timeout:20000});
   await p.waitForFunction(()=>document.querySelectorAll('#fontList .theme-card').length===4,{},{timeout:20000});
   const objectFit=await p.locator('#fontList .font-preview-image').first().evaluate(el=>getComputedStyle(el).objectFit);
-  assert.equal(objectFit,'cover','网格里的字体样张必须 cover 铺满，不能 contain 留白');
+  assert.equal(objectFit,'contain','网格里的 JPG 样张必须 contain 完整显示，不能再裁成半截大字');
+  const specimenRows=await p.locator('#fontList .font-specimen .specimen-hero, #fontList .font-specimen .specimen-cjk, #fontList .font-specimen .specimen-latin, #fontList .font-specimen .specimen-digits').count();
+  assert.ok(specimenRows>=8,'每张字体卡片应有 4 行富样张结构（4 张卡片）');
+  const downloadHref=await p.locator('#fontList .font-card-download, #fontList .catalog-download').first().getAttribute('href');
+  assert.ok(downloadHref&&downloadHref.includes('download=1'),`库卡片必须直接提供下载按钮且带 download 语义，实际：${downloadHref}`);
 
   // 反复搜索渲染：无预览字体的 FontFace 每个 id 只允许创建一次。
   for(const term of ['乙','丙','甲','','乙','']){
@@ -102,5 +107,5 @@ try{
   assert.ok(patches.some(body=>body.style==='新分类'),'PATCH 必须携带新分类');
   assert.equal(savedStyle,'新分类','数字 id 字体的分类已落库');
   assert.deepEqual(errors,[]);
-  console.log('PASS: 字体样张 cover、FontFace 不重复、筛选计数随搜索、数字 id 分类可保存。');
+  console.log('PASS: JPG contain 不裁字、富样张结构在、卡片有下载按钮、FontFace 不重复、筛选计数随搜索、数字 id 分类可保存。');
 }finally{await browser.close();await new Promise(resolve=>server.close(resolve));}
