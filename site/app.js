@@ -312,6 +312,8 @@ const loadedFontFaces = new Set();
 // 同步占位 + 失败负缓存：同一 id 全程只加载一次，失败也不在每次渲染时重试。
 const loadingFontFaces = new Set();
 const failedFontFaces = new Set();
+// OTS 拒收的字体改用 opentype 描边样张，缓存结果避免重复拉取同一个大文件。
+const outlinedSpecimenFaces = new Map();
 const recentUploadIds = new Set();
 const recentOnly = {theme: false, font: false, asset: false};
 // 启动时先用本机快照恢复存储配置与库记录，这样刷新后按钮状态、已保存的
@@ -2899,11 +2901,54 @@ function fontPreviewMarkup(font) {
   // 富样张：进入视口后用真实字体渲染多行文字，能同时看清单字、中文词句、
   // 拉丁字母和数字，比入库时那张单行 JPG 更能判断字体风格。JPG 只在字体
   // 尚未加载或加载失败时兜底，避免大字体下载期间卡片空白。
-  const specimen = `<div class="font-specimen" data-font-preview-id="${fid}" hidden><strong class="specimen-hero">中文</strong><span class="specimen-cjk">永和九年 · 岁在癸丑</span><span class="specimen-latin">ABCDEFG abcdefg</span><span class="specimen-digits">0123456789 ，。！？</span></div>`;
+  // 样张同时给简体和繁体：字形覆盖是选字体时最常看的一点，源文件里那张
+  // 单行 JPG 只有「Aa 中文 你好 123」，看不出简繁字形差别。
+  const specimen = `<div class="font-specimen" data-font-preview-id="${fid}" hidden><strong class="specimen-hero">中文</strong><span class="specimen-cjk specimen-sc">简体 · 汉字阅读 书写字体</span><span class="specimen-cjk specimen-tc">繁體 · 漢字閱讀 書寫字體</span><span class="specimen-latin">ABCDEFG abcdefg</span><span class="specimen-digits">0123456789 ，。！？</span></div>`;
+  // Chromium 的 OTS 会拒掉一部分第三方中文字体，这类字体用 opentype.js
+  // 直接描字形轮廓生成样张图，避免永远停在旧的单行 JPG 上。
+  const outline = `<img class="font-specimen-outline" data-font-preview-id="${fid}" alt="${escapeHtml(name)} 简繁字形样张" hidden />`;
   // 兜底文本始终留在 DOM：JPG 坏掉且 FontFace 也失败时仍有可读字形。
   const fallback = `<span class="font-preview-fallback" data-font-preview-id="${fid}" hidden>Aa 中文 你好 123</span>`;
   const image = font.preview_url ? `<img class="font-preview-image" src="${escapeHtml(assetUrl(font.preview_url))}" alt="${escapeHtml(name)} 字形预览" loading="lazy" />` : "";
-  return `<div class="font-preview-frame" data-font-id="${fid}">${image}${specimen}${fallback}</div>`;
+  return `<div class="font-preview-frame" data-font-id="${fid}">${image}${specimen}${outline}${fallback}</div>`;
+}
+// 把已加载的字体套回所有同名样张。搜索、翻页、筛选都会重建卡片 DOM，
+// 只靠 load() 里那一次 apply() 会让新卡片退回 JPG，看起来像「字形没更新」。
+function applyFontSpecimen(font) {
+  if(!font?.id)return;
+  const outlineUrl=outlinedSpecimenFaces.get(String(font.id));
+  $$(`[data-font-id="${CSS.escape(font.id)}"]`).forEach(frame=>{
+    const specimen=frame.querySelector(".font-specimen");
+    const image=frame.querySelector(".font-preview-image");
+    const fallback=frame.querySelector(".font-preview-fallback");
+    const outline=frame.querySelector(".font-specimen-outline");
+    if(specimen){specimen.style.fontFamily=`font-${font.id}, sans-serif`;specimen.hidden=Boolean(outlineUrl);}
+    if(outline&&outlineUrl){outline.src=outlineUrl;outline.hidden=false;}
+    if(image)image.hidden=true;
+    if(fallback)fallback.hidden=true;
+  });
+}
+// 用 opentype.js 描边出简繁样张：FontFace 加载失败时仍能看到真实字形。
+async function drawFontSpecimenOutline(font,url) {
+  if(typeof window.opentype?.parse!=="function"||!url)return false;
+  try {
+    const response=await fetch(url);if(!response.ok)return false;
+    const bytes=new Uint8Array(await response.arrayBuffer());
+    const parsed=window.opentype.parse(bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength));
+    const canvas=document.createElement("canvas");canvas.width=700;canvas.height=300;
+    const context=canvas.getContext("2d");if(!context)return false;
+    context.fillStyle="#fff";context.fillRect(0,0,700,300);context.fillStyle="#1d1a15";
+    for(const line of [{text:"中文",size:92,y:78},{text:"简体 · 汉字阅读 书写字体",size:30,y:158},{text:"繁體 · 漢字閱讀 書寫字體",size:30,y:198},{text:"ABCDEFG abcdefg 0123456789",size:22,y:252}]){
+      try {
+        const path=parsed.getPath(line.text,0,0,line.size),box=path.getBoundingBox();
+        const scale=Math.min(1,660/Math.max(1,box.x2-box.x1));
+        context.save();context.translate(350,line.y);context.scale(scale,scale);
+        context.translate(-(box.x1+box.x2)/2,0);context.fill(new Path2D(path.toPathData(2)));context.restore();
+      } catch {}
+    }
+    outlinedSpecimenFaces.set(String(font.id),canvas.toDataURL("image/jpeg",0.9));
+    return true;
+  } catch { return false; }
 }
 // 富样张按视口懒加载，且同时最多下载 3 个字体文件（单个可达数十 MB），
 // 避免一进字体库就把整库字体拉下来。已加载/失败/在途的字体只入队一次。
@@ -2917,7 +2962,11 @@ function pumpFontPreviewQueue() {
   }
 }
 function enqueueFontPreview(font) {
-  if(!font?.id || loadedFontFaces.has(font.id) || loadingFontFaces.has(font.id) || failedFontFaces.has(font.id))return;
+  if(!font?.id)return;
+  // 已经成功加载/描边的字体在新卡片上必须重新套用，否则搜索翻页之后
+  // 样张又被 hidden 的初始状态盖回旧 JPG，用户看到的就是「字形没更新」。
+  if(loadedFontFaces.has(font.id)||outlinedSpecimenFaces.has(String(font.id))){applyFontSpecimen(font);return;}
+  if(loadingFontFaces.has(font.id) || failedFontFaces.has(font.id))return;
   if(fontPreviewQueue.some(item=>item.id===font.id))return;
   fontPreviewQueue.push(font);
   pumpFontPreviewQueue();
@@ -2940,30 +2989,33 @@ function observeFontPreviews() {
 function loadFontPreviewFace(font, done) {
   const finish=()=>{if(typeof done==="function")done();};
   if(!font?.id){finish();return;}
-  const apply=()=>$$(`[data-font-id="${CSS.escape(font.id)}"]`).forEach(frame=>{
-    const specimen=frame.querySelector(".font-specimen");
-    const image=frame.querySelector(".font-preview-image");
-    const fallback=frame.querySelector(".font-preview-fallback");
-    if(specimen){specimen.style.fontFamily=`font-${font.id}, sans-serif`;specimen.hidden=false;}
-    if(image)image.hidden=true;
-    if(fallback)fallback.hidden=true;
-  });
-  if(loadedFontFaces.has(font.id)){apply();finish();return;}
+  const apply=()=>applyFontSpecimen(font);
+  if(loadedFontFaces.has(font.id)||outlinedSpecimenFaces.has(String(font.id))){apply();finish();return;}
   if(loadingFontFaces.has(font.id)||failedFontFaces.has(font.id)){finish();return;}
   const url = assetUrl(font?.view_url || font?.url);
-  if (!url || typeof FontFace === "undefined") {finish();return;}
+  if (!url) {finish();return;}
+  if (typeof FontFace !== "undefined") {
+    loadingFontFaces.add(font.id);
+    const face = new FontFace(`font-${font.id}`, `url(${JSON.stringify(url)})`);
+    face.load().then(loaded => {
+      document.fonts.add(loaded);
+      loadedFontFaces.add(font.id);
+      apply();
+    }).catch(async () => {
+      // OTS 拒收的第三方中文字体很常见，不能就此放弃：再用 opentype 描边。
+      if(await drawFontSpecimenOutline(font,url))apply();
+      else failedFontFaces.add(font.id);
+    }).finally(() => {
+      loadingFontFaces.delete(font.id);
+      finish();
+    });
+    return;
+  }
+  // 没有 FontFace API（如部分 WebView）时直接走描边路径。
   loadingFontFaces.add(font.id);
-  const face = new FontFace(`font-${font.id}`, `url(${JSON.stringify(url)})`);
-  face.load().then(loaded => {
-    document.fonts.add(loaded);
-    loadedFontFaces.add(font.id);
-    apply();
-  }).catch(() => {
-    failedFontFaces.add(font.id);
-  }).finally(() => {
-    loadingFontFaces.delete(font.id);
-    finish();
-  });
+  drawFontSpecimenOutline(font,url).then(ok=>{
+    if(ok)apply();else failedFontFaces.add(font.id);
+  }).finally(()=>{loadingFontFaces.delete(font.id);finish();});
 }
 function recoverFontPreviewImage(image) {
   const frame = image.closest(".font-preview-frame");
@@ -3741,11 +3793,14 @@ function libraryRecordCard(kind,record,preview,caption) {
   // 字体卡片直接放下载入口，不必先点开详情。网络字体用 downloadUrl 的下载
   // 语义（download=1 + name=），本地未同步的字体无地址则不显示按钮。
   const fontDownload=kind==='font' ? downloadUrl(record.download_url||record.object_url||record.url||'',record.file_name||name) : '';
-  const downloadAction=fontDownload?`<a class="download-link catalog-download" href="${escapeHtml(fontDownload)}" download="${escapeHtml(record.file_name||name)}" aria-label="下载字体 ${escapeHtml(name)}">下载</a>`:'';
-  return `<article class="theme-card catalog-card ${kind}-card" data-record-card="${kind}" data-${kind}-id="${id}">
+  // 下载入口放在卡片右下角、做成实心按钮：之前是元信息行里一个灰色小字，
+  // 在截图里几乎看不见。absolute + z-index 保证它盖在整卡点击层之上。
+  const downloadAction=fontDownload?`<a class="download-link catalog-download" href="${escapeHtml(fontDownload)}" download="${escapeHtml(record.file_name||name)}" aria-label="下载字体 ${escapeHtml(name)}">↓ 下载</a>`:'';
+  return `<article class="theme-card catalog-card ${kind}-card ${downloadAction?'has-download':''}" data-record-card="${kind}" data-${kind}-id="${id}">
     <button class="theme-card-hit" type="button" data-record-open="${kind}" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情"></button>
     <div class="theme-preview"><div class="theme-thumbnail catalog-${kind}-preview">${preview}</div><span class="preview-caption">${escapeHtml(caption)}</span><button class="theme-more" type="button" data-record-details="${kind}" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情">⋯</button></div>
-    <div class="theme-info">${isNewArrival(record)?'<span class="arrival-label">新入库</span>':''}<div class="item-heading">${selectInput(kind,record.id,name,isAssetBusy(kind,record.id))}<h3 class="theme-title">${escapeHtml(name)}</h3></div><div class="theme-meta"><span class="theme-categories">${[...(kind==='font'?[fontCategory(record)]:record.style?[record.style]:[]),...tags.slice(0,2)].map(tag=>`<em>${escapeHtml(tag)}</em>`).join('')}</span><span>${formatBytes(record.bytes)}</span>${downloadAction}</div>${record.sync_error?`<p class="inline-error">${escapeHtml(typeof record.sync_error==='string'?record.sync_error:Object.values(record.sync_error).join('；'))}</p>`:''}</div>
+    <div class="theme-info">${isNewArrival(record)?'<span class="arrival-label">新入库</span>':''}<div class="item-heading">${selectInput(kind,record.id,name,isAssetBusy(kind,record.id))}<h3 class="theme-title">${escapeHtml(name)}</h3></div><div class="theme-meta"><span class="theme-categories">${[...(kind==='font'?[fontCategory(record)]:record.style?[record.style]:[]),...tags.slice(0,2)].map(tag=>`<em>${escapeHtml(tag)}</em>`).join('')}</span><span>${formatBytes(record.bytes)}</span></div>${record.sync_error?`<p class="inline-error">${escapeHtml(typeof record.sync_error==='string'?record.sync_error:Object.values(record.sync_error).join('；'))}</p>`:''}</div>
+    ${downloadAction}
   </article>`;
 }
 function openRecordDialog(kind,id) {

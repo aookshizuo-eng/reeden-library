@@ -381,13 +381,19 @@ h3 { font-size: 14.5px; line-height: 1.35; margin-bottom: 4px; font-weight: 600;
 .font-preview-frame { display: grid; place-items: center; min-height: 140px; margin: 9px 12px 0; overflow: hidden; border: 1px solid var(--rule); border-radius: 7px; background: #fff; color: var(--text); }
 .font-preview-image { display: block; width: 100%; height: 140px; object-fit: contain; object-position: 50% 50%; background: #fff; }
 .font-specimen { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; width: 100%; height: 140px; padding: 8px 10px; overflow: hidden; text-align: center; color: var(--text); background: #fff; }
-.font-specimen[hidden], .font-preview-image[hidden] { display: none; }
-.font-specimen .specimen-hero { font-size: 46px; font-weight: 400; line-height: 1.1; letter-spacing: .06em; }
-.font-specimen .specimen-cjk { font-size: 19px; line-height: 1.3; }
+.font-specimen[hidden], .font-preview-image[hidden], .font-specimen-outline[hidden] { display: none; }
+.font-specimen .specimen-hero { font-size: 42px; font-weight: 400; line-height: 1.1; letter-spacing: .06em; }
+.font-specimen .specimen-cjk { font-size: 16px; line-height: 1.25; }
+.font-specimen .specimen-sc { color: var(--text); }
+.font-specimen .specimen-tc { color: var(--muted); }
 .font-specimen .specimen-latin { font-size: 15px; line-height: 1.3; letter-spacing: .04em; }
 .font-specimen .specimen-digits { font-size: 12px; line-height: 1.3; color: var(--muted); }
+.font-specimen-outline { display: block; width: 100%; height: 140px; object-fit: contain; object-position: 50% 50%; background: #fff; }
 .font-preview-fallback { padding: 14px; font-size: 32px; line-height: 1.35; text-align: center; word-break: break-word; }
-.catalog-download { position: relative; z-index: 3; }
+/* 卡片右下角实心下载按钮：必须压在整卡点击层（z-index 2）之上。 */
+.catalog-download { position: absolute; right: 11px; bottom: 10px; z-index: 4; display: inline-flex; align-items: center; justify-content: center; min-height: 30px; padding: 0 13px; border-radius: 999px; background: var(--accent); color: #fffdf8; border-bottom: 0; font-size: 12px; font-weight: 600; box-shadow: 0 2px 8px rgba(24,21,17,.18); }
+.catalog-download:hover { color: #fffdf8; border-bottom: 0; filter: brightness(1.08); }
+.catalog-card.has-download .theme-info { padding-bottom: 40px; }
 .font-card-body { min-width: 0; padding: 11px 13px 8px; }
 .font-name { margin: 0; color: var(--text); font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
 .font-meta { display: flex; flex-wrap: wrap; gap: 6px 12px; color: var(--faint); font-size: 11px; margin-top: 5px; }

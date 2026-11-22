@@ -3,11 +3,14 @@
 //   2) 反复搜索渲染时同一字体只创建一个 FontFace（无重复下载）；
 //   3) 字体分类下拉计数跟随当前搜索结果；
 //   4) 数字 id 字体的分类能保存（字符串 id 比较修复）；
-//   5) 库卡片上直接显示下载按钮，指向带 download 语义的地址。
+//   5) 库卡片右下角显示醒目下载按钮，指向带 download 语义的地址；
+//   6) 富样张同时有简体和繁体两行，搜索重建 DOM 后仍套用已加载字形；
+//   7) FontFace 被 OTS 拒绝时用 opentype.js 描边样张兜底。
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {createServer} from 'node:http';
 import {readFile} from 'node:fs/promises';
+import {existsSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 import {handle, __test} from '../pages/worker-api.js';
@@ -18,6 +21,10 @@ const bucket=new MemoryR2();
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jB7sAAAAASUVORK5CYII=','base64');
 const previewPath='/api/objects/previews/'+'a'.repeat(64)+'.jpg';
 await bucket.put('previews/'+'a'.repeat(64)+'.jpg',png);
+// 用系统字体作为真实 FontFace 源；没有这台机器的字体时测试跳过字形套用断言。
+const localFont='C:/Windows/Fonts/NotoSansSC-VF.ttf';
+const realFont=existsSync(localFont)?await readFile(localFont):null;
+if(realFont){await bucket.put('fonts/'+'a'.repeat(64)+'.ttf',realFont);await bucket.put('fonts/'+'d'.repeat(64)+'.ttf',realFont);}
 const fontPath=hash=>'/api/objects/fonts/'+hash+'.ttf';
 const records=[
   {kind:'font',id:'font-a',family:'甲字体',file_name:'a.ttf',style:'黑体',tags:['标签甲'],bytes:1000,extension:'ttf',preview_url:previewPath,view_url:fontPath('a'.repeat(64)),url:fontPath('a'.repeat(64)),saved_to_cloud:true,sync_status:{library:'synced'}},
@@ -72,11 +79,29 @@ try{
   assert.ok(specimenRows>=8,'每张字体卡片应有 4 行富样张结构（4 张卡片）');
   const downloadHref=await p.locator('#fontList .font-card-download, #fontList .catalog-download').first().getAttribute('href');
   assert.ok(downloadHref&&downloadHref.includes('download=1'),`库卡片必须直接提供下载按钮且带 download 语义，实际：${downloadHref}`);
+  const downloadBox=await p.locator('#fontList .catalog-download').first().evaluate(el=>{
+    const card=el.closest('.theme-card').getBoundingClientRect(),box=el.getBoundingClientRect(),style=getComputedStyle(el);
+    return {rightGap:card.right-box.right,bottomGap:card.bottom-box.bottom,position:style.position,zIndex:style.zIndex};
+  });
+  assert.equal(downloadBox.position,'absolute','下载按钮必须绝对定位到卡片角上');
+  assert.ok(downloadBox.rightGap<24&&downloadBox.bottomGap<24,`下载按钮必须贴在卡片右下角：${JSON.stringify(downloadBox)}`);
+  assert.ok(Number(downloadBox.zIndex)>=3,'下载按钮必须盖过整卡点击层');
+  const scText=await p.locator('#fontList .font-specimen .specimen-sc').first().textContent();
+  const tcText=await p.locator('#fontList .font-specimen .specimen-tc').first().textContent();
+  assert.ok(scText.includes('简体')&&tcText.includes('繁體'),`样张必须同时有简体与繁体：${scText} / ${tcText}`);
 
   // 反复搜索渲染：无预览字体的 FontFace 每个 id 只允许创建一次。
   for(const term of ['乙','丙','甲','','乙','']){
     await p.locator('#fontSearchInput').fill(term);
     await p.waitForTimeout(220);
+  }
+  // 搜索重建 DOM 后，已加载字体仍要套回新样张（不能退回隐藏的旧 JPG）。
+  if(realFont){
+    await p.locator('#fontSearchInput').fill('甲');
+    await p.waitForFunction(()=>{const f=document.querySelector('#fontList .font-specimen');return f&&!f.hidden&&getComputedStyle(f).fontFamily.includes('font-');},{},{timeout:15000});
+    const reapplied=await p.locator('#fontList .font-specimen').first().evaluate(f=>({hidden:f.hidden,family:getComputedStyle(f).fontFamily}));
+    assert.equal(reapplied.hidden,false,'搜索重建后富样张不能被 hidden 盖回旧 JPG');
+    assert.ok(reapplied.family.includes('font-'),`搜索重建后必须复用已加载字体：${reapplied.family}`);
   }
   const families=await p.evaluate(()=>window.__fontFaceFamilies||[]);
   const duplicates=families.filter((item,index)=>families.indexOf(item)!==index);
