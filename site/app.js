@@ -2091,6 +2091,12 @@ function redPartKind(entries, info = {}) {
   if (/coverGallery/i.test(resourceType)) return "gallery";
   if (/highlight/i.test(resourceType)) return "highlight";
   if (names.some(name => /(^|\/)highlight\//i.test(name))) return "highlight";
+  // RED\x02 是「封面图集」专用容器：根目录只有一份 meta.json 和
+  // 1.jpg / 2.jpg 这样的序号封面，没有 theme.json。
+  if (String(info?.container_format || "") === "red_v2_gallery") return "gallery";
+  const rootMeta = names.some(name => /^meta\.json$/i.test(name));
+  const rootCovers = names.filter(name => /^[^/]+\.(jpe?g|png|webp|gif|avif)$/i.test(name)).length;
+  if (rootMeta && rootCovers > 0 && !names.some(name => /(^|\/)theme\.json$/i.test(name))) return "gallery";
   if ((entries || []).some(entry => entry?.role === "reader")) return "reader";
   // v2 加密主题的目录是密文，文件名不可信：认不出部件类型就按普通主题处理。
   if (String(info?.container_format || "") === "red_private_v2") return "";
@@ -2143,7 +2149,8 @@ async function composeRedPartPreviewBlob(entries, codec, mode) {
     context.fillStyle = "#f2eee5"; context.fillRect(0, 0, 1000, 1000);
     if (mode === "gallery") {
       // 封面图集：只按封面本身的网格排列，不画手机屏和书架。
-      const covers = items.slice(0, 6);
+      // 图集靠 `1.jpg/2.jpg` 的序号排序，预览也按序号排，别按 ZIP 写入顺序。
+      const covers = [...items].sort((a, b) => String(a.entry?.name || "").localeCompare(String(b.entry?.name || ""), undefined, {numeric: true})).slice(0, 6);
       const columns = covers.length <= 2 ? covers.length : covers.length <= 4 ? 2 : 3;
       const rows = Math.ceil(covers.length / columns);
       const gap = 18, margin = 54;
@@ -4580,7 +4587,9 @@ async function analyzeFiles(files) {
           // that result for both metadata and the preview instead of doing a
           // second full ZIP read through inspectContainer().
           entries = await codec.readZipEntries(raw);
-          inspection = { format: entries.containerFormat||"red_v4", compressionSupported: entries.containerFormat!=="red_v1_gzip", entries: entries.map(entry => ({ name: entry.name, bytes: entry.bytes.length, mime: codec.mimeFromBytes(entry.bytes, entry.name) })) };
+          // 图集（RED\x02）按序号文件名取图，改名会丢封面；和 v1 gzip 一样
+          // 只做识别、原包保留。
+          inspection = { format: entries.containerFormat||"red_v4", compressionSupported: !["red_v1_gzip","red_v2_gallery"].includes(entries.containerFormat), entries: entries.map(entry => ({ name: entry.name, bytes: entry.bytes.length, mime: codec.mimeFromBytes(entry.bytes, entry.name) })) };
         } catch (error) {
           if (error?.code !== "private_red_unsupported") throw error;
           inspection = await codec.inspectContainer(raw);
@@ -4725,8 +4734,9 @@ async function commitThemes(ids = [...selections.review]) {
             transferStage("写入收藏记录", name);
             const record = await uploadBrowserRecord({
               kind: "asset", id: `asset-${assetSha.slice(0, 16)}`, asset_type: "red", extension: "red",
-              category: redAsset, red_category: redAsset, preview_kind: item.info?.preview_details?.kind || "", file_name: fileName, name, author: "", style: "", tags: [],
+              category: redAsset, red_category: redAsset, preview_kind: item.info?.preview_details?.kind || "", file_name: fileName, name: item.info?.name || name, author: item.info?.author || "", style: "", tags: [],
               sha256: assetSha, original_sha256: assetSha, bytes: raw.length, mime: "application/octet-stream",
+              container_format: item.info?.container_format || "", compression_supported: item.info?.compression_supported !== false,
               object_url: objectPath, url: objectPath, preview_url: previewPath,
               saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
             }, codec);

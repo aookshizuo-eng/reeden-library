@@ -13,6 +13,10 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function (root) {
   "use strict";
   const RED_ZIP = new Uint8Array([82, 69, 68, 4]);
+  // 封面图集用的是 RED\x02：同样是 4 字节头 + 普通 ZIP，条目是
+  // `1.jpg/2.jpg...` 加一份 meta.json。它没有 JSON 前缀，也不加密。
+  const RED_GALLERY = new Uint8Array([82, 69, 68, 2]);
+  const RED_ZIP_HEADERS = [RED_ZIP, RED_GALLERY];
   const RED_PRIVATE = new Uint8Array([82, 69, 68, 16]);
   const RED_READER = new Uint8Array([82, 69, 68, 1]);
   const te = typeof TextEncoder === "function" ? new TextEncoder() : null;
@@ -219,10 +223,12 @@
     const raw = bytesOf(redBytes);
     const standard = options.standardZip === true;
     if(!standard&&startsWith(raw,RED_READER))return readReaderEntries(raw);
-    if (!standard && !startsWith(raw, RED_ZIP)) {
+    const zipHeader = standard ? null : RED_ZIP_HEADERS.find(header => startsWith(raw, header));
+    if (!standard && !zipHeader) {
       if (startsWith(raw, RED_PRIVATE)) throw new FreeCodecError("加密 RED v2 当前浏览器版本只做结构识别，暂不重新封包", "private_red_unsupported");
       throw new FreeCodecError("无法识别 RED 文件头，文件可能不完整或格式尚未支持", "red_header_invalid");
     }
+    const galleryContainer = zipHeader === RED_GALLERY;
     // Keep a view over the caller's buffer instead of copying the complete
     // package before reading its central directory. This matters for phone
     // browsers where a RED can be tens of megabytes.
@@ -268,6 +274,9 @@
       return { name: item.name, bytes: data, method: item.method, flags: item.flags, crc: item.crc, externalAttr: item.externalAttr, comment: item.comment };
     });
     entries.push(...decoded);
+    // 图集容器改名/改扩展名都有风险（Reeden 按数字文件名序号取图），
+    // 所以标记成「原包保留」，压缩流程看到它直接回原字节。
+    if (galleryContainer) entries.containerFormat = "red_v2_gallery";
     return entries;
   }
   async function writeZipEntries(entries, options = {}) {
@@ -299,7 +308,7 @@
     const centralBytes = concat(central), localBytes = concat(local);
     if (entries.length > 0xffff || offset > 0xffffffff || centralBytes.length > 0xffffffff) throw new FreeCodecError("RED ZIP 资源超过普通 ZIP 上限", "zip_size_limit");
     const end = concat([new Uint8Array([0x50, 0x4b, 0x05, 0x06]), put16(0), put16(0), put16(entries.length), put16(entries.length), put32(centralBytes.length), put32(localBytes.length), put16(0)]);
-    return concat([RED_ZIP, localBytes, centralBytes, end]);
+    return concat([options.header || RED_ZIP, localBytes, centralBytes, end]);
   }
   function mapHashValue(value, replacements) {
     if (typeof value !== "string") return value;
@@ -851,9 +860,10 @@
     const raw = await readBytes(value);
     if (startsWith(raw, RED_PRIVATE)) return parsePrivateHeader(raw);
     if(startsWith(raw,RED_READER)){const entries=await readReaderEntries(raw);return {format:"red_v1_gzip",compressionSupported:false,originalPreserved:true,entries:entries.map(entry=>({name:entry.name,bytes:entry.bytes.length,mime:mimeFromBytes(entry.bytes,entry.name)}))};}
-    if (!startsWith(raw, RED_ZIP)) throw new FreeCodecError("缺少 RED\\x04 或 RED\\x10 头", "red_header_invalid");
+    if (!RED_ZIP_HEADERS.some(header => startsWith(raw, header))) throw new FreeCodecError("缺少 RED\\x04、RED\\x02 或 RED\\x10 头", "red_header_invalid");
     const entries = await readZipEntries(raw);
-    return { format: "red_v4", entries: entries.map(entry => ({ name: entry.name, bytes: entry.bytes.length, mime: mimeFromBytes(entry.bytes, entry.name) })), compressionSupported: true };
+    const format = entries.containerFormat || "red_v4";
+    return { format, entries: entries.map(entry => ({ name: entry.name, bytes: entry.bytes.length, mime: mimeFromBytes(entry.bytes, entry.name) })), compressionSupported: format === "red_v4" };
   }
   async function compressRed(value, options = {}) {
     const raw = await readBytes(value);
@@ -862,6 +872,13 @@
       return {bytes:raw,originalBytes:raw.length,compressedBytes:raw.length,savedBytes:0,packageSelected:false,format:"red_v1_gzip",originalPreserved:true,decisions:[{path:"readerColorSchema",used:false,reason:"阅读主题保留原始 gzip 封装"}]};
     }
     if (startsWith(raw, RED_PRIVATE)) throw new FreeCodecError("加密 RED v2 当前浏览器版本只做结构识别，暂不重新封包；请使用电脑后台版本", "private_red_unsupported");
+    // 封面图集是 RED\x02 + 普通 ZIP，图片用 `1.jpg`、`2.jpg` 这种序号命名。
+    // 压缩会把 JPEG 换成 WebP 并改扩展名，序号文件一旦改名图集就可能整包
+    // 读不出封面，所以这里只做完整性校验，原样保留。
+    if (startsWith(raw, RED_GALLERY)) {
+      const entries = await readZipEntries(raw);
+      return { bytes: raw, originalBytes: raw.length, compressedBytes: raw.length, savedBytes: 0, packageSelected: false, format: "red_v2_gallery", originalPreserved: true, decisions: [{ path: "封面图集", used: false, reason: "图集按序号文件名取图，保留原始 ZIP 封装" }].concat(entries.map(entry => ({ path: entry.name, used: false, reason: "图集原包保留" }))) };
+    }
     const entries = await readZipEntries(raw);
     const skipPaths = nineSlicePaths(entries);
     const codecOptions = skipPaths.length ? { ...options, skipPaths } : options;
@@ -944,7 +961,7 @@
     const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new FreeCodecError("字体预览编码失败", "font_preview_encode_failed")), "image/png"));
     return { ...info, family, blob, release() { if (face) root.document.fonts.delete(face); root.URL.revokeObjectURL(url); } };
   }
-  const api = { FreeCodecError, RED_ZIP, RED_PRIVATE, COMPRESSION_PRESETS, imageRole, requantizeGif, sha256Hex, md5Hex, crc32, mimeFromBytes, readZipEntries, writeZipEntries, inspectContainer, extractPrivatePreviewImages, compressImage, compressRed, inspectFont, fontPreview, nineSlicePaths };
+  const api = { FreeCodecError, RED_ZIP, RED_GALLERY, RED_PRIVATE, COMPRESSION_PRESETS, imageRole, requantizeGif, sha256Hex, md5Hex, crc32, mimeFromBytes, readZipEntries, writeZipEntries, inspectContainer, extractPrivatePreviewImages, compressImage, compressRed, inspectFont, fontPreview, nineSlicePaths };
   if (root && typeof root === "object") root.ReedenFreeCodec = api;
   return api;
 });
