@@ -1009,6 +1009,9 @@ function pan123BackupConfig() {
 }
 let backupPhaseActive=false;
 const deferredPan123=[];
+// 入库阶段原包字节已在浏览器内存，暂存下来供紧随其后的备份直接复用，
+// 省掉每个主题一次 R2 往返。备份结束（成功/失败/暂停）后即释放，不长期占用内存。
+const backupByteStash=new Map();
 function pan123BackupEnabled(){return !!pan123BackupConfig().token && $('#backupTo123')?.checked!==false;}
 // 问题3：备份走的还是 Worker -> Cloudflare 海外出口 -> 123，这是慢+易失败的根因。
 // 登录/校验/列清单早已浏览器直连，唯独上传原包还留在海外中转。这里把控制面
@@ -1028,35 +1031,56 @@ async function persistPan123BackupResult(record,md5,result){
   if(data.item){Object.assign(record,data.item);const current=state.themes.find(item=>item.id===record.id);if(current)Object.assign(current,data.item);updateCachedRecord(record);}
   return data;
 }
-async function pan123DirectBackup(record,codec,config){
+// 备份批次共享的目录解析：同一 token + 目录只解析一次 FileId，避免逐主题重复列目录。
+function pan123ListFolderFactory(token){
+  return async(parent)=>{
+    const data=await pan123DirectRequest(token,'/file/list/new',{params:{driveId:0,limit:100,next:'0',orderBy:'file_id',orderDirection:'desc',parentFileId:String(parent),trashed:'false',SearchData:'',Page:1,OnlyLookAbnormalFile:0,event:'homeListFile',operateType:4,inDirectSpace:'false'}});
+    return Array.isArray(data.InfoList)?data.InfoList:[];
+  };
+}
+async function pan123BackupParent(token,folder,listFolder,context){
+  if(context.parent!==undefined)return context.parent;
+  // 并发去重：共享同一个 in-flight promise，避免多个主题同时解析同一目录。
+  if(!context.parentPromise)context.parentPromise=(async()=>{
+    let parent=0;
+    for(const name of folder.split('/').filter(Boolean)){
+      if(name.length>240||name==='.'||name==='..')throw new Error('123 备份目录名称无效');
+      let found=(await listFolder(parent)).find(item=>item&&String(item.FileName)===name);
+      if(!found){
+        await pan123DirectRequest(token,'/file/upload_request',{method:'POST',body:{driveId:0,etag:'',fileName:name,parentFileId:parent,size:0,type:1,duplicate:0,NotReuse:true,event:'newCreateFolder',operateType:1}});
+        found=(await listFolder(parent)).find(item=>item&&String(item.FileName)===name);
+      }
+      if(!found||Number(found.Type)!==1)throw new Error(`123 备份目录不可用：${name}`);
+      parent=Number(found.FileId);
+    }
+    context.parent=parent;return parent;
+  })();
+  try{return await context.parentPromise;}
+  finally{if(context.parent===undefined)context.parentPromise=null;}
+}
+async function pan123DirectBackup(record,codec,config,inMemoryBytes,context){
   const token=config.token;
   let md5=record.original_md5;
   const fileName=(String(record.source_name||redDownloadLabel(record)).replace(/\.red$/i,'').replace(/[\\/:*?"<>|]/g,'_').slice(0,200)||'theme')+'.red';
   const folder=String(config.folder||'').replace(/^\/+|\/+$/g,'');
-  transferStage('从 R2 读取原包（直连备份）',record.name||record.id);
-  const raw=await transferFetch(assetUrl(record.original_url),{headers:requestHeaders()},180000);
-  if(!raw.ok)throw new Error(`无法读取 R2 原包（HTTP ${raw.status}）`);
-  const bytes=new Uint8Array(await raw.arrayBuffer());
+  // 慢的根源之一：入库时原包字节已经在浏览器内存里，旧实现却丢掉它、备份阶段
+  // 再从 R2 下载一趟。这里优先复用入库时暂存的字节，只有重试旧记录才回退 R2。
+  let bytes=inMemoryBytes;
+  if(!bytes){
+    transferStage('从 R2 读取原包（直连备份）',record.name||record.id);
+    const raw=await transferFetch(assetUrl(record.original_url),{headers:requestHeaders()},180000);
+    if(!raw.ok)throw new Error(`无法读取 R2 原包（HTTP ${raw.status}）`);
+    bytes=new Uint8Array(await raw.arrayBuffer());
+  }
   if(!bytes.length)throw new Error('R2 原包为空');
   if(!md5){
     const result=await runCodecTask('hashes',{items:[{bytes}],options:{concurrency:1}},async()=>({results:[{md5:await codec.md5Hex(bytes)}]}));
     md5=result.results[0].md5;record.original_md5=md5;updateCachedRecord(record);
   }
-  const listFolder=async(parent)=>{
-    const data=await pan123DirectRequest(token,'/file/list/new',{params:{driveId:0,limit:100,next:'0',orderBy:'file_id',orderDirection:'desc',parentFileId:String(parent),trashed:'false',SearchData:'',Page:1,OnlyLookAbnormalFile:0,event:'homeListFile',operateType:4,inDirectSpace:'false'}});
-    return Array.isArray(data.InfoList)?data.InfoList:[];
-  };
-  let parent=0;
-  for(const name of folder.split('/').filter(Boolean)){
-    if(name.length>240||name==='.'||name==='..')throw new Error('123 备份目录名称无效');
-    let found=(await listFolder(parent)).find(item=>item&&String(item.FileName)===name);
-    if(!found){
-      await pan123DirectRequest(token,'/file/upload_request',{method:'POST',body:{driveId:0,etag:'',fileName:name,parentFileId:parent,size:0,type:1,duplicate:0,NotReuse:true,event:'newCreateFolder',operateType:1}});
-      found=(await listFolder(parent)).find(item=>item&&String(item.FileName)===name);
-    }
-    if(!found||Number(found.Type)!==1)throw new Error(`123 备份目录不可用：${name}`);
-    parent=Number(found.FileId);
-  }
+  // 备份目录的 FileId 一批主题完全相同。旧实现每个主题都重新列目录找一遍，
+  // 一批 66 个主题就是 66 次重复往返。这里由批次解析一次，通过 context 共享。
+  const listFolder=context.listFolder||pan123ListFolderFactory(token);
+  const parent=await pan123BackupParent(token,folder,listFolder,context);
   const existing=(await listFolder(parent)).find(item=>item&&String(item.FileName)===fileName);
   const sha256=await codec.sha256Hex(bytes);
   if(existing){
@@ -1069,14 +1093,18 @@ async function pan123DirectBackup(record,codec,config){
     if(!info.Bucket||!info.Key||!info.StorageNode||!info.FileId)throw new Error('123 未返回完整上传参数，原包仍保留在 R2');
     const common={StorageNode:info.StorageNode,bucket:info.Bucket,key:info.Key,uploadId:String(info.UploadId||'')};
     const chunkSize=16*1024*1024,parts=Math.max(1,Math.ceil(bytes.length/chunkSize));
-    for(let number=1;number<=parts;number++){
-      if(transferController?.signal.aborted)return {paused:true};
+    // 分块并发：旧实现每块"鉴权→PUT→鉴权→PUT"串行，往返次数随块数线性叠加。
+    // 用有限并发同时推进多块，S3 multipart 允许乱序上传，最后统一 complete。
+    const partNumbers=Array.from({length:parts},(_,index)=>index+1);
+    await mapConcurrent(partNumbers,Math.min(4,parts),async number=>{
+      if(transferController?.signal.aborted)return;
       const auth=await pan123DirectRequest(token,parts===1?'/file/s3_upload_object/auth':'/file/s3_repare_upload_parts_batch',{method:'POST',body:{...common,partNumberStart:number,partNumberEnd:number+1}});
       const url=safePan123TransferUrl(auth?.presignedUrls?.[String(number)]);
       const chunk=bytes.subarray((number-1)*chunkSize,Math.min(bytes.length,number*chunkSize));
       const response=await uploadRequest(url,{method:'PUT'},`${record.name||record.id} · 第 ${number}/${parts} 块`);
       if(!response.ok)throw new Error(`123 分块上传失败（HTTP ${response.status}）`);
-    }
+    });
+    if(transferController?.signal.aborted)return {paused:true};
     await pan123DirectRequest(token,'/file/upload_complete/v2',{method:'POST',body:{...common,fileId:info.FileId,fileSize:bytes.length,isMultipart:parts>1}});
   }
   const stored=(await listFolder(parent)).find(item=>item&&String(item.FileName)===fileName);
@@ -1084,10 +1112,10 @@ async function pan123DirectBackup(record,codec,config){
   const result={ok:true,provider:'123pan',key:folder?`${folder}/${fileName}`:fileName,fileId:String(stored.FileId),bytes:bytes.length,sha256,reused:false};
   await persistPan123BackupResult(record,md5,result);return result;
 }
-async function backupOriginalTo123(record,codec){
+async function backupOriginalTo123(record,codec,inMemoryBytes,context){
   const config=pan123BackupConfig();if(!config.token)return {error:'尚未连接 123 云盘'};
   try{
-    const direct=await pan123DirectBackup(record,codec,config);
+    const direct=await pan123DirectBackup(record,codec,config,inMemoryBytes,context||{});
     if(direct?.paused)return direct;
     return direct;
   }catch(error){
@@ -1134,19 +1162,32 @@ async function runPan123Backups(records) {
   let backed=0,issue='';
   try {
     const codec=await browserCodec();
-    for(const record of pending){
-      if(transferController.signal.aborted)break;
-      transferStage('从 R2 原包备份到 123',record.name||record.id);
-      const result=await backupOriginalTo123(record,codec);
-      if(result?.paused)break;
-      if(result?.error){issue=result.error;break;}
-      backed++;transferDone(record.name);
-    }
+    const config=pan123BackupConfig();
+    // 一批主题共享同一个目标目录与 listFolder 句柄：目录 FileId 只解析一次。
+    const context={listFolder:pan123ListFolderFactory(config.token)};
+    // 主题级并发：旧实现 for 循环逐个备份，一批 66 个主题串行等待。改为有上限的
+    // 并发，同时复用入库时暂存的字节，省掉每个主题一次 R2 下载 + 目录查询。
+    const width=Math.min(3,pending.length);
+    const outcomes=await mapConcurrent(pending,width,async record=>{
+      if(transferController.signal.aborted)return {paused:true};
+      transferStage('备份原包到 123',record.name||record.id);
+      const bytes=backupByteStash.get(record.id);
+      try{
+        const result=await backupOriginalTo123(record,codec,bytes,context);
+        if(!result?.paused&&!result?.error)transferDone(record.name);
+        return result;
+      }finally{backupByteStash.delete(record.id);}
+    });
     const paused=transferController.signal.aborted;
-    const message=issue?`R2 已入库；123 备份已暂停：${issue}。可稍后重试待备份，无需重新上传。`:paused?'R2 已入库；123 备份已暂停，可稍后重试待备份。':`R2 已入库；本次 ${backed} 个原包已备份到 123。`;
+    for(const result of outcomes){
+      if(result?.paused)continue;
+      if(result?.error&&!issue)issue=result.error;
+      else if(!result?.error)backed++;
+    }
+    const message=issue?`R2 已入库；本次 ${backed} 个原包已备份，${issue}。可稍后重试待备份，无需重新上传。`:paused?'R2 已入库；123 备份已暂停，可稍后重试待备份。':`R2 已入库；本次 ${backed} 个原包已备份到 123。`;
     operationMessage(status,message,!!issue);finishTransferProgress(message,issue?1:0);
   }catch(error){operationMessage(status,`R2 已入库；123 备份未完成：${error.message}`,true);finishTransferProgress('R2 已入库；123 备份稍后重试',1);}
-  finally{backupPhaseActive=false;suppressCloudJob=previous;$('#pauseTransfer').textContent='暂停，稍后继续';renderThemes();updateBulkControls();}
+  finally{backupByteStash.clear();backupPhaseActive=false;suppressCloudJob=previous;$('#pauseTransfer').textContent='暂停，稍后继续';renderThemes();updateBulkControls();}
 }
 async function retryPan123Backups() {
   if(state.operation)return;await whenStorageReady();await ensureWriteAccess();
@@ -4254,6 +4295,9 @@ async function commitThemes(ids = [...selections.review]) {
             saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: "", original_url: originalPath,
             original_md5:checksums?.results?.[0]?.md5||"",original_123:null,original_123_error:""
           }, codec);
+          // 备份加速：把入库时已在内存的原包字节暂存，紧随其后的 123 备份直接复用，
+          // 不再从 R2 下载一趟。仅在备份开启且确实要备份时暂存，避免无谓占内存。
+          if(pan123BackupEnabled() && raw?.byteLength) backupByteStash.set(record.id, raw);
           if(item.file)await completeLocalFiles([item.file]);
           transferDone(name);
           operationMessage($("#reviewBatchStatus"), `已完成主题 ${++finished} / ${selected.length}…`);

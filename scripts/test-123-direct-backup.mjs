@@ -43,30 +43,31 @@ await context.addInitScript(()=>{
 });
 const p=await context.newPage();p.on('pageerror',e=>errors.push(e.message));
 const calls=[];
-// 123 控制面：浏览器直连，返回完整上传序列；list/new 第二次起返回已落盘文件。
-let listCount=0,uploadComplete=false,uploadFileName='',uploadSize=0,uploadEtag='';
+// 反向断言：备份阶段若复用入库内存字节，就不该再从 R2 GET 原包。
+const originalGets=[];
+await p.route('**/api/objects/originals/**',async route=>{
+  if(route.request().method()==='GET')originalGets.push(route.request().url());
+  return route.continue();
+});
+// 123 控制面：浏览器直连，返回完整上传序列。并发多主题时用 etag（=md5）区分各自文件。
+const uploadedFiles=new Map(); // etag -> {fileName,size}
 await p.route('**/b/api/**',async route=>{
   const u=new URL(route.request().url()),path=u.pathname;
   calls.push('DIRECT '+path);
   let data={};
   if(path.endsWith('/file/list/new')){
-    listCount++;
     const parentId=u.searchParams.get('parentFileId');
     // parentFileId=0 是根目录查询（找备份目录）；非 0 是目录内查询（查重/落盘确认）。
     if(parentId==='0')data={InfoList:[{FileName:'Red-Garden-Backup',Type:1,FileId:'9'}]};
-    else if(uploadComplete){
-      // 落盘确认：返回一个与上传参数匹配的文件项（Size/Etag 由脚本按实际值填）。
-      data={InfoList:[{FileName:uploadFileName,Type:0,Size:uploadSize,Etag:uploadEtag,FileId:'777'}]};
-    } else data={InfoList:[]};
+    else data={InfoList:[...uploadedFiles.values()].map(f=>({FileName:f.fileName,Type:0,Size:f.size,Etag:f.etag,FileId:'777'}))};
   } else if(path.endsWith('/file/upload_request')){
     let body={};try{body=route.request().postDataJSON()||{};}catch{}
-    // 第一个 upload_request 可能是建目录（size:0,type:1），第二个才是文件。
-    if(body.size>0){uploadFileName=body.fileName;uploadSize=body.size;uploadEtag=body.etag;}
+    if(body.size>0&&body.type===0)uploadedFiles.set(String(body.etag),{fileName:body.fileName,size:body.size,etag:String(body.etag)});
     data={Reuse:false,Bucket:'bucket',Key:'key',StorageNode:'https://m74.123624.com',FileId:'777',UploadId:'up'};
   } else if(path.endsWith('/file/s3_upload_object/auth')){
     data={presignedUrls:{'1':'https://m74.123624.com/part1'}};
   } else if(path.endsWith('/file/upload_complete/v2')){
-    uploadComplete=true;data={file_info:{FileId:'777'}};
+    data={file_info:{FileId:'777'}};
   } else if(path.endsWith('/user/info')){
     data={Nickname:'直连测试'};
   }
@@ -89,12 +90,11 @@ await p.route('**/api/backup/123',async route=>{
 try{
   await p.goto(origin+'/reeden-library/#import',{waitUntil:'domcontentloaded'});
   await p.waitForFunction(()=>document.querySelector('#apiBaseStatus')?.textContent.includes('已连接共享库'),{},{timeout:20000});
-  await p.locator('#unifiedInput').setInputFiles([await make('直连备份主题')]);
-  await p.waitForFunction(()=>document.querySelectorAll('#reviewList .review-card').length===1&&!document.querySelector('#pauseTransfer').offsetParent,{},{timeout:60000});
+  await p.locator('#unifiedInput').setInputFiles([await make('直连备份甲'),await make('直连备份乙'),await make('直连备份丙')]);
+  await p.waitForFunction(()=>document.querySelectorAll('#reviewList .review-card').length===3&&!document.querySelector('#pauseTransfer').offsetParent,{},{timeout:60000});
   await p.locator('#commitSelectedThemes').click();
-  // 等备份阶段跑完：transferStage 出现"已入库/备份"字样，或直接给足时间。
-  // 备份会重新显示进度面板，所以不能等 #transferProgress 消失。
-  await p.waitForTimeout(15000);
+  // 等 3 个原包全部备份完成（并发后应快速收敛）。
+  await p.waitForFunction(()=>/本次 \d+ 个原包已备份/.test(document.querySelector('#pan123BackupStatus')?.textContent||''),{},{timeout:45000}).catch(()=>{});
   const status=await p.evaluate(()=>({
     batch:document.querySelector('#reviewBatchStatus')?.textContent?.trim()||'',
     backup:document.querySelector('#pan123BackupStatus')?.textContent?.trim()||'',
@@ -104,15 +104,22 @@ try{
   const directPut=calls.filter(c=>c==='DIRECT PUT presigned');
   const workerTransit=calls.filter(c=>c.startsWith('WORKER'));
   const resultWrite=calls.filter(c=>c.includes('/api/backup/123/result'));
-  console.log(JSON.stringify({calls,status,resultWrite,check:{
+  const rootList=calls.filter(c=>c==='DIRECT /b/api//file/list/new').length;
+  // 3 个主题：目根目录查询（找备份目录）应远少于主题数（目录已缓存）。
+  const completed=(status.backup.match(/本次 (\d+) 个原包已备份/)||[])[1];
+  console.log(JSON.stringify({calls,status,resultWrite,originalGets:originalGets.length,check:{
     directControl:directControl.length>0,
     directPut:directPut.length>0,
     workerTransitZero:workerTransit.length===0,
     noJsErrors:errors.length===0,
+    noR2ReDownload:originalGets.length===0,
+    backed:completed,
   }},null,2));
   assert.ok(directControl.length>0,'控制面必须走浏览器直连 /b/api');
   assert.ok(directPut.length>0,'数据面必须浏览器直传 presigned 节点');
   assert.equal(workerTransit.length,0,'不得退回 Worker 海外中转');
+  assert.equal(originalGets.length,0,'备份阶段不得再从 R2 下载原包（应复用入库内存字节）');
+  assert.equal(completed,'3','3 个主题应全部备份成功（并发隔离）');
   assert.deepEqual(errors,[]);
-  console.log('PASS: 123 backup uses browser-direct control plane + presigned PUT; Worker transit 0 calls.');
+  console.log('PASS: 123 backup browser-direct + byte reuse + concurrent; Worker transit 0, no R2 re-download.');
 }finally{await browser.close();await new Promise(resolve=>server.close(resolve));}
