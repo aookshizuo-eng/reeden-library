@@ -676,6 +676,13 @@ async function runCodecTask(command,payload,fallback) {
   if(transferSignal()?.aborted)throw transferSignal().reason;
   return fallback();
 }
+// 封面图集、高亮包这类私有 RED 变体的图片仍是顺序明文，浏览器能读出并合成
+// 预览，但公开头字段与 Worker 已支持的重封格式不同，目录接口会回 422。按同一
+// 组字段先在浏览器判定，不支持的变体直接保留原包，不让整批主题导入失败。
+const PRIVATE_REPACK_HEADER = {version:2,resourceType:"themeBundle",payloadType:"directory",containerMode:"reedenPrivate",algorithm:"aes-256-gcm-manifest",assetMode:"plain-sequential"};
+function privateHeaderRepackSupported(header) {
+  return Boolean(header) && typeof header === "object" && Object.keys(PRIVATE_REPACK_HEADER).every(key => header[key] === PRIVATE_REPACK_HEADER[key]);
+}
 function privatePrefix(raw) {
   if (raw.length < 12 || raw[0] !== 82 || raw[1] !== 69 || raw[2] !== 68 || raw[3] !== 16) throw new Error("不是 RED v2 加密主题");
   const headerLength = new DataView(raw.buffer, raw.byteOffset, raw.byteLength).getUint32(4, false);
@@ -887,7 +894,17 @@ async function mapLargePrivateConfigs(entries, slice, replacements, codec) {
 }
 async function compressPrivateRedViaWorker(raw, codec, options = {}) {
   const prefix = privatePrefix(raw);
-  const directory = await privateDirectory(prefix);
+  let directory;
+  try {
+    directory = await privateDirectory(prefix);
+  } catch (error) {
+    // 422「此私有 RED 协议尚未支持重封」= 封面图集/高亮包等其它头形态。
+    // 浏览器已经能读出图片和预览，这里保留原包入库，用户仍可收录与查看。
+    if (String(error?.message || "").includes("此私有 RED 协议尚未支持重封")) {
+      return privateSkippedResult(raw, [{path: "", used: false, reason: "此私有 RED 协议暂不支持压缩，保留原包并保存预览"}]);
+    }
+    throw error;
+  }
   if (directory?.entries?.length) return await compressPrivateRedWithDirectory(raw, codec, options, prefix, directory);
   return await compressPrivateRedLegacy(raw, codec, options);
 }
@@ -3730,10 +3747,13 @@ function renderReview() {
     const privateTheme = !browserPrivateCompressionEnabled() && requiresOriginalPreservation(info);
     const preview = preferredPreview(item.preview_urls?.light, item.preview_urls?.dark);
     const duplicateThumbs = duplicate ? item.duplicates.map(candidate => `<div class="thumb-label">${previewImage(candidate.preview_light_url || candidate.preview_dark_url, `已有主题 ${candidate.name} · ${previewKind(candidate.preview_details)}`, "thumb", candidate.preview_details)}<span>${escapeHtml(candidate.name)}</span></div>`).join("") : "";
+    const privateRebuildable = info.container_format === "red_private_v2" && privateHeaderRepackSupported(item.inspection?.header);
     const privateNote = info.container_format === "red_private_v2"
-      ? (browserPrivateCompressionEnabled()
-        ? `<p class="review-meta">加密主题：图片会在当前设备压缩，再由同步 Worker 认证清单、更新资源哈希并重新封包。</p>`
-        : `<p class="review-meta">加密主题：先在「设置」填好同步 API 地址与 Token，图片就会在当前设备压缩，再由 Worker 认证清单、更新资源哈希并重新封包；未配置时只保存原包。</p>`)
+      ? (!privateRebuildable
+        ? `<p class="review-meta">私有 RED 图集 / 高亮包：当前协议暂不支持压缩重封，将保留原包并保存浏览器生成的预览，可正常收录。</p>`
+        : browserPrivateCompressionEnabled()
+          ? `<p class="review-meta">加密主题：图片会在当前设备压缩，再由同步 Worker 认证清单、更新资源哈希并重新封包。</p>`
+          : `<p class="review-meta">加密主题：先在「设置」填好同步 API 地址与 Token，图片就会在当前设备压缩，再由 Worker 认证清单、更新资源哈希并重新封包；未配置时只保存原包。</p>`)
       : info.container_format === "red_v1_gzip" ? '<p class="review-meta">阅读主题：保留原始 gzip 封装，不转换为 ZIP。</p>' : "";
     return `<article class="review-card" data-review-id="${escapeHtml(item.staging_id)}"><div class="review-top"><div><label class="item-heading">${selectInput("review", item.staging_id, `待确认主题 ${info.name || info.source_name}`)}<span class="review-title">${escapeHtml(info.name || info.source_name)}</span></label><div class="review-meta">${escapeHtml(info.author || "作者未记录")} · ${formatBytes(info.bytes)} · ${escapeHtml(info.source_name)}</div></div><span class="badge ${duplicate ? "" : "is-good"}">${duplicate ? (item.duplicateKind==="exact"?"内容完全相同":`疑似重复 ${item.duplicates.length}`) : "未发现同名作者"}</span></div>${privateNote}${duplicate ? `<div class="duplicate-note">${item.duplicateKind==="exact"?"SHA-256 相同，可移除重复导入项。":"库中或本批有同名作者主题，可能为不同版本，请核对。"}</div><div class="duplicate-thumbs">${duplicateThumbs}</div>` : ""}<div class="duplicate-thumbs"><div class="thumb-label">${previewImage(preview.url, `待审核主题${preview.label} · ${previewKind(info.preview_details)}`, "thumb", info.preview_details)}<span>新主题 · ${preview.label}</span><span>${escapeHtml(previewKind(info.preview_details))} · 点击放大</span></div></div>${item.commitError ? `<p class="inline-error">${escapeHtml(item.commitError)}</p>` : ""}<div class="review-actions"><button class="primary-button commit-theme" data-id="${escapeHtml(item.staging_id)}">${info.container_format === "red_v1_gzip" ? "确认并保存阅读主题" : privateTheme ? "确认并保存原包（配好同步后可压缩）" : "确认并压缩保存"}${autoSyncEnabled() ? "并后台同步" : "（后台处理）"}</button><button class="secondary-button discard-review" data-id="${escapeHtml(item.staging_id)}">暂不处理</button></div></article>`;
   }).join("");
@@ -4462,6 +4482,9 @@ async function commitThemes(ids = [...selections.review]) {
           const existing=state.themes.find(record=>[record.original_sha256,record.sha256].includes(item.original_sha256));
           if(existing){await completeLocalFiles([item.file]);transferDone(name);finished++;return {item,record:existing,reused:true};}
           const encrypted=item.inspection?.format==='red_private_v2'||item.info?.container_format==='red_private_v2'||raw[3]===16;
+          // 封面图集/高亮包的私有头不被 Worker 支持，压缩函数会原样返回：
+          // 这种情况下要标记为原样保存，卡片才会显示「下载原样主题」而不是压缩版。
+          const privatePreserved=encrypted&&!privateHeaderRepackSupported(item.inspection?.header);
           const compressionOptions=options.preset==='custom'
             ? {preset:options.preset,codec:options.codec,quality:options.quality,maxEdge:options.max_edge,gifColors:options.gif_colors,iconLossless:options.icon_lossless,compressReader:options.compress_reader,concurrency:2}
             : {preset:options.preset,concurrency:2};
@@ -4490,7 +4513,7 @@ async function commitThemes(ids = [...selections.review]) {
           const record = await uploadBrowserRecord({
             kind: "theme", id: `theme-${assetSha.slice(0, 16)}`, name: item.info.name || item.info.source_name, author: item.info.author || "作者未记录",
             sha256: assetSha, original_sha256: originalSha, original_size: raw.length, compressed_size: compressedBytes.length,
-            compression_supported: item.info?.container_format!=='red_v1_gzip',container_format:item.info?.container_format, status:item.info?.container_format==='red_v1_gzip'?'browser_original':"browser_compressed", source_name: item.info.source_name,
+            compression_supported: item.info?.container_format!=='red_v1_gzip'&&!privatePreserved,container_format:item.info?.container_format, status:item.info?.container_format==='red_v1_gzip'||privatePreserved?'browser_original':"browser_compressed", source_name: item.info.source_name,
             // 色系识别：把主色系 + 明暗/阅读属性一起写进类别，别只存一个 auto_category。
             categories: [...new Set([...(item.info.auto_categories || [item.info.auto_category]), ...(item.info.categories || [])].map(value => String(value || "").trim()).filter(Boolean))],
             auto_categories: item.info.auto_categories || (item.info.auto_category ? [item.info.auto_category] : []),
