@@ -3606,12 +3606,29 @@ function renderThemes() {
 const deferredCleanup = [];
 async function stagePendingFiles(files, kind) {
   const label = kind === "font" ? "字体" : "收藏";
-  const accepted = kind === "font"
+  const candidates = kind === "font"
     ? [...(files || [])].filter(file => /\.(ttf|otf|woff2?)$/i.test(file.name || ""))
-    : [...(files || [])].filter(file => ["svg", "html", "htm"].includes(assetExtension(file)));
-  if (!accepted.length) { toast(kind === "font" ? "请选择 TTF、OTF、WOFF 或 WOFF2 文件" : "请选择 SVG、HTML 或 HTM 文件"); return; }
+    : [...(files || [])].filter(file => ["svg", "html", "htm", "txt"].includes(assetExtension(file)));
+  if (!candidates.length) { toast(kind === "font" ? "请选择 TTF、OTF、WOFF 或 WOFF2 文件" : "请选择 SVG、HTML 或 HTM 文件（.txt 里是 SVG 也能识别）"); return; }
+  // 收藏按内容判定：.txt 只有出现 <svg 才当 SVG，纯文本不塞进待确认区。
+  const scanned = kind === "font"
+    ? candidates.map(file => ({ file, resolved: "font", bytes: null }))
+    : await mapConcurrent(candidates, 3, async file => {
+        const raw = new Uint8Array(await file.arrayBuffer());
+        const resolved = assetKindOf(file, raw);
+        // 只有 .txt → SVG 需要裁掉 BOM/空行后再算哈希；其余文件不驻留字节，整批不占内存。
+        const bytes = resolved === "svg" && assetExtension(file) !== "svg" ? trimSvgPreamble(raw) : null;
+        return { file, resolved, bytes };
+      });
+  const usable = scanned.filter(item => item.resolved);
+  if (!usable.length) { toast(kind === "font" ? "请选择 TTF、OTF、WOFF 或 WOFF2 文件" : "所选文本文件里没有找到 SVG 内容，请确认文件开头有 <svg"); return; }
+  if (usable.length < scanned.length) toast(`${scanned.length - usable.length} 个文本文件不包含 SVG，已跳过`);
+  const accepted = usable.map(item => item.file);
   await rememberLocalFiles(accepted);
-  const hashes=await mapConcurrent(accepted,3,async file=>{const bytes=await file.arrayBuffer();const hash=await crypto.subtle.digest('SHA-256',bytes);return [...new Uint8Array(hash)].map(x=>x.toString(16).padStart(2,'0')).join('');});
+  const hashes = await mapConcurrent(usable, 3, async item => {
+    const hash = await crypto.subtle.digest("SHA-256", item.bytes || await item.file.arrayBuffer());
+    return [...new Uint8Array(hash)].map(x => x.toString(16).padStart(2, "0")).join("");
+  });
   let added = 0;
   for (const [fileIndex,file] of accepted.entries()) {
     const duplicate = state.pending.some(item => item.file===file);
@@ -3863,7 +3880,7 @@ function openRecordDialog(kind,id) {
   $('#recordDialogTitle').textContent=name;
   $('#recordDialogDescription').textContent=`${font?'字体':assetTypeLabel(record)} · ${formatBytes(record.bytes)} · ${syncLabel(record)}`;
   const url=downloadUrl(record.download_url||record.object_url||record.url||'',record.file_name||name);
-  body.innerHTML=`<div class="record-dialog-preview">${font?fontPreviewMarkup(record):assetPreview(record)}</div><div class="record-dialog-fields"><form class="asset-meta-form" data-record-form="${escapeHtml(record.id)}" data-record-kind="${kind}">${font?'':`<label>作者<input name="author" value="${escapeHtml(record.author||'')}" /></label>`}<label>${font?'分类':'风格'}<input name="style" value="${escapeHtml(font?fontCategory(record):record.style||'')}" /></label><label>标签<input name="tags" value="${escapeHtml(recordTags(record).join(', '))}" placeholder="用逗号分隔" /></label><button class="secondary-button" type="submit">保存分类</button></form><div class="record-detail-actions">${url?`<a class="primary-button" href="${escapeHtml(url)}" download="${escapeHtml(record.file_name||name)}">${font?'下载字体':'下载文件'}</a>`:''}${savedToCloud(record)?'':`<button class="secondary-button" data-record-sync>同步到 R2</button>`}<button class="text-button danger-text" data-record-delete>删除</button></div><details><summary>文件信息</summary><p class="field-help">${escapeHtml(record.file_name||'')}<br>SHA ${escapeHtml(record.sha256||'未记录')}</p>${record.cleanup_warning?`<p class="inline-error">${escapeHtml(typeof record.cleanup_warning==='string'?record.cleanup_warning:Object.values(record.cleanup_warning).join('；'))}</p>`:''}</details></div>`;
+  body.innerHTML=`<div class="record-dialog-preview">${font?fontPreviewMarkup(record):assetPreview(record)}</div><div class="record-dialog-fields"><form class="asset-meta-form" data-record-form="${escapeHtml(record.id)}" data-record-kind="${kind}">${font?'':`<label>作者<input name="author" value="${escapeHtml(record.author||'')}" /></label>`}<label>${font?'分类':'风格'}<input name="style" value="${escapeHtml(font?fontCategory(record):record.style||'')}" /></label><label>标签<input name="tags" value="${escapeHtml(recordTags(record).join(', '))}" placeholder="用逗号分隔" /></label><button class="secondary-button" type="submit">保存分类</button></form><div class="record-detail-actions">${url?`<a class="primary-button" href="${escapeHtml(url)}" download="${escapeHtml(record.file_name||name)}">${font?'下载字体':'下载文件'}</a>`:''}${savedToCloud(record)?'':`<button class="secondary-button" data-record-sync>同步到 R2</button>`}<button class="text-button danger-text" data-record-delete>删除</button></div><details><summary>文件信息</summary><p class="field-help">${escapeHtml(font?(record.file_name||''):assetFileNameLabel(record))}<br>SHA ${escapeHtml(record.sha256||'未记录')}</p>${record.cleanup_warning?`<p class="inline-error">${escapeHtml(typeof record.cleanup_warning==='string'?record.cleanup_warning:Object.values(record.cleanup_warning).join('；'))}</p>`:''}</details></div>`;
   const sync=$('[data-record-sync]',body);if(sync)sync.onclick=async()=>{sync.disabled=true;try{await(font?syncFont(id):syncAsset(id));openRecordDialog(kind,id);}finally{sync.disabled=false;}};
   $('[data-record-delete]',body).onclick=async()=>{await deleteSelectedRecords(kind,[id]);if(!state[kind+'s'].some(item=>String(item.id)===String(id)))dialog.close();};
   if(font){$$('.font-preview-image',body).forEach(image=>{image.addEventListener('error',()=>recoverFontPreviewImage(image),{once:true});if(image.complete&&image.naturalWidth===0)recoverFontPreviewImage(image);});loadFontPreviewFace(record);}
@@ -3885,7 +3902,7 @@ function assetCard(asset, imported = false) {
     </div>
     <div class="asset-card-preview">${assetPreview(asset, imported)}<span class="preview-caption">${assetTypeLabel(asset)} · ${asset.bytes ? formatBytes(asset.bytes) : ""}</span></div>
     <div class="asset-actions">${savedToCloud(asset) ? "" : `<button class="text-button sync-asset" data-id="${escapeHtml(asset.id || "")}" data-completed="false">同步到 R2</button>`}${objectUrl ? `<a class="download-link" href="${escapeHtml(objectUrl)}" download="${escapeHtml(asset.file_name || asset.name || "asset")}">下载</a>` : ""}<button class="text-button danger-text delete-record" data-kind="asset" data-id="${escapeHtml(asset.id || "")}">删除</button></div>
-    <details class="asset-edit"><summary>编辑分类</summary><div class="asset-meta">${escapeHtml(asset.file_name || "")} · ${asset.bytes ? formatBytes(asset.bytes) : ""} · SHA ${escapeHtml(String(asset.sha256 || "").slice(0, 12))}</div><form class="asset-meta-form" data-record-form="${escapeHtml(asset.id || "")}" data-record-kind="asset"><div class="asset-meta-fields"><label>作者<input name="author" value="${escapeHtml(author)}" placeholder="作者" /></label><label>风格<input name="style" value="${escapeHtml(style)}" placeholder="风格" /></label><label>标签<input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="标签，用逗号分隔" /></label></div><button class="text-button" type="submit">保存分类</button></form></details>
+    <details class="asset-edit"><summary>编辑分类</summary><div class="asset-meta">${escapeHtml(assetFileNameLabel(asset))} · ${asset.bytes ? formatBytes(asset.bytes) : ""} · SHA ${escapeHtml(String(asset.sha256 || "").slice(0, 12))}</div><form class="asset-meta-form" data-record-form="${escapeHtml(asset.id || "")}" data-record-kind="asset"><div class="asset-meta-fields"><label>作者<input name="author" value="${escapeHtml(author)}" placeholder="作者" /></label><label>风格<input name="style" value="${escapeHtml(style)}" placeholder="风格" /></label><label>标签<input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="标签，用逗号分隔" /></label></div><button class="text-button" type="submit">保存分类</button></form></details>
   </article>`;
 }
 function renderAssets() {
@@ -5039,10 +5056,47 @@ function assetExtension(file) {
   const match = String(file?.name || "").toLowerCase().match(/\.([a-z0-9]+)$/);
   return match?.[1] === "htm" ? "html" : match?.[1] || "";
 }
+// 大量 SVG 素材是从网页或设计工具另存为 .txt 的：扩展名不可信，开头的 <svg 才可信。
+const ASSET_TEXT_SNIFF_BYTES = 8192;
+function looksLikeSvgBytes(bytes) {
+  const head = new TextDecoder("utf-8", { fatal: false })
+    .decode(bytes.subarray(0, Math.min(bytes.length, ASSET_TEXT_SNIFF_BYTES)))
+    .replace(/^\uFEFF/, "");
+  return /<svg[\s>/]/i.test(head);
+}
+function assetKindOf(file, bytes) {
+  const extension = assetExtension(file);
+  if (extension === "svg" || extension === "html") return extension;
+  if ((extension === "txt" || extension === "") && looksLikeSvgBytes(bytes)) return "svg";
+  return "";
+}
+// .txt 常见开头带 BOM 或空行；`<?xml` 前有空白会让浏览器拒绝整份 SVG。
+function trimSvgPreamble(bytes) {
+  let start = 0;
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) start = 3;
+  while (start < bytes.length && (bytes[start] === 0x20 || bytes[start] === 0x09 || bytes[start] === 0x0a || bytes[start] === 0x0d)) start++;
+  return start ? bytes.subarray(start) : bytes;
+}
+function assetFileNameLabel(asset) {
+  const name = String(asset?.file_name || "");
+  const source = String(asset?.source_file_name || "");
+  return source && source !== name ? `${source} → ${name}` : name;
+}
 async function importAssets(files, options = {}) {
   if (state.operation) { toast("请等待当前批次处理完成"); return; }
-  const valid = [...files].filter(file => ["svg", "html", "htm"].includes(assetExtension(file)));
-  if (!valid.length) { toast("请选择 SVG、HTML 或 HTM 文件"); return; }
+  const candidates = [...files].filter(file => ["svg", "html", "htm", "txt"].includes(assetExtension(file)));
+  if (!candidates.length) { toast("请选择 SVG、HTML 或 HTM 文件（.txt 里是 SVG 也能识别）"); return; }
+  // 先按内容定类型：.txt 只有含 <svg 才收录，纯文本直接忽略。
+  const scanned = (await mapConcurrent(candidates, 4, async file => {
+    const raw = new Uint8Array(await file.arrayBuffer());
+    const kind = assetKindOf(file, raw);
+    if (!kind) return null;
+    const bytes = kind === "svg" && assetExtension(file) !== "svg" ? trimSvgPreamble(raw) : raw;
+    return { file, kind, bytes };
+  })).filter(Boolean);
+  if (!scanned.length) { toast("所选文本文件里没有找到 SVG 内容，请确认文件开头有 <svg"); return; }
+  if (scanned.length < candidates.length) toast(`${candidates.length - scanned.length} 个文本文件不包含 SVG，已跳过`);
+  const valid = scanned.map(item => item.file);
   await whenStorageReady();
   try { await ensureWriteAccess(); } catch { return; }
   state.importAssetIds = [];
@@ -5055,11 +5109,10 @@ async function importAssets(files, options = {}) {
   try {
     const hashes = new Set(state.assets.map(asset => asset.sha256).filter(Boolean));
     const unique = [];
-    const hashed = await mapConcurrent(valid, 4, async file => {
-      const bytes = new Uint8Array(await file.arrayBuffer());
+    const hashed = await mapConcurrent(scanned, 4, async ({file, kind, bytes}) => {
       if (!crypto.subtle) throw new Error("当前环境不支持 SHA-256，无法安全去重");
       const hash = await crypto.subtle.digest("SHA-256", bytes).then(value => [...new Uint8Array(value)].map(byte => byte.toString(16).padStart(2, "0")).join(""));
-      return { file, bytes, hash };
+      return { file, bytes, hash, kind };
     });
     for (const item of hashed) {
       if (item.hash && hashes.has(item.hash)) { duplicates++; await completeLocalFiles([item.file]); continue; }
@@ -5071,12 +5124,15 @@ async function importAssets(files, options = {}) {
       const codec = await browserCodec();
       beginTransferProgress("收藏上传", unique.length);
       let finished = 0;
-      const uploaded = await mapConcurrent(unique, 2, async ({file, bytes, hash}) => {
+      const uploaded = await mapConcurrent(unique, 2, async ({file, bytes, hash, kind}) => {
         try {
-          const extension = assetExtension(file);
+          const extension = kind;
+          const base = file.name.replace(/\.[^.]+$/, "");
+          // .txt 里装的是 SVG：按 .svg 存对象、给 image/svg+xml，浏览器才能直接当图片用。
+          const fileName = extension !== assetExtension(file) ? `${base}.${extension}` : file.name;
           const mime = extension === "svg" ? "image/svg+xml" : "text/html; charset=utf-8";
           transferStage("上传收藏文件", file.name);
-          const objectPath = await uploadBrowserObject("assets", hash, extension, bytes, mime, file.name.replace(/\.[^.]+$/, ""));
+          const objectPath = await uploadBrowserObject("assets", hash, extension, bytes, mime, base);
           let previewPath = "";
           if (extension === "svg") {
             try {
@@ -5086,14 +5142,15 @@ async function importAssets(files, options = {}) {
               if (previewBytes) {
                 const previewSha = await codec.sha256Hex(previewBytes);
                 transferStage("上传收藏预览", file.name);
-                previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg", `${file.name.replace(/\.[^.]+$/, "")}-预览`);
+                previewPath = await uploadBrowserObject("previews", previewSha, "jpg", previewBytes, "image/jpeg", `${base}-预览`);
               }
             } catch { /* The SVG remains downloadable if thumbnail creation fails. */ }
           }
           transferStage("写入收藏清单", file.name);
           const record = await uploadBrowserRecord({
             kind: "asset", id: `asset-${hash.slice(0, 16)}`, asset_type: extension === "svg" ? "svg" : "html", extension,
-            file_name: file.name, name: file.name.replace(/\.[^.]+$/, ""), author: "", style: "", tags: [], sha256: hash, bytes: bytes.length,
+            file_name: fileName, ...(fileName !== file.name ? { source_file_name: file.name } : {}),
+            name: base, author: "", style: "", tags: [], sha256: hash, bytes: bytes.length,
             mime, object_url: objectPath, url: objectPath, preview_url: previewPath, saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
           }, codec);
           await completeLocalFiles([file]);
@@ -5456,18 +5513,28 @@ function setupDropZone(element, onFiles) {
 async function queueFilesForLater(fileList) {
   await whenStorageReady();await ensureWriteAccess();
   if(state.operation){toast('请等待当前批次结束');return;}
-  const files=[...(fileList||[])].filter(file=>/\.(red|ttf|otf|woff2?|svg|html?)$/i.test(file.name||''));
-  if(!files.length)return;
+  const candidates=[...(fileList||[])].filter(file=>/\.(red|ttf|otf|woff2?|svg|html?|txt)$/i.test(file.name||''));
+  if(!candidates.length)return;
+  // .txt 只有内容是 SVG 才暂存；扩展名按 svg 落，Worker 的暂存白名单才认。
+  const entries=[];
+  for(const file of candidates){
+    const raw=new Uint8Array(await file.arrayBuffer());
+    const detected=assetExtension(file)==='txt'?assetKindOf(file,raw):'';
+    if(assetExtension(file)==='txt'&&detected!=='svg')continue;
+    entries.push({file,ext:detected||assetExtension(file),bytes:detected==='svg'?trimSvgPreamble(raw):raw});
+  }
+  if(!entries.length)return;
+  const files=entries.map(item=>item.file);
   await rememberLocalFiles(files);
   setOperation('staging');suppressCloudJob=true;
   const status=$('#unifiedImportStatus');let job;
   try {
     if(files.length>1000)throw new Error("每批最多暂存 1000 个文件，请分批上传");
     const codec=await browserCodec(),uploads=[];
-    for(const file of files){const sha=await codec.sha256Hex(new Uint8Array(await file.arrayBuffer()));const ext=assetExtension(file);uploads.push({name:file.name,key:`/api/objects/staging/${sha}.${ext}`,sha,file});}
+    for(const entry of entries){const sha=await codec.sha256Hex(entry.bytes);uploads.push({name:entry.file.name,key:`/api/objects/staging/${sha}.${entry.ext}`,sha,file:entry.file,ext:entry.ext,bytes:entry.bytes});}
     job=(await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:'staged-import',title:`暂存 ${files.length} 个文件`,total:files.length,items:uploads.map(x=>x.name),source_keys:uploads.map(x=>x.key),uploads:uploads.map(({name,key})=>({name,key})),auto_commit:true,upload_complete:false,device:'browser'})})).job;
     rememberJob(job);renderJobs();beginTransferProgress('暂存原文件',files.length);
-    for(const item of uploads){transferStage('上传到云端暂存',item.name);await uploadBrowserObject('staging',item.sha,assetExtension(item.file),new Uint8Array(await item.file.arrayBuffer()),'application/octet-stream');transferDone(item.name);await api(`/api/jobs/${job.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({stage:`已暂存 ${transferState.completed}/${files.length}`,completed:transferState.completed})});}
+    for(const item of uploads){transferStage('上传到云端暂存',item.name);await uploadBrowserObject('staging',item.sha,item.ext,item.bytes,'application/octet-stream');transferDone(item.name);await api(`/api/jobs/${job.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({stage:`已暂存 ${transferState.completed}/${files.length}`,completed:transferState.completed})});}
     await api(`/api/jobs/${job.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'queued',stage:'原文件暂存完成，可以继续入库',upload_complete:true,completed:0})});
     finishTransferProgress('云端暂存完成');operationMessage(status,'已保存云端恢复任务。在「上传与恢复」中继续；本设备也保留恢复副本。');
   }catch(error){if(job)await sendCloudJobPatch({status:'partial',stage:'暂存中断，可继续已上传文件或补选原文件',error:error.message},job.id);operationMessage(status,`暂存中断：${error.message}。恢复任务已保留。`,true);}
@@ -5995,7 +6062,7 @@ async function expandImportArchives(files) {
       if (file.size > 256 * 1024 * 1024) throw new Error("ZIP 超过 256 MB，请拆分后导入");
       const codec = await loadFreeCodec();
       const entries = await codec.readZipEntries(new Uint8Array(await file.arrayBuffer()), {standardZip: true,
-        filter: name => !name.startsWith("__MACOSX/") && !name.split("/").some(part => part.startsWith(".")) && /\.(red|ttf|otf|woff2?|svg|html?)$/i.test(name),
+        filter: name => !name.startsWith("__MACOSX/") && !name.split("/").some(part => part.startsWith(".")) && /\.(red|ttf|otf|woff2?|svg|html?|txt)$/i.test(name),
       });
       for (const entry of entries) {
         const item = new File([entry.bytes], entry.name.split("/").pop(), {lastModified: file.lastModified});
@@ -6025,7 +6092,7 @@ async function importUnifiedFiles(fileList) {
     const extension = String(file.name || "").toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] || "";
     if (extension === "red") groups.theme.push(file);
     else if (["ttf", "otf", "woff", "woff2"].includes(extension)) groups.font.push(file);
-    else if (["svg", "html", "htm"].includes(extension)) groups.asset.push(file);
+    else if (["svg", "html", "htm", "txt"].includes(extension)) groups.asset.push(file);
     else unsupported.push(file.name || "未命名文件");
   }
   const total = groups.theme.length + groups.font.length + groups.asset.length;
