@@ -3052,18 +3052,38 @@ function fontPreviewMarkup(font) {
   const name = font.family || font.file_name || "字体";
   const fid = escapeHtml(font.id || "");
   // 富样张：进入视口后用真实字体渲染多行文字，能同时看清单字、中文词句、
-  // 拉丁字母和数字，比入库时那张单行 JPG 更能判断字体风格。JPG 只在字体
-  // 尚未加载或加载失败时兜底，避免大字体下载期间卡片空白。
+  // 拉丁字母和数字，比入库时那张单行 JPG 更能判断字体风格。
   // 样张同时给简体和繁体：字形覆盖是选字体时最常看的一点，源文件里那张
   // 单行 JPG 只有「Aa 中文 你好 123」，看不出简繁字形差别。
-  const specimen = `<div class="font-specimen" data-font-preview-id="${fid}" hidden><strong class="specimen-hero">中文</strong><span class="specimen-cjk specimen-sc">简体 · 汉字阅读 书写字体</span><span class="specimen-cjk specimen-tc">繁體 · 漢字閱讀 書寫字體</span><span class="specimen-latin">ABCDEFG abcdefg</span><span class="specimen-digits">0123456789 ，。！？</span></div>`;
+  // 样张默认就显示（用系统字体 + 「字形加载中」提示），字体到了再换成真实
+  // 字形：此前默认 hidden 等 FontFace，一旦新上传的大字体还在下载，卡片就
+  // 露出入库时的单行 JPG，看起来像「又变回老样式」。版式必须一直是新版式。
+  const hasSource = Boolean(font.view_url || font.url || font.preview_url);
+  const specimen = `<div class="font-specimen" data-font-preview-id="${fid}" data-state="${hasSource ? "loading" : "idle"}"><strong class="specimen-hero">中文</strong><span class="specimen-cjk specimen-sc">简体 · 汉字阅读 书写字体</span><span class="specimen-cjk specimen-tc">繁體 · 漢字閱讀 書寫字體</span><span class="specimen-latin">ABCDEFG abcdefg</span><span class="specimen-digits">0123456789 ，。！？</span></div>`;
   // Chromium 的 OTS 会拒掉一部分第三方中文字体，这类字体用 opentype.js
   // 直接描字形轮廓生成样张图，避免永远停在旧的单行 JPG 上。
   const outline = `<img class="font-specimen-outline" data-font-preview-id="${fid}" alt="${escapeHtml(name)} 简繁字形样张" hidden />`;
   // 兜底文本始终留在 DOM：JPG 坏掉且 FontFace 也失败时仍有可读字形。
   const fallback = `<span class="font-preview-fallback" data-font-preview-id="${fid}" hidden>Aa 中文 你好 123</span>`;
-  const image = font.preview_url ? `<img class="font-preview-image" src="${escapeHtml(assetUrl(font.preview_url))}" alt="${escapeHtml(name)} 字形预览" loading="lazy" />` : "";
-  return `<div class="font-preview-frame" data-font-id="${fid}">${image}${specimen}${outline}${fallback}</div>`;
+  const image = font.preview_url ? `<img class="font-preview-image" alt="${escapeHtml(name)} 字形预览" hidden />` : "";
+  const note = `<button class="font-specimen-note" type="button" data-font-retry="${fid}" ${hasSource ? "" : "hidden"}>${hasSource ? "字形加载中…" : ""}</button>`;
+  return `<div class="font-preview-frame" data-font-id="${fid}">${image}${specimen}${outline}${fallback}${note}</div>`;
+}
+// 样张的三种状态：loading 半透明等字体、live 真实字形、fallback 加载失败可重试。
+// 状态写在帧上而不是只改 hidden，版式与文案才能统一，不会退回旧单行样张。
+function setFontPreviewState(font, state, note) {
+  if(!font?.id)return;
+  $$(`[data-font-id="${CSS.escape(String(font.id))}"]`).forEach(frame=>{
+    const specimen=frame.querySelector(".font-specimen");
+    const badge=frame.querySelector(".font-specimen-note");
+    if(specimen)specimen.dataset.state=state;
+    frame.classList.toggle("is-font-fallback",state==="fallback");
+    if(!badge)return;
+    if(state==="live"||state==="idle"){badge.hidden=true;return;}
+    badge.hidden=false;
+    badge.classList.toggle("is-warn",state==="fallback");
+    badge.textContent=note||(state==="fallback"?"字形未加载 · 点此重试":"字形加载中…");
+  });
 }
 // 把已加载的字体套回所有同名样张。搜索、翻页、筛选都会重建卡片 DOM，
 // 只靠 load() 里那一次 apply() 会让新卡片退回 JPG，看起来像「字形没更新」。
@@ -3075,11 +3095,23 @@ function applyFontSpecimen(font) {
     const image=frame.querySelector(".font-preview-image");
     const fallback=frame.querySelector(".font-preview-fallback");
     const outline=frame.querySelector(".font-specimen-outline");
-    if(specimen){specimen.style.fontFamily=`font-${font.id}, sans-serif`;specimen.hidden=Boolean(outlineUrl);}
+    if(specimen){specimen.style.fontFamily=`font-${font.id}, sans-serif`;specimen.hidden=Boolean(outlineUrl);specimen.dataset.state=outlineUrl?"outline":"live";}
     if(outline&&outlineUrl){outline.src=outlineUrl;outline.hidden=false;}
     if(image)image.hidden=true;
     if(fallback)fallback.hidden=true;
   });
+  setFontPreviewState(font,"live");
+}
+// 字形加载失败时保留新版式，只把提示换成可点重试；点击后清掉失败负缓存重新入队。
+function failFontPreview(font, message) {
+  failedFontFaces.add(font.id);
+  setFontPreviewState(font,"fallback",message||"字形未加载 · 点此重试");
+}
+function retryFontPreview(font) {
+  if(!font?.id)return;
+  failedFontFaces.delete(font.id);
+  setFontPreviewState(font,"loading");
+  enqueueFontPreview(font);
 }
 // 用 opentype.js 描边出简繁样张：FontFace 加载失败时仍能看到真实字形。
 async function drawFontSpecimenOutline(font,url) {
@@ -3119,7 +3151,9 @@ function enqueueFontPreview(font) {
   // 已经成功加载/描边的字体在新卡片上必须重新套用，否则搜索翻页之后
   // 样张又被 hidden 的初始状态盖回旧 JPG，用户看到的就是「字形没更新」。
   if(loadedFontFaces.has(font.id)||outlinedSpecimenFaces.has(String(font.id))){applyFontSpecimen(font);return;}
-  if(loadingFontFaces.has(font.id) || failedFontFaces.has(font.id))return;
+  // 失败过的字体只记负缓存、不重下；但重建出来的新卡片要恢复成「可点重试」。
+  if(failedFontFaces.has(font.id)){setFontPreviewState(font,"fallback");return;}
+  if(loadingFontFaces.has(font.id))return;
   if(fontPreviewQueue.some(item=>item.id===font.id))return;
   fontPreviewQueue.push(font);
   pumpFontPreviewQueue();
@@ -3146,7 +3180,12 @@ function loadFontPreviewFace(font, done) {
   if(loadedFontFaces.has(font.id)||outlinedSpecimenFaces.has(String(font.id))){apply();finish();return;}
   if(loadingFontFaces.has(font.id)||failedFontFaces.has(font.id)){finish();return;}
   const url = assetUrl(font?.view_url || font?.url);
-  if (!url) {finish();return;}
+  // 还没入库的字体没有对象地址：保持新版式但不提示「加载中」，避免一直转。
+  if (!url) {setFontPreviewState(font,"idle");finish();return;}
+  // 大字体首次从 R2 拉取要几十秒；长时间没有结果就先把提示改成可重试，
+  // 请求本身继续，成功后 apply() 会覆盖回真实字形。
+  const slow=setTimeout(()=>{if(!loadedFontFaces.has(font.id))setFontPreviewState(font,"fallback");},15000);
+  const settle=()=>{clearTimeout(slow);};
   if (typeof FontFace !== "undefined") {
     loadingFontFaces.add(font.id);
     const face = new FontFace(`font-${font.id}`, `url(${JSON.stringify(url)})`);
@@ -3157,8 +3196,9 @@ function loadFontPreviewFace(font, done) {
     }).catch(async () => {
       // OTS 拒收的第三方中文字体很常见，不能就此放弃：再用 opentype 描边。
       if(await drawFontSpecimenOutline(font,url))apply();
-      else failedFontFaces.add(font.id);
+      else failFontPreview(font);
     }).finally(() => {
+      settle();
       loadingFontFaces.delete(font.id);
       finish();
     });
@@ -3167,15 +3207,13 @@ function loadFontPreviewFace(font, done) {
   // 没有 FontFace API（如部分 WebView）时直接走描边路径。
   loadingFontFaces.add(font.id);
   drawFontSpecimenOutline(font,url).then(ok=>{
-    if(ok)apply();else failedFontFaces.add(font.id);
-  }).finally(()=>{loadingFontFaces.delete(font.id);finish();});
+    if(ok)apply();else failFontPreview(font);
+  }).finally(()=>{settle();loadingFontFaces.delete(font.id);finish();});
 }
 function recoverFontPreviewImage(image) {
   const frame = image.closest(".font-preview-frame");
   if (!frame) return;
   image.remove();
-  const fallback=frame.querySelector(".font-preview-fallback");
-  if(fallback)fallback.hidden=false;
   const font = state.fonts.find(item => String(item.id) === String(frame.dataset.fontId));
   if (font) loadFontPreviewFace(font);
 }
@@ -3922,10 +3960,12 @@ function renderFonts() {
   renderFontFilters();
   const visible = catalogPage("font");
   $("#fontList").innerHTML = visible.map(font => fontCard(font)).join("");
-  $$("#fontList .font-preview-image").forEach(image => {
-    image.addEventListener("error", () => recoverFontPreviewImage(image), {once: true});
-    if (image.complete && image.naturalWidth === 0) recoverFontPreviewImage(image);
-  });
+  // 样张不再用入库时的单行 JPG 兜底，加载失败就地重试。
+  $$("#fontList [data-font-retry]").forEach(button => button.addEventListener("click", event => {
+    event.stopPropagation();
+    const font = state.fonts.find(item => String(item.id) === String(button.dataset.fontRetry));
+    if (font) retryFontPreview(font);
+  }));
   // 富样张按视口懒加载：滚动到哪加载到哪，同一时刻最多 3 个，避免整库字体
   // 一起下载。已加载过的字体由 loadedFontFaces 去重，不再重复拉取。
   observeFontPreviews();
@@ -4013,7 +4053,7 @@ function openRecordDialog(kind,id) {
   body.innerHTML=`<div class="record-dialog-preview">${font?fontPreviewMarkup(record):assetPreview(record)}</div><div class="record-dialog-fields"><form class="asset-meta-form" data-record-form="${escapeHtml(record.id)}" data-record-kind="${kind}">${font?'':`<label>作者<input name="author" value="${escapeHtml(record.author||'')}" /></label>`}<label>${font?'分类':'风格'}<input name="style" value="${escapeHtml(font?fontCategory(record):record.style||'')}" /></label><label>标签<input name="tags" value="${escapeHtml(recordTags(record).join(', '))}" placeholder="用逗号分隔" /></label><button class="secondary-button" type="submit">保存分类</button></form><div class="record-detail-actions">${url?`<a class="primary-button" href="${escapeHtml(url)}" download="${escapeHtml(record.file_name||name)}">${font?'下载字体':'下载文件'}</a>`:''}${savedToCloud(record)?'':`<button class="secondary-button" data-record-sync>同步到 R2</button>`}<button class="text-button danger-text" data-record-delete>删除</button></div><details><summary>文件信息</summary><p class="field-help">${escapeHtml(font?(record.file_name||''):assetFileNameLabel(record))}<br>SHA ${escapeHtml(record.sha256||'未记录')}</p>${record.cleanup_warning?`<p class="inline-error">${escapeHtml(typeof record.cleanup_warning==='string'?record.cleanup_warning:Object.values(record.cleanup_warning).join('；'))}</p>`:''}</details></div>`;
   const sync=$('[data-record-sync]',body);if(sync)sync.onclick=async()=>{sync.disabled=true;try{await(font?syncFont(id):syncAsset(id));openRecordDialog(kind,id);}finally{sync.disabled=false;}};
   $('[data-record-delete]',body).onclick=async()=>{await deleteSelectedRecords(kind,[id]);if(!state[kind+'s'].some(item=>String(item.id)===String(id)))dialog.close();};
-  if(font){$$('.font-preview-image',body).forEach(image=>{image.addEventListener('error',()=>recoverFontPreviewImage(image),{once:true});if(image.complete&&image.naturalWidth===0)recoverFontPreviewImage(image);});loadFontPreviewFace(record);}
+  if(font){$$('[data-font-retry]',body).forEach(button=>button.addEventListener('click',event=>{event.stopPropagation();retryFontPreview(record);}));loadFontPreviewFace(record);}
   if(!dialog.open)dialog.showModal();
   updateBulkControls();
 }

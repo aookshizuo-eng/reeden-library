@@ -381,8 +381,16 @@ h3 { font-size: 14.5px; line-height: 1.35; margin-bottom: 4px; font-weight: 600;
 /* 字体样张：优先用真实字体渲染多行富样张（见 fontPreviewMarkup），能同时看清
    单字、中文词句、拉丁字母与数字。JPG 只是字体加载完成前的兜底，按 contain
    完整显示、不再裁切；字体加载成功后富样张覆盖它。 */
-.font-preview-frame { display: grid; place-items: center; min-height: 140px; margin: 9px 12px 0; overflow: hidden; border: 1px solid var(--rule); border-radius: 7px; background: #fff; color: var(--text); }
+.font-preview-frame { position: relative; display: grid; place-items: center; min-height: 140px; margin: 9px 12px 0; overflow: hidden; border: 1px solid var(--rule); border-radius: 7px; background: #fff; color: var(--text); }
 .font-preview-image { display: block; width: 100%; height: 140px; object-fit: contain; object-position: 50% 50%; background: #fff; }
+/* 字形没到之前也用同一份简繁样张占位：新上传的大字体要下载几十秒，若这时
+   退回入库时的单行 JPG，整张卡片看起来就像「又变回老样式」了。 */
+.font-specimen[data-state="loading"] { opacity: .42; }
+.font-specimen[data-state="fallback"] { opacity: .78; }
+.font-specimen-note { position: absolute; left: 7px; top: 6px; z-index: 4; max-width: calc(100% - 14px); padding: 1px 9px; border: 1px solid var(--rule); border-radius: 999px; background: rgba(255, 253, 248, .94); color: var(--muted); font-family: inherit; font-size: 11px; line-height: 1.7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: default; }
+.font-specimen-note[hidden] { display: none; }
+.font-specimen-note.is-warn { color: var(--accent); border-color: rgba(138, 74, 48, .35); cursor: pointer; }
+.font-specimen-note.is-warn:hover { background: #fff; }
 .font-specimen { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; width: 100%; height: 140px; padding: 8px 10px; overflow: hidden; text-align: center; color: var(--text); background: #fff; }
 .font-specimen[hidden], .font-preview-image[hidden], .font-specimen-outline[hidden] { display: none; }
 .font-specimen .specimen-hero { font-size: 42px; font-weight: 400; line-height: 1.1; letter-spacing: .06em; }
