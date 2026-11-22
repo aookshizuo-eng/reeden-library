@@ -1499,7 +1499,7 @@ function themeIdentity(theme) {
 function filenameIdentityFallback(fileName) {
   const stem = String(fileName || '主题').replace(/\.red$/i, '').replace(/\s*[([【（].*?(?:加密|未加密|日夜|夜间).*?[)\]】）]\s*$/i, '').replace(/\s*[-_·]?(?:未加密|加密|日夜|夜间)\s*$/i, '').replace(/\s*\(\d+\)\s*$/i, '').trim();
   const parts = stem.split(/_-_+|\s+[-—–－]\s*|\s*[-—–－]\s+/).map(item => item.trim()).filter(Boolean);
-  if (/^(?:应用主题|主题|reeden)$/i.test(parts[0] || '')) parts.shift();
+  if (/^(?:应用主题|阅读主题|主题|reeden)$/i.test(parts[0] || '')) parts.shift();
   if (parts.length < 2) return {name: parts[0] || stem || '主题', author: '作者未记录'};
   return {name: parts.slice(1).join(' - '), author: parts[0]};
 }
@@ -2100,6 +2100,7 @@ function formatBytes(value) {
   return `${(value / 1024 / 1024).toFixed(2)} MB`;
 }
 function compressionSummary(theme) {
+  if(theme.container_format==='red_v1_gzip')return '阅读主题 · 保留原始 gzip 封装';
   if (requiresOriginalPreservation(theme)) return "加密主题 · 原样保存，未压缩";
   if (theme.status === "cloud_existing") return "R2 已有文件 · 历史压缩状态未知";
   if (!theme.compressed_size) return "已有库索引 · 尚未压缩";
@@ -2333,6 +2334,7 @@ function showPreview(button) {
   dialog.showModal();
 }
 function requiresOriginalPreservation(record) {
+  if(record.container_format==='red_v1_gzip')return false;
   return record.compression_supported === false || record.status === "private_preserved";
 }
 function syncLabel(record) {
@@ -2368,6 +2370,8 @@ let cloudJobTimer;
 let suppressCloudJob = false;
 let resumingStaged = false;
 let stagedResumeBusy = false;
+let localResumeBusy=false;
+const importIssues=new Map();
 async function sendCloudJobPatch(patch, id = activeCloudJob) {
   if (!id || !patch) return;
   try {
@@ -2447,7 +2451,7 @@ function revealTransferProgress() {
   if (!panel || panel.hidden) return;
   try { panel.scrollIntoView({block: "nearest", behavior: "smooth"}); } catch { panel.scrollIntoView(); }
 }
-function beginTransferProgress(title, total, items = []) {
+function beginTransferProgress(title, total, items = [], options = {}) {
   if(!transferController || !commitBatchBusy)transferController=new AbortController();
   transferStartedAt=Date.now();$("#transferElapsed").textContent="已用 0:00";clearInterval(transferClock);transferClock=setInterval(()=>{
     const seconds=Math.floor((Date.now()-transferStartedAt)/1000);$('#transferElapsed').textContent=`已用 ${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}`;
@@ -2456,7 +2460,7 @@ function beginTransferProgress(title, total, items = []) {
   Object.assign(transferState, { active: true, title, total: Math.max(0, Number(total) || 0), completed: 0, failed: 0, stage: "准备处理", current: "" });
   updateTransferProgress();
   revealTransferProgress();
-  createCloudJob(title, total, items).catch(() => {});
+  if(options.persist!==false)createCloudJob(title, total, items).catch(() => {});
 }
 function transferStage(stage, current = "") {
   if(transferController?.signal.aborted)return;
@@ -2509,6 +2513,9 @@ function bulkHint(button) {
 }
 function updateBulkControls() {
   if(state.storage)refreshSettingsControls();
+  $('#resumeLocalTransfers').disabled=localResumeBusy||Boolean(state.operation)||commitBatchBusy;
+  $('#discardLocalTransfers').disabled=localResumeBusy||Boolean(state.operation)||commitBatchBusy;
+  $('#retryImportIssues').disabled=localResumeBusy||Boolean(state.operation)||commitBatchBusy;
   const toolbars = [
     ["review", "selectAllReview", "reviewSelectedCount", "commitSelectedThemes"],
     ["theme", "selectAllThemes", "themeSelectedCount", "syncSelectedThemes"],
@@ -2811,22 +2818,26 @@ function themeCategoryEditorMarkup(theme) {
     <details class="theme-category-manage"><summary>管理类别词表</summary><div class="theme-category-vocabulary">${vocabulary.map(category => `<span class="category-chip is-static">${escapeHtml(category)}<button type="button" data-category-forget="${escapeHtml(category)}" aria-label="从词表删除 ${escapeHtml(category)}">×</button></span>`).join("")}</div><p class="field-help">删除词表条目只会让它不再出现在建议里，已归类主题的标签保留。</p></details>
   </div>`;
 }
-async function patchThemeCategories(theme, categories) {
+async function patchThemeCategories(theme, categories, autoFields) {
   await ensureRecordReference(theme);
+  const body = { record_sha256: theme.record_sha256, author: theme.author === "作者未记录" ? "" : theme.author, style: theme.style || "", tags: theme.tags || [], categories };
+  // 删除自动识别的类别时，必须把 auto 字段一起提交，否则 Worker 保留原值，
+  // themeCategoryList() 渲染时又把它合并回来，用户看到的就是「删了又复活」。
+  if (autoFields) Object.assign(body, autoFields);
   const result = await api(`/api/themes/${encodeURIComponent(theme.id)}`, {
     method: "PATCH", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ record_sha256: theme.record_sha256, author: theme.author === "作者未记录" ? "" : theme.author, style: theme.style || "", tags: theme.tags || [], categories }),
+    body: JSON.stringify(body),
   });
   Object.assign(theme, result.item || {}, { categories });
   updateCachedRecord(theme);
   return theme;
 }
-async function saveThemeCategories(themeId, categories) {
+async function saveThemeCategories(themeId, categories, autoFields) {
   const theme = state.themes.find(item => String(item.id) === String(themeId));
   if (!theme || state.operation) return;
   setOperation("theme-categories");
   try {
-    await patchThemeCategories(theme, categories);
+    await patchThemeCategories(theme, categories, autoFields);
     if (browserSyncEnabled()) saveDeviceSnapshot();
     renderThemes();
     if ($("#themeDialog").open && $("#themeDialog").dataset.themeId === String(themeId)) {
@@ -2912,7 +2923,9 @@ async function applyBulkThemeCategories() {
       const own = themeCategoryList(theme);
       const next = replace ? [...picked] : [...own, ...picked.filter(category => !own.includes(category))];
       if (applyButton) applyButton.textContent = `处理中 ${done + failed + 1}/${targets.length}`;
-      try { await patchThemeCategories(theme, next); done++; } catch { failed++; }
+      // 替换模式要连自动识别类别一起清掉，否则 auto_categories 会被 themeCategoryList()
+      // 合并回来，replace 看起来没生效；追加模式保留自动类别不动。
+      try { await patchThemeCategories(theme, next, replace ? { auto_categories: [], auto_category: "" } : undefined); done++; } catch { failed++; }
     }
     if (browserSyncEnabled()) saveDeviceSnapshot();
     renderThemes();
@@ -3067,7 +3080,14 @@ function openThemeDialog(id) {
       categoryEditor.querySelector("[data-category-add]")?.click();
     });
     categoryEditor.querySelectorAll("[data-category-remove]").forEach(button => button.addEventListener("click", () => {
-      saveThemeCategories(theme.id, current().filter(category => category !== button.dataset.categoryRemove));
+      const removed = button.dataset.categoryRemove;
+      // 自动识别的 tag 存在 auto_categories（或旧版单数 auto_category）里，
+      // themeCategoryList() 会把它们和 categories 合并显示。只删 categories 不够，
+      // 渲染时又会被合并回来，用户看到的就是「自动生成的 tag 删不掉」。三处一起清。
+      const nextCategories = (Array.isArray(theme.categories) ? theme.categories : []).filter(category => category !== removed);
+      const nextAuto = (Array.isArray(theme.auto_categories) ? theme.auto_categories : (theme.auto_category ? [theme.auto_category] : [])).filter(category => category !== removed);
+      const nextAutoSingle = theme.auto_category && theme.auto_category !== removed ? theme.auto_category : "";
+      saveThemeCategories(theme.id, nextCategories, { auto_categories: nextAuto, auto_category: nextAutoSingle });
     }));
     categoryEditor.querySelectorAll("[data-category-suggest]").forEach(button => button.addEventListener("click", () => {
       const value = button.dataset.categorySuggest;
@@ -3311,10 +3331,13 @@ async function commitSelection() {
       dropPending(assets.filter(item => !failed.has(item.file)));
     }
     if(deferredPan123.length && !transferController?.signal.aborted)await runPan123Backups(deferredPan123);
-    const remaining = state.pending.length + state.review.length;
-    operationMessage($("#unifiedImportStatus"), remaining ? `整批处理结束，仍有 ${remaining} 项待处理或失败，已保留在确认区，可重试。` : "整批上传完成，主题和字体已进入各自资源库，可按最新入库查看。", remaining > 0);
+    const remaining = state.pending.length + state.review.length+importIssues.size;
+    operationMessage($("#unifiedImportStatus"), remaining ? `仍有 ${remaining} 项待处理或无法读取，原件已保留，见确认区或错误清单。` : "整批上传完成，主题和字体已进入各自资源库，可按最新入库查看。", remaining > 0);
   } finally {
     commitBatchBusy = false;
+    // 恢复/暂停按钮的禁用状态依赖 commitBatchBusy；这里清掉后必须刷新一次控件，
+    // 否则暂停后「继续上传」永远灰着——用户点了没反应，正是「恢复也无法恢复」。
+    updateBulkControls();
     if (deferredCleanup.length && !transferController?.signal.aborted) {
       const files = [...new Set(deferredCleanup)];
       deferredCleanup.length = 0;
@@ -3390,8 +3413,8 @@ function renderReview() {
       ? (browserPrivateCompressionEnabled()
         ? `<p class="review-meta">加密主题：图片会在当前设备压缩，再由同步 Worker 认证清单、更新资源哈希并重新封包。</p>`
         : `<p class="review-meta">加密主题：先在「设置」填好同步 API 地址与 Token，图片就会在当前设备压缩，再由 Worker 认证清单、更新资源哈希并重新封包；未配置时只保存原包。</p>`)
-      : "";
-    return `<article class="review-card" data-review-id="${escapeHtml(item.staging_id)}"><div class="review-top"><div><label class="item-heading">${selectInput("review", item.staging_id, `待确认主题 ${info.name || info.source_name}`)}<span class="review-title">${escapeHtml(info.name || info.source_name)}</span></label><div class="review-meta">${escapeHtml(info.author || "作者未记录")} · ${formatBytes(info.bytes)} · ${escapeHtml(info.source_name)}</div></div><span class="badge ${duplicate ? "" : "is-good"}">${duplicate ? (item.duplicateKind==="exact"?"内容完全相同":`疑似重复 ${item.duplicates.length}`) : "未发现同名作者"}</span></div>${privateNote}${duplicate ? `<div class="duplicate-note">${item.duplicateKind==="exact"?"SHA-256 相同，可移除重复导入项。":"库中或本批有同名作者主题，可能为不同版本，请核对。"}</div><div class="duplicate-thumbs">${duplicateThumbs}</div>` : ""}<div class="duplicate-thumbs"><div class="thumb-label">${previewImage(preview.url, `待审核主题${preview.label} · ${previewKind(info.preview_details)}`, "thumb", info.preview_details)}<span>新主题 · ${preview.label}</span><span>${escapeHtml(previewKind(info.preview_details))} · 点击放大</span></div></div>${item.commitError ? `<p class="inline-error">${escapeHtml(item.commitError)}</p>` : ""}<div class="review-actions"><button class="primary-button commit-theme" data-id="${escapeHtml(item.staging_id)}">${privateTheme ? "确认并保存原包（配好同步后可压缩）" : "确认并压缩保存"}${autoSyncEnabled() ? "并后台同步" : "（后台处理）"}</button><button class="secondary-button discard-review" data-id="${escapeHtml(item.staging_id)}">暂不处理</button></div></article>`;
+      : info.container_format === "red_v1_gzip" ? '<p class="review-meta">阅读主题：保留原始 gzip 封装，不转换为 ZIP。</p>' : "";
+    return `<article class="review-card" data-review-id="${escapeHtml(item.staging_id)}"><div class="review-top"><div><label class="item-heading">${selectInput("review", item.staging_id, `待确认主题 ${info.name || info.source_name}`)}<span class="review-title">${escapeHtml(info.name || info.source_name)}</span></label><div class="review-meta">${escapeHtml(info.author || "作者未记录")} · ${formatBytes(info.bytes)} · ${escapeHtml(info.source_name)}</div></div><span class="badge ${duplicate ? "" : "is-good"}">${duplicate ? (item.duplicateKind==="exact"?"内容完全相同":`疑似重复 ${item.duplicates.length}`) : "未发现同名作者"}</span></div>${privateNote}${duplicate ? `<div class="duplicate-note">${item.duplicateKind==="exact"?"SHA-256 相同，可移除重复导入项。":"库中或本批有同名作者主题，可能为不同版本，请核对。"}</div><div class="duplicate-thumbs">${duplicateThumbs}</div>` : ""}<div class="duplicate-thumbs"><div class="thumb-label">${previewImage(preview.url, `待审核主题${preview.label} · ${previewKind(info.preview_details)}`, "thumb", info.preview_details)}<span>新主题 · ${preview.label}</span><span>${escapeHtml(previewKind(info.preview_details))} · 点击放大</span></div></div>${item.commitError ? `<p class="inline-error">${escapeHtml(item.commitError)}</p>` : ""}<div class="review-actions"><button class="primary-button commit-theme" data-id="${escapeHtml(item.staging_id)}">${info.container_format === "red_v1_gzip" ? "确认并保存阅读主题" : privateTheme ? "确认并保存原包（配好同步后可压缩）" : "确认并压缩保存"}${autoSyncEnabled() ? "并后台同步" : "（后台处理）"}</button><button class="secondary-button discard-review" data-id="${escapeHtml(item.staging_id)}">暂不处理</button></div></article>`;
   }).join("");
   $$(".commit-theme").forEach(button => button.addEventListener("click", () => commitTheme(button.dataset.id)));
   $$(".discard-review").forEach(button => button.addEventListener("click", () => discardReview(button.dataset.id)));
@@ -3959,20 +3982,23 @@ function updateStorageControls() {
   $("#pan123ProbeHelp").textContent = `验证会在已保存的备份目录 ${probeRoot}/probes/ 下上传一个随机小文件，再下载并核验。测试目录和文件可能保留在云盘。`;
 }
 async function analyzeFiles(files) {
-  await rememberLocalFiles([...(files || [])].filter(file => /\.red$/i.test(file.name || '')));
   if (state.operation) { toast("请等待当前批次处理完成"); return; }
   const valid = [...files].filter(file => file.name.toLowerCase().endsWith(".red"));
   if (!valid.length) { toast("请选择 .red 文件"); return; }
-  await whenStorageReady();
-  const body = new FormData(); valid.forEach(file => body.append("file", file, file.name));
   setOperation("analyze");
   toast("正在解析主题和查找疑似重复…");
   try {
+    await rememberLocalFiles(valid);await whenStorageReady();
+    const body = new FormData(); valid.forEach(file => body.append("file", file, file.name));
     if (browserSyncEnabled()) {
+      beginTransferProgress('读取主题',valid.length,valid.map(file=>file.name),{persist:false});
+      const signal=transferController.signal;
       const codec = await browserCodec();
-      const items = await mapConcurrent(valid, BROWSER_TASK_CONCURRENCY, async (file, index) => {
+      const inspectFile=async (file, index) => {
+        signal.throwIfAborted();
         operationMessage($("#reviewBatchStatus"), `正在读取主题 ${index + 1} / ${valid.length}…`);
         const raw = new Uint8Array(await file.arrayBuffer());
+        signal.throwIfAborted();
         const originalSha=await codec.sha256Hex(raw);
         const existing=state.themes.find(record=>record.original_sha256===originalSha||record.sha256===originalSha);
         if(existing)return {staging_id:'browser-'+crypto.randomUUID(),file,original_sha256:originalSha,info:{...existing,name:themeIdentity(existing).title,source_name:file.name,bytes:file.size},duplicates:[existing],preview_urls:{light:existing.preview_light_url,dark:existing.preview_dark_url}};
@@ -3983,7 +4009,7 @@ async function analyzeFiles(files) {
           // that result for both metadata and the preview instead of doing a
           // second full ZIP read through inspectContainer().
           entries = await codec.readZipEntries(raw);
-          inspection = { format: "red_v4", compressionSupported: true, entries: entries.map(entry => ({ name: entry.name, bytes: entry.bytes.length, mime: codec.mimeFromBytes(entry.bytes, entry.name) })) };
+          inspection = { format: entries.containerFormat||"red_v4", compressionSupported: entries.containerFormat!=="red_v1_gzip", entries: entries.map(entry => ({ name: entry.name, bytes: entry.bytes.length, mime: codec.mimeFromBytes(entry.bytes, entry.name) })) };
         } catch (error) {
           if (error?.code !== "private_red_unsupported") throw error;
           inspection = await codec.inspectContainer(raw);
@@ -3992,6 +4018,7 @@ async function analyzeFiles(files) {
           // sequential area. Extract those bytes for a visual-only preview.
           entries = await codec.extractPrivatePreviewImages(raw);
         }
+        signal.throwIfAborted();
         const identity = metadataFromEntries(entries, file.name);
         // The private container encrypts its directory, so the ZIP metadata
         // pass finds nothing. Recover name/author from the plain JSON Reeden
@@ -4015,15 +4042,28 @@ async function analyzeFiles(files) {
         const info = { ...identity, source_name: file.name, bytes: raw.length, container_format: inspection.format, compression_supported: inspection.compressionSupported !== false, preview_details: previewDetails, preview_tone: tone, auto_category: autoCategory, auto_categories: toneCategories };
         const duplicateRecords = browserDuplicateCandidates(identity.name, identity.author);
         return { staging_id: `browser-${crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`}`, file, original_sha256:originalSha, preview_blob:previewBlob, inspection, info, duplicates: duplicateRecords.map(record => ({ ...record })), preview_urls: { light: previewUrl, dark: "" } };
+      };
+      const outcomes=await mapConcurrent(valid,BROWSER_TASK_CONCURRENCY,async(file,index)=>{
+        if(signal.aborted)return {file,paused:true};
+        try{const item=await inspectFile(file,index);signal.throwIfAborted();transferDone(file.name);return item;}
+        catch(error){if(signal.aborted||error?.name==='AbortError')return {file,paused:true};transferDone(file.name,true);return {file,error};}
       });
+      const items=outcomes.filter(item=>!item.error&&!item.paused),failures=outcomes.filter(item=>item.error);
+      for(const outcome of outcomes.filter(item=>!item.paused)){
+        const key=localFileIds.get(outcome.file)||outcome.file;importIssues.delete(key);
+        if(outcome.error)importIssues.set(key,{file:outcome.file,message:outcome.error?.message||'读取失败'});
+      }
       state.review.push(...items);
       // 刚解析出来的主题默认勾上：和字体/收藏一致——用户把文件拖进来就是想上传，
       // 之前主题不勾选，「确认所选并压缩」按钮一直灰着，看起来就像点不动。
       for (const item of items) selections.review.add(item.staging_id);
       renderReview();
-      operationMessage($("#reviewBatchStatus"), `本批 ${items.length} 个主题已在浏览器完成识别，可全选后确认。`);
-      toast(`已解析 ${items.length} 个主题，请统一确认`);
-      return;
+      renderImportIssues();
+      const message=signal.aborted?`读取已暂停，${items.length} 个主题已就绪，未完成文件保留，可继续上传。`:`已识别 ${items.length} 个主题${failures.length?`，${failures.length} 个无法读取，已单独保留`:''}。`;
+      finishTransferProgress(message,failures.length);
+      updateTransferProgress({stage:signal.aborted?'读取已暂停':'读取完成，等待确认',current:'尚未上传；未完成原件已保存在浏览器'});
+      operationMessage($('#reviewBatchStatus'),message,!!failures.length);operationMessage($('#unifiedImportStatus'),message,!!failures.length);
+      return {items,failures,paused:signal.aborted};
     }
     const data = await api("/api/themes/analyze", { method: "POST", body });
     const analyzed = data.items || [];
@@ -4032,8 +4072,13 @@ async function analyzeFiles(files) {
     renderReview();
     operationMessage($("#reviewBatchStatus"), `本批 ${data.items?.length || 0} 个主题已全部识别，可全选后确认。`);
     toast(`已解析 ${data.items?.length || 0} 个主题，请统一确认`);
-  } catch (error) { toast(error.message); }
-  finally { setOperation(""); }
+  } catch (error) {
+    if(error?.name==='AbortError'||transferController?.signal.aborted){operationMessage($('#unifiedImportStatus'),'读取已暂停，原文件保留，可继续上传。');return {items:[],failures:[],paused:true};}
+    for(const file of valid)importIssues.set(localFileIds.get(file)||file,{file,message:error.message});
+    renderImportIssues();operationMessage($('#unifiedImportStatus'),`读取失败：${error.message}。原文件保留，可重试。`,true);toast(error.message);
+    return {items:[],failures:valid.map(file=>({file,error}))};
+  }
+  finally { if(transferState.active&&state.operation==='analyze')finishTransferProgress('读取未完成，原文件保留',1);setOperation(""); }
 }
 async function indexExistingFiles(files) {
   if (state.operation) return;
@@ -4085,7 +4130,7 @@ async function commitThemes(ids = [...selections.review]) {
           const raw = item.bytes || new Uint8Array(await item.file.arrayBuffer());
           const existing=state.themes.find(record=>[record.original_sha256,record.sha256].includes(item.original_sha256));
           if(existing){await completeLocalFiles([item.file]);transferDone(name);finished++;return {item,record:existing,reused:true};}
-          const encrypted=item.info?.compression_supported===false||item.inspection?.format==='red_private_v2';
+          const encrypted=item.inspection?.format==='red_private_v2'||item.info?.container_format==='red_private_v2'||raw[3]===16;
           const compressionOptions=options.preset==='custom'
             ? {preset:options.preset,codec:options.codec,quality:options.quality,maxEdge:options.max_edge,gifColors:options.gif_colors,iconLossless:options.icon_lossless,compressReader:options.compress_reader,concurrency:2}
             : {preset:options.preset,concurrency:2};
@@ -4108,7 +4153,7 @@ async function commitThemes(ids = [...selections.review]) {
           const record = await uploadBrowserRecord({
             kind: "theme", id: `theme-${assetSha.slice(0, 16)}`, name: item.info.name || item.info.source_name, author: item.info.author || "作者未记录",
             sha256: assetSha, original_sha256: originalSha, original_size: raw.length, compressed_size: compressedBytes.length,
-            compression_supported: true, status: "browser_compressed", source_name: item.info.source_name,
+            compression_supported: item.info?.container_format!=='red_v1_gzip',container_format:item.info?.container_format, status:item.info?.container_format==='red_v1_gzip'?'browser_original':"browser_compressed", source_name: item.info.source_name,
             // 色系识别：把主色系 + 明暗/阅读属性一起写进类别，别只存一个 auto_category。
             categories: [...new Set([...(item.info.auto_categories || [item.info.auto_category]), ...(item.info.categories || [])].map(value => String(value || "").trim()).filter(Boolean))],
             auto_categories: item.info.auto_categories || (item.info.auto_category ? [item.info.auto_category] : []),
@@ -5113,12 +5158,24 @@ async function rememberLocalFiles(files) {
   await refreshLocalTransfers();
 }
 async function completeLocalFiles(files) {
+  for(const file of files)importIssues.delete(localFileIds.get(file)||file);
   const ids=files.map(file=>localFileIds.get(file)).filter(Boolean);
   if(ids.length)await transferStore('readwrite',store=>{ids.forEach(id=>store.delete(id));});
   await refreshLocalTransfers();
+  renderImportIssues();
+}
+function renderImportIssues(){
+  const issues=[...importIssues.values()],panel=$('#importIssues');panel.hidden=!issues.length;
+  $('#importIssueSummary').textContent=`${issues.length} 个文件无法读取，原件已保留`;
+  $('#importIssueList').innerHTML=issues.map((issue,index)=>`<li><span><strong>${escapeHtml(issue.file.name)}</strong><small>${escapeHtml(issue.message)}</small></span><button class="text-button" data-remove-import-issue="${index}" type="button">移出恢复列表</button></li>`).join('');
+  if(issues.length&&!state.review.length&&!state.pending.length)panel.open=true;
 }
 async function resumeLocalTransfers() {
-  if(state.operation || commitBatchBusy){toast('请等待当前批次处理结束');return;}
+  if(localResumeBusy||state.operation || commitBatchBusy){toast('请等待当前批次处理结束');return;}
+  localResumeBusy=true;const button=$('#resumeLocalTransfers');button.textContent='正在恢复…';updateBulkControls();
+  const oldResuming=resumingStaged;
+  try{
+  operationMessage($('#unifiedImportStatus'),'正在恢复未完成文件…');
   await ensureWriteAccess();await refreshLocalTransfers();
   const files=[];
   const loaded=new Set([...state.pending.map(x=>x.file),...state.review.map(x=>x.file)].map(file=>localFileIds.get(file)).filter(Boolean));
@@ -5128,17 +5185,22 @@ async function resumeLocalTransfers() {
     registerPickedFiles([{file,handle:row.handle,parent:row.parent,directory:row.directory,path:row.path}]);files.push(file);
   }
   setView('import');
-  const oldResuming=resumingStaged;resumingStaged=true;
-  try {if(files.length)await importUnifiedFiles(files);toggleAll('review',true);await commitSelection();}
-  finally {resumingStaged=oldResuming;await refreshLocalTransfers();}
+  resumingStaged=true;
+  const result=files.length?await importUnifiedFiles(files):null;
+  if(result?.paused)return;
+  toggleAll('review',true);
+  if(!selections.review.size){operationMessage($('#unifiedImportStatus'),importIssues.size?`${importIssues.size} 个文件仍无法读取，请展开下方错误清单。其余原件保留，可重试。`:'没有待恢复的文件。',!!importIssues.size);return;}
+  await commitSelection();
+  }catch(error){operationMessage($('#unifiedImportStatus'),`恢复失败：${error.message}。原文件保留，可重试。`,true);}
+  finally {resumingStaged=oldResuming;localResumeBusy=false;button.textContent='继续上传';await refreshLocalTransfers();updateBulkControls();}
 }
 async function discardLocalTransfers() {
-  if(state.operation)return;
+  if(localResumeBusy||state.operation)return;
   if(!window.confirm('移除浏览器里的未完成恢复副本？本机原文件和 R2 文件都保留。'))return;
   const ids=new Set(localTransferRows.map(row=>row.id));
   await transferStore('readwrite',store=>ids.forEach(id=>store.delete(id)));
   state.pending=state.pending.filter(item=>!ids.has(localFileIds.get(item.file)));state.review=state.review.filter(item=>!ids.has(localFileIds.get(item.file)));
-  renderReview();await refreshLocalTransfers();
+  for(const id of ids)importIssues.delete(id);renderImportIssues();renderReview();await refreshLocalTransfers();
 }
 
 const LOCAL_CLEANUP_KEY = "reeden-local-cleanup";
@@ -5450,10 +5512,15 @@ async function importUnifiedFiles(fileList) {
     return;
   }
   operationMessage(status, `已识别 ${groups.theme.length} 个主题、${groups.font.length} 个字体、${groups.asset.length} 个收藏，正在依次处理…`);
-  if (groups.theme.length) await analyzeFiles(groups.theme);
+  setOperation('prepare-import');
+  try{await rememberLocalFiles([...groups.theme,...groups.font,...groups.asset]);}finally{setOperation('');}
+  const analysis=groups.theme.length?await analyzeFiles(groups.theme):null;
+  if(analysis?.paused)return {paused:true};
   if (groups.font.length) await stagePendingFiles(groups.font, "font");
   if (groups.asset.length) await stagePendingFiles(groups.asset, "asset");
-  operationMessage(status, `本批已分流：${groups.theme.length} 个主题、${groups.font.length} 个字体、${groups.asset.length} 个收藏。${unsupported.length ? `已跳过不支持的文件：${unsupported.join("、")}` : ""}`, Boolean(unsupported.length));
+  const failed=analysis?.failures?.length||0;
+  operationMessage(status, `已就绪：${analysis?.items?analysis.items.length:groups.theme.length} 个主题、${groups.font.length} 个字体、${groups.asset.length} 个收藏。${failed?`${failed} 个主题无法读取，原件保留，见下方清单。`:''}${unsupported.length ? `已跳过不支持的文件：${unsupported.join("、")}` : ""}`, Boolean(unsupported.length||failed));
+  return {failures:analysis?.failures||[]};
 }
 // 从别的应用「分享」到 APK：原生把文件复制进 cache，并用 shouldInterceptRequest
 // 在 /__shared__/<id> 上流式返回，这里读成 File 后走同一个统一导入，所以分享
@@ -5686,6 +5753,16 @@ document.addEventListener('click',event=>{
   if(event.target.closest('[data-resume-old]')){if(localTransferRows.length)resumeLocalTransfers().catch(error=>toast(error.message));else{setView('import');toast('此旧任务没有保存原文件，请重新选择原文件；已入库内容会查重跳过');$('#chooseUnifiedFiles').click();}}
 });
 $("#resumeLocalTransfers").addEventListener("click",()=>resumeLocalTransfers().catch(error=>toast(error.message)));
+$('#retryImportIssues').addEventListener('click',async()=>{
+  if(localResumeBusy||state.operation||commitBatchBusy)return;
+  const previous=resumingStaged;resumingStaged=true;
+  try{await importUnifiedFiles([...importIssues.values()].map(issue=>issue.file));}catch(error){operationMessage($('#unifiedImportStatus'),error.message,true);}finally{resumingStaged=previous;}
+});
+document.addEventListener('click',async event=>{
+  const button=event.target.closest('[data-remove-import-issue]');if(!button||localResumeBusy||state.operation||commitBatchBusy)return;
+  const issue=[...importIssues.values()][Number(button.dataset.removeImportIssue)];if(!issue)return;
+  button.disabled=true;try{await completeLocalFiles([issue.file]);operationMessage($('#unifiedImportStatus'),'已移出恢复列表，本机原文件保留。');}catch(error){toast(error.message);button.disabled=false;}
+});
 $("#discardLocalTransfers").addEventListener("click",()=>discardLocalTransfers().catch(error=>toast(error.message)));
 refreshLocalTransfers();
 $("#resumeStagedJobs").addEventListener("click", () => resumeStagedJobs());

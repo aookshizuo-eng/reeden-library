@@ -48,6 +48,7 @@ export default function Shell() {
             <input id="unifiedInput" type="file" accept=".zip,.red,.ttf,.otf,.woff,.woff2,.svg,.html,.htm" multiple hidden /><input id="unifiedFolderInput" type="file" accept=".zip,.red,.ttf,.otf,.woff,.woff2,.svg,.html,.htm" webkitdirectory="" multiple hidden />
             <p className="operation-status" id="archiveImportStatus" role="status" hidden></p>
             <p className="operation-status unified-import-status" id="unifiedImportStatus" role="status" hidden></p>
+            <details className="import-issues" id="importIssues" hidden><summary id="importIssueSummary"></summary><ul id="importIssueList"></ul><Button id="retryImportIssues" variant="outline">重新读取未识别文件</Button></details>
           </div>
           <section className="transfer-progress" id="transferProgress" aria-live="polite" hidden>
             <div className="transfer-progress-head"><strong id="transferProgressTitle">正在处理</strong><span id="transferProgressCount">0 / 0</span><Button id="pauseTransfer" variant="outline" hidden>暂停，稍后继续</Button></div>

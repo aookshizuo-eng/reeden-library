@@ -790,6 +790,11 @@ async function updateRecordClassification(request, env, kind, id) {
   }
   const reference = String(payload.record_sha256 || "");
   if (reference && !SHA256.test(reference)) return json({error: "记录版本无效，请刷新列表"}, 400, request, env);
+  // 自动识别的类别（auto_categories / auto_category）平时由入库流程写入。前端删除一个
+  // 类别时必须能同时清掉它，否则 themeCategoryList() 会把 auto 分类合并回来，看起来
+  // 「删了又复活」。只有显式带这两个字段时才覆盖，旧客户端不带字段时保持原样。
+  const hasAutoCategories = Object.hasOwn(payload, "auto_categories");
+  const hasAutoCategory = Object.hasOwn(payload, "auto_category");
   let updated;
   await mutateLibraryIndex(env,async data=>{
     const target=data.records.find(item=>item.kind===kind && String(item.id)===String(id));
@@ -804,6 +809,8 @@ async function updateRecordClassification(request, env, kind, id) {
     ...Object.fromEntries(["author", "style"].filter(key => Object.hasOwn(payload, key)).map(key => [key, normalizeAssetClassification(payload[key])])),
     tags: normalizeAssetTags(payload.tags ?? record.tags),
     categories: normalizeAssetTags(payload.categories ?? record.categories).map(item => item.slice(0, 24)),
+    ...(kind === "theme" && hasAutoCategories ? {auto_categories: normalizeAssetTags(payload.auto_categories).map(item => item.slice(0, 24))} : {}),
+    ...(kind === "theme" && hasAutoCategory ? {auto_category: normalizeAssetClassification(payload.auto_category)} : {}),
     updated_at: new Date().toISOString(),
   };
   const bytes = new TextEncoder().encode(JSON.stringify(updated));

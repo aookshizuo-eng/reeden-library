@@ -14,6 +14,7 @@
   "use strict";
   const RED_ZIP = new Uint8Array([82, 69, 68, 4]);
   const RED_PRIVATE = new Uint8Array([82, 69, 68, 16]);
+  const RED_READER = new Uint8Array([82, 69, 68, 1]);
   const te = typeof TextEncoder === "function" ? new TextEncoder() : null;
   const td = typeof TextDecoder === "function" ? new TextDecoder("utf-8", { fatal: false }) : null;
   class FreeCodecError extends Error {
@@ -171,12 +172,44 @@
     for (let offset = zip.length - 22; offset >= lower; offset--) if (u32(zip, offset) === 0x06054b50) return offset;
     throw new FreeCodecError("RED ZIP 缺少中央目录", "zip_directory_missing");
   }
+  async function gunzipBounded(bytes, limit = 128 * 1024 * 1024) {
+    if(typeof root.DecompressionStream!=="function")throw new FreeCodecError("当前浏览器不支持 gzip 阅读主题，请更新浏览器", "gzip_unavailable");
+    const reader=new Blob([bytes]).stream().pipeThrough(new root.DecompressionStream("gzip")).getReader(),chunks=[];
+    let size=0;
+    try{
+      while(true){const {done,value}=await reader.read();if(done)break;size+=value.length;if(size>limit){await reader.cancel();throw new FreeCodecError("阅读主题解压后超过大小限制", "reader_size_limit");}chunks.push(value);}
+      return concat(chunks);
+    }finally{reader.releaseLock();}
+  }
+  async function readReaderEntries(raw, options = {}) {
+    let document;
+    try{document=JSON.parse(text(await gunzipBounded(raw.subarray(4))));}
+    catch(error){if(error instanceof FreeCodecError)throw error;throw new FreeCodecError("阅读主题的 gzip 或 JSON 已损坏", "reader_data_invalid");}
+    if(document?.version!==1||document.type!=="readerColorSchema"||!Array.isArray(document.data)||!document.data.length||document.data.some(item=>!item||typeof item!=="object"||Array.isArray(item)))throw new FreeCodecError("不支持的 RED 旧版数据类型", "reader_type_unsupported");
+    const entries=[],metadata={...document,data:document.data.map(item=>{const {backgroundImageData,...rest}=item;return rest;})};
+    entries.push({name:"theme.json",bytes:textBytes(JSON.stringify(metadata))});
+    let total=0;
+    if(options.images!==false)for(const [index,item]of document.data.entries()){
+      if(!item?.backgroundImageData)continue;
+      try{
+        const encoded=String(item.backgroundImageData).replace(/^data:[^,]*;base64,/i,"");
+        const binary=root.atob(encoded);let bytes=Uint8Array.from(binary,char=>char.charCodeAt(0));
+        if(startsWith(bytes,[0x1f,0x8b]))bytes=await gunzipBounded(bytes,64*1024*1024);
+        total+=bytes.length;if(total>128*1024*1024)throw new FreeCodecError("阅读主题图片超过大小限制", "reader_size_limit");
+        const mime=mimeFromBytes(bytes),extension={"image/jpeg":"jpg","image/png":"png","image/webp":"webp","image/gif":"gif"}[mime];
+        if(extension)entries.push({name:`${item.themeMode==='dark'?'dark':'light'}/reader/background-${index}.${extension}`,bytes,role:"reader"});
+      }catch(error){if(error instanceof FreeCodecError)throw error;throw new FreeCodecError("阅读主题背景图片已损坏", "reader_image_invalid");}
+    }
+    entries.containerFormat="red_v1_gzip";
+    return entries;
+  }
   async function readZipEntries(redBytes, options = {}) {
     const raw = bytesOf(redBytes);
     const standard = options.standardZip === true;
+    if(!standard&&startsWith(raw,RED_READER))return readReaderEntries(raw);
     if (!standard && !startsWith(raw, RED_ZIP)) {
       if (startsWith(raw, RED_PRIVATE)) throw new FreeCodecError("加密 RED v2 当前浏览器版本只做结构识别，暂不重新封包", "private_red_unsupported");
-      throw new FreeCodecError("不是 RED\\x04 普通 ZIP 封装", "red_header_invalid");
+      throw new FreeCodecError("无法识别 RED 文件头，文件可能不完整或格式尚未支持", "red_header_invalid");
     }
     // Keep a view over the caller's buffer instead of copying the complete
     // package before reading its central directory. This matters for phone
@@ -805,12 +838,17 @@
   async function inspectContainer(value) {
     const raw = await readBytes(value);
     if (startsWith(raw, RED_PRIVATE)) return parsePrivateHeader(raw);
+    if(startsWith(raw,RED_READER)){const entries=await readReaderEntries(raw);return {format:"red_v1_gzip",compressionSupported:false,originalPreserved:true,entries:entries.map(entry=>({name:entry.name,bytes:entry.bytes.length,mime:mimeFromBytes(entry.bytes,entry.name)}))};}
     if (!startsWith(raw, RED_ZIP)) throw new FreeCodecError("缺少 RED\\x04 或 RED\\x10 头", "red_header_invalid");
     const entries = await readZipEntries(raw);
     return { format: "red_v4", entries: entries.map(entry => ({ name: entry.name, bytes: entry.bytes.length, mime: mimeFromBytes(entry.bytes, entry.name) })), compressionSupported: true };
   }
   async function compressRed(value, options = {}) {
     const raw = await readBytes(value);
+    if(startsWith(raw,RED_READER)){
+      await readReaderEntries(raw,{images:false});
+      return {bytes:raw,originalBytes:raw.length,compressedBytes:raw.length,savedBytes:0,packageSelected:false,format:"red_v1_gzip",originalPreserved:true,decisions:[{path:"readerColorSchema",used:false,reason:"阅读主题保留原始 gzip 封装"}]};
+    }
     if (startsWith(raw, RED_PRIVATE)) throw new FreeCodecError("加密 RED v2 当前浏览器版本只做结构识别，暂不重新封包；请使用电脑后台版本", "private_red_unsupported");
     const entries = await readZipEntries(raw);
     const skipPaths = nineSlicePaths(entries);

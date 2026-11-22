@@ -89,6 +89,23 @@ assert.equal(renamed.status, 200);
 assert.equal((await renamed.json()).item.name, "Circle 改名");
 const keptName = await handle(new Request("https://worker.example/api/assets/asset-1", {method: "PATCH", headers: headers({"Content-Type": "application/json"}), body: JSON.stringify({author: "Alice", style: "极简", tags: ["icon"]})}), env);
 assert.equal((await keptName.json()).item.name, "Circle 改名");
+// 自动识别的类别必须能被真正删掉：前端删除 tag 时同时提交 categories 与
+// auto_categories/auto_category，Worker 要照单更新，否则渲染时又合并回来。
+const themeRecord = encoder.encode(JSON.stringify({kind: "theme", id: "theme-autotag-1", name: "自动分类测试", author: "A", categories: ["手动"], auto_categories: ["暖色", "明亮"], auto_category: "暖色"}));
+const themeSha = await sha256(themeRecord);
+await handle(new Request(`https://worker.example/api/objects/records/${themeSha}.json`, {method: "PUT", headers: headers(), body: themeRecord}), env);
+const cleared = await handle(new Request("https://worker.example/api/themes/theme-autotag-1", {method: "PATCH", headers: headers({"Content-Type": "application/json"}), body: JSON.stringify({categories: ["手动"], auto_categories: ["明亮"], auto_category: ""})}), env);
+assert.equal(cleared.status, 200);
+const clearedItem = (await cleared.json()).item;
+assert.deepEqual(clearedItem.auto_categories, ["明亮"], "删掉的自动类别必须从 auto_categories 移除");
+assert.equal(clearedItem.auto_category, "", "单数 auto_category 也要清掉");
+assert.deepEqual(clearedItem.categories, ["手动"]);
+// 老客户端不带 auto 字段时，Worker 必须保留原值（不能误删自动分类）。
+const keptAuto = await handle(new Request("https://worker.example/api/themes/theme-autotag-1", {method: "PATCH", headers: headers({"Content-Type": "application/json"}), body: JSON.stringify({categories: ["手动", "新增"]})}), env);
+assert.equal(keptAuto.status, 200);
+const keptAutoItem = (await keptAuto.json()).item;
+assert.deepEqual(keptAutoItem.auto_categories, ["明亮"], "不带 auto_categories 时应保留原值");
+assert.deepEqual(keptAutoItem.categories, ["手动", "新增"]);
 // Deletion removes the record and unreferenced objects while preserving an
 // object still referenced by another record.
 const sharedBytes = encoder.encode("shared-object");

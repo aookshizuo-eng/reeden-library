@@ -1,5 +1,5 @@
 /* Device-local codec worker. Large RED buffers and image encoding stay off the UI thread. */
-importScripts("./omggif.js", "./free_codec.js?v=20261118-progress");
+importScripts("./omggif.js", "./free_codec.js?v=20261120-reader");
 
 const codec = self.ReedenFreeCodec;
 if (!codec) throw new Error("ReedenFreeCodec 未加载");

@@ -143,6 +143,14 @@
 @media(prefers-reduced-motion:reduce){.transfer-track:has(progress:indeterminate)::after {animation:none;}}
 
 /* One set of controls and card proportions for all three libraries. */
+.import-issues {margin:14px 0;padding:12px 14px;border:1px solid var(--border);border-radius:12px;}
+.import-issues > summary {color:var(--danger);font-size:13px;cursor:pointer;}
+.import-issues ul {margin:12px 0;list-style:none;padding:0;max-height:320px;overflow:auto;}
+.import-issues li {display:flex;align-items:start;justify-content:space-between;gap:14px;padding:10px 0;border-bottom:1px solid var(--border);}
+.import-issues li span {min-width:0;overflow-wrap:anywhere;}
+.import-issues li strong,.import-issues li small {display:block;font-size:12px;}
+.import-issues li small {color:var(--muted);margin-top:4px;}
+.import-issues li button {flex-shrink:0;font-size:12px;}
 .view .catalog-grid {grid-template-columns:repeat(auto-fill,minmax(228px,1fr));gap:20px 16px;align-items:start;}
 .catalog-grid .theme-card {overflow:hidden;display:block;padding:0;gap:0;}
 .catalog-grid .theme-preview {padding:0;min-height:0;position:relative;}
