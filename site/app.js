@@ -244,7 +244,7 @@ async function migrateReaderThemesToAssets() {
         const record = {
           kind: "asset", id: `asset-${sha.slice(0, 16)}`, asset_type: "red", extension: "red",
           category, red_category: category, preview_kind: theme.preview_details?.kind || "reader",
-          file_name: theme.file_name || `${theme.name || category}.red`, name: theme.name || "", author: theme.author || "", style: theme.style || "", tags: theme.tags || [],
+          file_name: theme.file_name || `${theme.name || category}.red`, name: theme.name || "", author: assetAuthor({author: theme.author}), style: theme.style || "", tags: theme.tags || [],
           sha256: sha, original_sha256: sha, bytes: theme.bytes || 0, mime: "application/octet-stream",
           container_format: theme.container_format || "red_v1_gzip", compression_supported: false,
           object_url: sourceUrl, url: sourceUrl,
@@ -360,6 +360,50 @@ async function restoreMisclassifiedThemeAssets() {
   renderThemes(); renderAssets();
   toast(`已把 ${restored.length} 个应用主题移回主题库`);
 }
+// 入库早于「高亮规则预览」的收藏没有图。补一次预览：读原包 → Worker 解出规则
+// 摘要 → 画图 → 上传 previews → 写一条新版本记录（记录不可变，用新版本覆盖旧的）。
+async function repairMissingPrivatePreviews() {
+  if (!browserSyncEnabled() || state.operation) return;
+  const candidates = state.assets.filter(asset => asset.asset_type === "red" && !asset.preview_url && assetRedCategory(asset) === "高亮");
+  if (!candidates.length) return;
+  // 每个标签页半小时最多补一次，避免每次刷新都去拉原包。
+  const key = "reeden-private-preview-repair";
+  if (Date.now() - Number(sessionStorage.getItem(key) || 0) < 1800000) return;
+  sessionStorage.setItem(key, String(Date.now()));
+  const codec = await browserCodec();
+  let repaired = 0;
+  for (const asset of candidates.slice(0, 4)) {
+    const sourceUrl = String(asset.object_url || asset.url || "");
+    if (!sourceUrl) continue;
+    try {
+      const response = await fetchWithReadTimeout(assetUrl(sourceUrl), {headers: requestHeaders()}, 60000);
+      if (!response.ok) continue;
+      const raw = new Uint8Array(await response.arrayBuffer());
+      const summary = await privatePreviewSummary(raw);
+      if (!summary) continue;
+      const blob = await composeHighlightRulePreviewBlob(summary, asset.name);
+      if (!blob) continue;
+      const previewBytes = new Uint8Array(await blob.arrayBuffer());
+      const previewPath = await uploadBrowserObject("previews", await codec.sha256Hex(previewBytes), "jpg", previewBytes, "image/jpeg", `${asset.name || "高亮规则"}-预览`);
+      const next = {
+        ...asset, preview_url: previewPath, preview_kind: "highlight",
+        preview_details: {...(asset.preview_details || {}), kind: "highlight", rules: Array.isArray(summary.rules) ? summary.rules.length : 0, rule_count: Number(summary.rule_count) || 0},
+        author: assetAuthor(asset), updated_at: new Date().toISOString(),
+      };
+      delete next.record_sha256;
+      const bytes = new TextEncoder().encode(JSON.stringify(next));
+      next.record_sha256 = await codec.sha256Hex(bytes);
+      await uploadBrowserObject("records", next.record_sha256, "json", bytes, "application/json", "", next);
+      const index = state.assets.findIndex(item => String(item.id) === String(asset.id));
+      if (index >= 0) state.assets[index] = next;
+      updateCachedRecord(next);
+      repaired += 1;
+    } catch (error) {
+      console.warn("高亮规则预览补全失败", asset.name, error);
+    }
+  }
+  if (repaired) { renderAssets(); toast(`已补全 ${repaired} 个高亮包的预览`); }
+}
 async function loadLibraryAfterConnection({fromSave = false} = {}) {
   const generation = ++libraryLoadGeneration;
   const remote = Boolean(apiBase);
@@ -399,6 +443,7 @@ async function loadLibraryAfterConnection({fromSave = false} = {}) {
       // 先回迁被误判的应用主题，再把真正的阅读主题搬进收藏库，顺序不能反。
       try { await restoreMisclassifiedThemeAssets(); } catch (error) { console.warn("应用主题回迁失败", error); }
       try { await migrateReaderThemesToAssets(); } catch (error) { console.warn("阅读主题迁移失败", error); }
+      try { await repairMissingPrivatePreviews(); } catch (error) { console.warn("高亮预览补全失败", error); }
     }
     refreshSettingsControls();
   } catch (error) {
@@ -958,6 +1003,71 @@ async function privateSeal(prefix, replacements, configs) {
   if (!data.prefix_base64 || !Array.isArray(data.entries)) throw new Error("加密主题重封接口返回不完整");
   return data;
 }
+// 高亮规则包（RED\x10 + resourceType=highlightRule）整个包只有一个加密目录，
+// 里面没有图片可扫描：浏览器不认识密钥，只能请 Worker 解密后给一份规则摘要
+// （关键字 / 配色 / 条数），再据此画一张预览图，卡片才不是「暂无预览」。
+async function privatePreviewSummary(raw) {
+  if (!browserSyncEnabled() || !raw?.length) return null;
+  const response = await fetchWithReadTimeout(apiUrl("/api/private/preview"), {
+    method: "POST", headers: requestHeaders({"Content-Type": "application/json"}),
+    body: JSON.stringify({red_base64: base64Bytes(new Uint8Array(raw))}),
+  }, 30000);
+  if (!response.ok) return null;
+  const data = await response.json().catch(() => null);
+  return data?.ok ? data : null;
+}
+const HIGHLIGHT_PALETTES = {brown: "#c89a72", blue: "#93b3d1", green: "#9cc3a4", pink: "#e0b0c0", purple: "#b4a6cf", yellow: "#e6cf8b", red: "#dda09a", orange: "#e6b98d", gray: "#c8c4bd", grey: "#c8c4bd", black: "#6a6a6a", white: "#efefef", teal: "#96c7c2", cyan: "#96c7c2", 棕: "#c89a72", 蓝: "#93b3d1", 绿: "#9cc3a4", 粉: "#e0b0c0", 紫: "#b4a6cf", 黄: "#e6cf8b", 红: "#dda09a", 橙: "#e6b98d", 灰: "#c8c4bd", 黑: "#6a6a6a", 白: "#efefef", 青: "#96c7c2"};
+function highlightRuleColor(rule, index) {
+  const direct = String(rule?.color || "").trim();
+  if (/^(?:#[0-9a-f]{3,8}|rgba?\(|hsla?\()/i.test(direct)) return direct;
+  const palette = String(rule?.palette || "").toLocaleLowerCase("en-US").replace(/[\s_-]+/g, "");
+  for (const [key, value] of Object.entries(HIGHLIGHT_PALETTES)) if (palette.includes(key.toLocaleLowerCase("en-US"))) return value;
+  return ["#c89a72", "#93b3d1", "#9cc3a4", "#e0b0c0", "#b4a6cf", "#e6cf8b"][index % 6];
+}
+function readableRuleText(rule) {
+  const raw = String(rule?.name || rule?.keyword || "").trim();
+  if (!raw) return "高亮片段";
+  // 关键字大多是正则（“[^”]+”），照原样画出来像乱码，去掉正则记号留可读部分。
+  return raw.replace(/[\\^$.*+?()[\]{}|]/g, "").replace(/\s+/g, " ").trim().slice(0, 24) || "高亮片段";
+}
+async function composeHighlightRulePreviewBlob(summary, fallbackName) {
+  const rules = Array.isArray(summary?.rules) ? summary.rules.slice(0, 5) : [];
+  const width = 900, height = 620;
+  const canvas = document.createElement("canvas");
+  canvas.width = width; canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+  const title = String(summary?.name || fallbackName || "高亮规则").slice(0, 28);
+  context.fillStyle = "#fbf7ee"; context.fillRect(0, 0, width, height);
+  context.fillStyle = "#1d1a15";
+  context.font = '600 40px "PingFang SC", "Microsoft YaHei", system-ui, sans-serif';
+  context.fillText(title, 48, 88);
+  context.fillStyle = "#8a4a30";
+  context.font = '500 22px "PingFang SC", "Microsoft YaHei", system-ui, sans-serif';
+  const count = Number(summary?.rule_count || rules.length) || rules.length;
+  context.fillText(`高亮规则 · ${count} 条${summary?.image_count ? ` · ${summary.image_count} 张素材` : ""}`, 48, 126);
+  // 规则条：浅色背景 + 左侧色块，正文用真实关键字（正则记号已清掉）。
+  const top = 172, rowHeight = 96;
+  rules.slice(0, 4).forEach((rule, index) => {
+    const y = top + index * (rowHeight + 14);
+    const color = highlightRuleColor(rule, index);
+    context.fillStyle = color; context.globalAlpha = .5;
+    context.beginPath(); context.roundRect ? context.roundRect(48, y, width - 96, rowHeight, 16) : context.rect(48, y, width - 96, rowHeight); context.fill();
+    context.globalAlpha = 1;
+    context.fillStyle = color;
+    context.beginPath(); context.roundRect ? context.roundRect(48, y, 10, rowHeight, 5) : context.rect(48, y, 10, rowHeight); context.fill();
+    context.fillStyle = "#241f18";
+    context.font = '600 34px "PingFang SC", "Microsoft YaHei", system-ui, sans-serif';
+    context.fillText(readableRuleText(rule), 84, y + 60);
+  });
+  if (!rules.length) {
+    context.fillStyle = "#7a7265";
+    context.font = '400 24px "PingFang SC", "Microsoft YaHei", system-ui, sans-serif';
+    context.fillText("这个高亮包没有可展示的规则条目，点开卡片看详情。", 48, 210);
+  }
+  return await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", .88));
+}
+
 function privateResult(raw, output, decisions) {
   if (!output || output.length >= raw.length) {
     return privateSkippedResult(raw, decisions.map(item => ({...item, used: false, reason: "重封后未变小，保留原包"})));
@@ -3220,6 +3330,9 @@ function setView(view, replace = false) {
   }
   if (libraryStarted && view === "jobs") loadJobs().catch(() => {});
   if (libraryStarted && view === "storage") loadStorage().catch(error => toast(error.message));
+  // 分类标签页不依赖记录：读库失败（例如未连接共享库）时也要先把分类摆出来，
+  // 否则整块区域只剩「正在读取收藏…」，看起来像页面坏了。
+  if (view === "assets") renderAssetFilterTabs();
 }
 function setImportKind(kind) {
   state.importKind = kind;
@@ -4227,6 +4340,15 @@ function assetTypeLabel(asset) {
 function assetRedCategory(asset) {
   return String(asset.red_category || asset.category || "").trim();
 }
+// 作者是独立字段，和类型分开存。类型词（高亮规则 / 封面图集 …）和「作者未记录」
+// 这类占位曾经被写进 author 或当成作者显示，卡片上就出现了「作者：高亮规则」。
+// 这里统一清洗：这些值一律视为空，留给用户自己填。
+const ASSET_AUTHOR_PLACEHOLDERS = new Set(["作者未记录", "未记录", "未知作者", "佚名", "未填写", "未知", "unknown", "高亮规则", "高亮包", "封面图集", "图集", "阅读主题", "应用主题", "主题部件", "主题", "字体"]);
+function assetAuthor(record) {
+  const value = String(record?.author || "").trim();
+  if (!value) return "";
+  return ASSET_AUTHOR_PLACEHOLDERS.has(value.toLocaleLowerCase("zh-CN")) ? "" : value;
+}
 function assetMatchesFilter(asset) {
   const mode = state.assetFilter || "all";
   // 收藏库先按大类分：SVG / HTML / 主题部件（RED 包），再在部件里分图集、高亮。
@@ -4245,7 +4367,7 @@ function assetMatchesFilter(asset) {
 function assetMatchesSearch(asset) {
   const needle = String(state.assetSearch || "").trim().toLocaleLowerCase("zh-CN");
   if (!needle) return true;
-  return [asset.name, asset.file_name, asset.author, asset.style, assetRedCategory(asset), ...(asset.tags || [])].some(value => String(value || "").toLocaleLowerCase("zh-CN").includes(needle));
+  return [asset.name, asset.file_name, assetAuthor(asset), asset.style, assetRedCategory(asset), ...(asset.tags || [])].some(value => String(value || "").toLocaleLowerCase("zh-CN").includes(needle));
 }
 // 收藏库顶部用「标签页」代替下拉框：参考「进度条收藏夹」，常用分类一眼可见、
 // 直接带数量，不必先展开下拉再找。数量跟搜索结果走，和字体库的计数规则一致。
@@ -4304,6 +4426,7 @@ function libraryRecordCard(kind,record,preview,caption) {
   const name=(kind==='font'?record.family:record.name)||record.name||record.file_name||'未命名',tags=recordTags(record),id=escapeHtml(record.id);
   // 收藏库里图集 / 高亮要显示自己的分类，不能只靠预览角标的小字。
   const redCategory = kind==='asset' ? assetRedCategory(record) : "";
+  const author = kind==='asset' ? assetAuthor(record) : "";
   // SVG / HTML 也给一个实心分类标签，收藏库一眼能分出网页和主题部件。
   const typeCategory = kind==='asset' ? (redCategory || assetTypeLabel(record)) : "";
   const categories = kind==='font' ? [fontCategory(record)] : record.style ? [record.style] : [];
@@ -4320,7 +4443,7 @@ function libraryRecordCard(kind,record,preview,caption) {
     // 元信息，四个收藏就占满一屏。
     return `<article class="theme-card catalog-card asset-card asset-compact" data-record-card="asset" data-asset-id="${id}">
     <button class="theme-card-hit" type="button" data-record-open="asset" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情"></button>
-    <div class="asset-compact-head"><div class="item-heading">${selectInput('asset',record.id,name,isAssetBusy('asset',record.id))}<h3 class="asset-compact-title">${escapeHtml(name)}</h3></div><div class="asset-compact-meta"><span class="theme-categories">${typeCategory?`<em class="is-key">${escapeHtml(typeCategory)}</em>`:''}${tags.length?`<em>${escapeHtml(tags[0])}</em>`:String(record.author||'').trim()?`<em>${escapeHtml(String(record.author).trim())}</em>`:''}</span><span class="asset-compact-size">${record.bytes?formatBytes(record.bytes):''}</span></div></div>
+    <div class="asset-compact-head"><div class="item-heading">${selectInput('asset',record.id,name,isAssetBusy('asset',record.id))}<h3 class="asset-compact-title">${escapeHtml(name)}</h3></div><div class="asset-compact-meta"><span class="theme-categories">${typeCategory?`<em class="is-key">${escapeHtml(typeCategory)}</em>`:''}<em class="${author?'':'is-empty'}" title="${author?`作者：${escapeHtml(author)}`:'未填写作者，点开卡片可以补上'}">${escapeHtml(author||'未填作者')}</em></span><span class="asset-compact-size">${record.bytes?formatBytes(record.bytes):''}</span></div></div>
     <div class="theme-preview"><div class="theme-thumbnail catalog-asset-preview">${preview}</div><button class="theme-more" type="button" data-record-details="asset" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情">⋯</button></div>
     ${record.sync_error?`<p class="inline-error">${escapeHtml(typeof record.sync_error==='string'?record.sync_error:Object.values(record.sync_error).join('；'))}</p>`:''}
   </article>`;
@@ -4338,7 +4461,7 @@ function openRecordDialog(kind,id) {
   $('#recordDialogTitle').textContent=name;
   $('#recordDialogDescription').textContent=`${font?'字体':assetTypeLabel(record)} · ${formatBytes(record.bytes)} · ${syncLabel(record)}`;
   const url=downloadUrl(record.download_url||record.object_url||record.url||'',record.file_name||name);
-  body.innerHTML=`<div class="record-dialog-preview">${font?fontPreviewMarkup(record):assetPreview(record)}</div><div class="record-dialog-fields"><form class="asset-meta-form" data-record-form="${escapeHtml(record.id)}" data-record-kind="${kind}">${font?'':`<label>作者<input name="author" value="${escapeHtml(record.author||'')}" /></label>`}<label>${font?'分类':'风格'}<input name="style" value="${escapeHtml(font?fontCategory(record):record.style||'')}" /></label><label>标签<input name="tags" value="${escapeHtml(recordTags(record).join(', '))}" placeholder="用逗号分隔" /></label><button class="secondary-button" type="submit">保存分类</button></form><div class="record-detail-actions">${url?`<a class="primary-button" href="${escapeHtml(url)}" download="${escapeHtml(record.file_name||name)}">${font?'下载字体':'下载文件'}</a>`:''}${savedToCloud(record)?'':`<button class="secondary-button" data-record-sync>同步到 R2</button>`}<button class="text-button danger-text" data-record-delete>删除</button></div><details><summary>文件信息</summary><p class="field-help">${escapeHtml(font?(record.file_name||''):assetFileNameLabel(record))}<br>SHA ${escapeHtml(record.sha256||'未记录')}</p>${record.cleanup_warning?`<p class="inline-error">${escapeHtml(typeof record.cleanup_warning==='string'?record.cleanup_warning:Object.values(record.cleanup_warning).join('；'))}</p>`:''}</details></div>`;
+  body.innerHTML=`<div class="record-dialog-preview">${font?fontPreviewMarkup(record):assetPreview(record)}</div><div class="record-dialog-fields"><form class="asset-meta-form" data-record-form="${escapeHtml(record.id)}" data-record-kind="${kind}">${font?'':`<label>作者<input name="author" value="${escapeHtml(kind==='asset'?assetAuthor(record):(record.author||''))}" placeholder="留空也可以，之后随时补" /></label>`}<label>${font?'分类':'风格'}<input name="style" value="${escapeHtml(font?fontCategory(record):record.style||'')}" /></label><label>标签<input name="tags" value="${escapeHtml(recordTags(record).join(', '))}" placeholder="用逗号分隔" /></label><button class="secondary-button" type="submit">保存分类</button></form><div class="record-detail-actions">${url?`<a class="primary-button" href="${escapeHtml(url)}" download="${escapeHtml(record.file_name||name)}">${font?'下载字体':'下载文件'}</a>`:''}${savedToCloud(record)?'':`<button class="secondary-button" data-record-sync>同步到 R2</button>`}<button class="text-button danger-text" data-record-delete>删除</button></div><details><summary>文件信息</summary><p class="field-help">${escapeHtml(font?(record.file_name||''):assetFileNameLabel(record))}<br>SHA ${escapeHtml(record.sha256||'未记录')}</p>${record.cleanup_warning?`<p class="inline-error">${escapeHtml(typeof record.cleanup_warning==='string'?record.cleanup_warning:Object.values(record.cleanup_warning).join('；'))}</p>`:''}</details></div>`;
   const sync=$('[data-record-sync]',body);if(sync)sync.onclick=async()=>{sync.disabled=true;try{await(font?syncFont(id):syncAsset(id));openRecordDialog(kind,id);}finally{sync.disabled=false;}};
   $('[data-record-delete]',body).onclick=async()=>{await deleteSelectedRecords(kind,[id]);if(!state[kind+'s'].some(item=>String(item.id)===String(id)))dialog.close();};
   if(font){$$('[data-font-retry]',body).forEach(button=>button.addEventListener('click',event=>{event.stopPropagation();retryFontPreview(record);}));loadFontPreviewFace(record);}
@@ -4413,7 +4536,8 @@ async function saveRecordClassification(form) {
   const fields = new FormData(form);
   const next = {
     ...record,
-    author: fields.has("author") ? String(fields.get("author") || "").trim() : record.author || "",
+    author: fields.has("author") ? assetAuthor({author: fields.get("author")}) : record.author || "",
+
     style: fields.has("style") ? String(fields.get("style") || "").trim() : record.style || "",
     tags: fields.has("tags") ? splitTags(fields.get("tags")) : record.tags || [],
     updated_at: new Date().toISOString(),
@@ -4912,6 +5036,18 @@ async function analyzeFiles(files) {
           if (preview) {previewBlob=preview;previewUrl = URL.createObjectURL(preview);}
           previewDetails = { ...previewDetails, kind: compositionKind() };
         }
+        // 高亮规则包整包只有一个加密目录，里面没有图片：让 Worker 解出规则摘要
+        // 再画成「关键字 + 配色」的预览图，否则这张卡永远是「暂无预览」。
+        if (!previewBlob && String(inspection?.format || "") === "red_private_v2" && /highlight/i.test(String(inspection?.header?.resourceType || ""))) {
+          const summary = await privatePreviewSummary(raw).catch(() => null);
+          if (summary) {
+            const preview = await composeHighlightRulePreviewBlob(summary, identity.name);
+            if (preview) { previewBlob = preview; previewUrl = URL.createObjectURL(preview); }
+            if (!identity.author && summary.author) identity.author = summary.author;
+            if (summary.name && !/^高亮规则/.test(identity.name)) identity.name = summary.name;
+            previewDetails = { ...previewDetails, kind: "highlight", rules: Array.isArray(summary.rules) ? summary.rules.length : 0, rule_count: Number(summary.rule_count) || 0 };
+          }
+        }
         const tone = entries.previewTone || null;
         const toneCategories = themeToneCategories(tone, previewDetails);
         const autoCategory = toneCategories[0] || "";
@@ -5025,7 +5161,7 @@ async function commitThemes(ids = [...selections.review]) {
             transferStage("写入收藏记录", name);
             const record = await uploadBrowserRecord({
               kind: "asset", id: `asset-${assetSha.slice(0, 16)}`, asset_type: "red", extension: "red",
-              category: redAsset, red_category: redAsset, preview_kind: item.info?.preview_details?.kind || "", file_name: fileName, name: item.info?.name || name, author: item.info?.author || "", style: "", tags: [],
+              category: redAsset, red_category: redAsset, preview_kind: item.info?.preview_details?.kind || "", file_name: fileName, name: item.info?.name || name, author: assetAuthor({author: item.info?.author}), style: "", tags: [],
               sha256: assetSha, original_sha256: assetSha, bytes: raw.length, mime: "application/octet-stream",
               container_format: item.info?.container_format || "", compression_supported: item.info?.compression_supported !== false,
               object_url: objectPath, url: objectPath, preview_url: previewPath,

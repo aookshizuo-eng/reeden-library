@@ -1,0 +1,15 @@
+import {createRequire} from 'node:module';
+const require=createRequire(process.env.PLAYWRIGHT_PACKAGE||import.meta.url),{chromium}=require('playwright');
+const browser=await chromium.launch({channel:'msedge',headless:true});
+const p=await browser.newPage({viewport:{width:1280,height:900}});
+const errors=[];p.on('pageerror',e=>errors.push(String(e)));
+await p.goto('https://red-garden-sync.pages.dev/#assets',{waitUntil:'networkidle'});
+await p.waitForTimeout(1500);
+console.log('tabs',await p.locator('#assetFilterTabs .asset-filter-tab').count());
+console.log('labels',(await p.locator('#assetFilterTabs .asset-filter-tab').allInnerTexts()).join(' | '));
+console.log('gridClass',await p.locator('#assetList').getAttribute('class'));
+console.log('errors',errors.slice(0,3));
+await p.setViewportSize({width:390,height:844});
+await p.waitForTimeout(400);
+console.log('overflow',await p.evaluate(()=>document.documentElement.scrollWidth-innerWidth));
+await browser.close();

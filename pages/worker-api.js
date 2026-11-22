@@ -268,12 +268,18 @@ function utf8Json(bytes, label) {
   } catch { throw new Error(`${label} 不是有效 JSON 对象`); }
 }
 
-function assertPrivateHeader(header) {
+function assertPrivateHeader(header, options = {}) {
   const expected = {
     version: 2, resourceType: "themeBundle", payloadType: "directory",
     containerMode: "reedenPrivate", algorithm: "aes-256-gcm-manifest", assetMode: "plain-sequential",
   };
-  if (!header || typeof header !== "object" || Object.keys(expected).some(key => header[key] !== expected[key])) {
+  // 预览只读，resourceType 可以是 highlightRule / coverGallery 等：重封仍然只
+  // 接受 themeBundle，别为了预览放宽写入侧的校验。
+  const {resourceType, ...rest} = expected;
+  const typeOk = options.anyResourceType
+    ? typeof header?.resourceType === "string" && header.resourceType.length > 0
+    : header?.resourceType === resourceType;
+  if (!header || typeof header !== "object" || Object.keys(rest).some(key => header[key] !== rest[key]) || !typeOk) {
     throw new Error("此私有 RED 协议尚未支持重封");
   }
   if (!Number.isSafeInteger(header.manifestLength) || header.manifestLength < 16 || header.manifestLength > PRIVATE_MAX_MANIFEST) {
@@ -300,12 +306,12 @@ async function importPrivateKey(env) {
   return crypto.subtle.importKey("raw", keyBytes, {name: "AES-GCM"}, false, ["decrypt", "encrypt"]);
 }
 
-async function decryptPrivateManifest(raw, env) {
+async function decryptPrivateManifest(raw, env, options = {}) {
   if (raw.length < 8 || !PRIVATE_RED_MAGIC.every((value, index) => raw[index] === value)) throw new Error("不是 RED v2 私有主题");
   const headerLength = readU32(raw, 4);
   if (headerLength < 2 || headerLength > 65536 || 8 + headerLength > raw.length) throw new Error("RED v2 公开头长度无效");
   const header = utf8Json(raw.subarray(8, 8 + headerLength), "RED v2 公开头");
-  assertPrivateHeader(header);
+  assertPrivateHeader(header, options);
   const nonce = base64Bytes(header.manifestNonce, "RED v2 目录随机数");
   if (nonce.length !== 12) throw new Error("RED v2 目录随机数长度无效");
   const manifestStart = 8 + headerLength;
@@ -315,7 +321,7 @@ async function decryptPrivateManifest(raw, env) {
   try { plain = new Uint8Array(await crypto.subtle.decrypt({name: "AES-GCM", iv: nonce}, await importPrivateKey(env), raw.subarray(manifestStart, manifestEnd))); }
   catch { throw new Error("RED v2 加密目录认证失败，文件可能损坏或密钥不匹配"); }
   const manifest = utf8Json(plain, "RED v2 已认证目录");
-  assertPrivateManifest(manifest);
+  if (options.assertDirectory !== false) assertPrivateManifest(manifest);
   return {header, manifest, manifestEnd};
 }
 
@@ -910,6 +916,79 @@ async function privateDirectory(request, env) {
   } catch (error) { return json({error: error?.message || "加密目录解析失败"}, 422, request, env); }
 }
 
+// 高亮规则 / 图集这类私有包的加密目录里放的是配置 JSON 本身，没有图片可扫描，
+// 浏览器侧只能停在「暂无预览」。这里在 Worker 里解密目录、抽一份极小的规则摘要
+// （关键字 + 配色 + 规则条数），浏览器据此画预览图；不返回任何原始内容。
+const PRIVATE_PREVIEW_LIMIT = 8;
+function privateColorValue(value) {
+  const text = String(value || "").trim();
+  if (/^#[0-9a-f]{3,8}$/i.test(text)) return text;
+  if (/^(?:rgb|hsl)a?\([^)]*\)$/i.test(text)) return text;
+  return "";
+}
+function privateRuleSummary(rule) {
+  if (!rule || typeof rule !== "object" || Array.isArray(rule)) return null;
+  const keyword = String(rule.keyword || rule.regex || rule.regexp || rule.text || rule.match || rule.pattern || "").slice(0, 80);
+  const name = String(rule.name || rule.title || rule.label || "").slice(0, 40);
+  let color = "";
+  for (const key of ["styleColor", "color", "bgColor", "backgroundColor", "highlightColor", "spanColor", "textColor", "borderColor", "underlineColor"]) {
+    color = privateColorValue(rule[key]);
+    if (color) break;
+  }
+  const palette = String(rule.styleColorType || rule.colorType || rule.palette || rule.styleName || "").slice(0, 24);
+  const images = rule.images && typeof rule.images === "object" ? Object.keys(rule.images).length : 0;
+  if (!keyword && !name && !color && !palette && !images) return null;
+  return {name: name || keyword || "", keyword, color, palette, images};
+}
+function privatePreviewSummary(manifest, header) {
+  const top = manifest && typeof manifest === "object" && !Array.isArray(manifest) ? manifest : {};
+  const list = [top.data, top.rules, top.highlights, top.items, top.list].find(Array.isArray) || [];
+  const rules = [];
+  let images = 0;
+  const push = rule => {
+    const summary = privateRuleSummary(rule);
+    if (!summary) return;
+    images += summary.images;
+    if (rules.length < PRIVATE_PREVIEW_LIMIT) rules.push(summary);
+  };
+  list.forEach(push);
+  if (!rules.length) {
+    // 有的包把规则藏在嵌套结构里（按关键词分组、按白天/夜间分套），再按特征找一层。
+    const seen = new Set();
+    const walk = (node, depth) => {
+      if (!node || typeof node !== "object" || depth > 6 || rules.length >= PRIVATE_PREVIEW_LIMIT) return;
+      if (Array.isArray(node)) { node.forEach(item => walk(item, depth + 1)); return; }
+      if (seen.has(node)) return;
+      seen.add(node);
+      if ("keyword" in node || "styleType" in node || "styleColorType" in node) {
+        push(node);
+        if (rules.length >= PRIVATE_PREVIEW_LIMIT) return;
+      }
+      for (const value of Object.values(node)) walk(value, depth + 1);
+    };
+    walk(top, 0);
+  }
+  const name = String(top.name || top.title || top.themeName || top.highlightName || "").slice(0, 80);
+  const author = String(top.author || top.creator || top.designer || "").slice(0, 60);
+  const kind = /highlight/i.test(String(header?.resourceType || "")) ? "highlight" : String(header?.resourceType || "");
+  return {kind, name, author, rules, rule_count: list.length || rules.length, image_count: images};
+}
+async function privatePreview(request, env) {
+  const denied = requirePrivateWrite(request, env);
+  if (denied) return denied;
+  let payload;
+  try { payload = await request.json(); } catch { return json({error: "预览请求不是有效 JSON"}, 400, request, env); }
+  let raw;
+  try { raw = base64Bytes(payload?.red_base64, "red_base64"); } catch (error) { return json({error: error.message}, 400, request, env); }
+  if (raw.length > maxUpload(env)) return json({error: "RED 超过上传大小限制"}, 413, request, env);
+  try {
+    const {header, manifest} = await decryptPrivateManifest(raw, env, {anyResourceType: true, assertDirectory: false});
+    return json({ok: true, ...privatePreviewSummary(manifest, header)}, 200, request, env);
+  } catch (error) {
+    return json({error: error?.message || "加密预览解析失败"}, 422, request, env);
+  }
+}
+
 async function sealPrivatePrefix(request, env) {
   const denied = requirePrivateWrite(request, env);
   if (denied) return denied;
@@ -1494,6 +1573,7 @@ async function routeRequest(request, env) {
   if (url.pathname === "/api/library" && request.method === "DELETE") return deleteLibraryRecords(request, env);
   if (url.pathname === "/api/private/repack" && request.method === "POST") return repackPrivateRed(request, env);
   if (url.pathname === "/api/private/directory" && request.method === "POST") return privateDirectory(request, env);
+  if (url.pathname === "/api/private/preview" && request.method === "POST") return privatePreview(request, env);
   if (url.pathname === "/api/private/seal" && request.method === "POST") return sealPrivatePrefix(request, env);
   if (url.pathname === "/api/storage/123/login" && request.method === "POST") return loginPan123(request, env);
   if (url.pathname === "/api/backup/123/verify" && request.method === "POST") return verifyPan123(request, env);
