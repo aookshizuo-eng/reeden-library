@@ -1009,6 +1009,9 @@ function pan123BackupConfig() {
 }
 let backupPhaseActive=false;
 const deferredPan123=[];
+// 整批提交时 123 备份延后到 commitSelection 末尾；这类主题的本地恢复副本
+// 也要等备份结果出来再决定能否清除，否则会误留“未完成文件”横幅。
+const deferredBackupCleanup=[];
 // 原包只备份到 123，不写 R2；入库阶段原包字节已在浏览器内存，暂存下来供
 // 紧随其后的备份直接复用。成功后释放；失败/暂停保留到本次会话内重试。
 const backupByteStash=new Map();
@@ -3454,7 +3457,7 @@ async function commitSelection() {
   const themeIds = state.review.filter(item => selections.review.has(item.staging_id)).map(item => item.staging_id);
   const chosen = state.pending.filter(item => selections.review.has(item.id));
   if (!themeIds.length && !chosen.length) { toast("请先勾选要处理的条目，或点「全选」"); return; }
-  deferredCleanup.length = 0;deferredPan123.length=0;
+  deferredCleanup.length = 0;deferredPan123.length=0;deferredBackupCleanup.length=0;
   transferController=new AbortController();
   commitBatchBusy = true;
   try {
@@ -3476,6 +3479,11 @@ async function commitSelection() {
       dropPending(assets.filter(item => !failed.has(item.file)));
     }
     if(deferredPan123.length && !transferController?.signal.aborted)await runPan123Backups(deferredPan123);
+    // 延后的 123 备份此时已有结果：只有真正备份成功（或复用的旧记录）才清恢复副本。
+    if(!transferController?.signal.aborted)for(const entry of deferredBackupCleanup){
+      if(entry.reused||entry.record?.original_123?.key)deferredCleanup.push(entry.file);
+    }
+    deferredBackupCleanup.length=0;
     const remaining = state.pending.length + state.review.length+importIssues.size;
     operationMessage($("#unifiedImportStatus"), remaining ? `仍有 ${remaining} 项待处理或无法读取，原件已保留，见确认区或错误清单。` : "整批上传完成，主题和字体已进入各自资源库，可按最新入库查看。", remaining > 0);
   } finally {
@@ -3486,6 +3494,7 @@ async function commitSelection() {
     if (deferredCleanup.length && !transferController?.signal.aborted) {
       const files = [...new Set(deferredCleanup)];
       deferredCleanup.length = 0;
+      await completeLocalFiles(files);
       offerLocalCleanup(files, `本批 ${files.length} 个文件已上传成功，可以删掉本地副本释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
     }
   }
@@ -4340,13 +4349,21 @@ async function commitThemes(ids = [...selections.review]) {
       const elapsed=((performance.now()-started)/1000).toFixed(1);
       const message = transferController?.signal.aborted?`已暂停，${completed.length} 项已完成，未完成文件保留，可继续上传。`:failures.length ? `${completed.length} 个主题已保存到 R2，${failures.length} 个失败，请查看错误后重试。` : `${completed.length} 个主题已保存到 R2，耗时 ${elapsed} 秒${results.some(result=>result.reused)?"（重复原件已跳过）":""}。`;
       operationMessage($("#reviewBatchStatus"), message, Boolean(failures.length)); toast(message);
-      const backups=backupOriginals?results.filter(result=>result.record&&!result.reused).map(result=>result.record):[];
-      if(backups.length&&!transferController?.signal.aborted){if(commitBatchBusy)deferredPan123.push(...backups);else await runPan123Backups(backups);}
-      // 启用 123 时只有备份成功的主题才释放本地恢复副本；失败/暂停保留原包。
-      const cleanupFiles=results.filter(result=>result.record&&result.item?.file&&(!backupOriginals||result.reused||result.record.original_123?.key)).map(result=>result.item.file);
-      if(cleanupFiles.length)await completeLocalFiles(cleanupFiles);
-      if(commitBatchBusy)deferredCleanup.push(...cleanupFiles);
-      else if(!transferController?.signal.aborted&&cleanupFiles.length)offerLocalCleanup(cleanupFiles, `本次 ${cleanupFiles.length} 个主题已处理完成，可以删掉本地原包释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
+      const backupEntries=backupOriginals?results.filter(result=>result.record&&!result.reused&&result.item?.file).map(result=>({file:result.item.file,record:result.record})):[];
+      const backups=backupEntries.map(entry=>entry.record);
+      const readyNow=results.filter(result=>result.record&&result.item?.file&&(!backupOriginals||result.reused)).map(result=>result.item.file);
+      if(commitBatchBusy){
+        // 整批还有字体/收藏要处理：备份和恢复副本都等 commitSelection 末尾统一结算。
+        if(backups.length&&!transferController?.signal.aborted)deferredPan123.push(...backups);
+        if(backupEntries.length)deferredBackupCleanup.push(...backupEntries);
+        deferredCleanup.push(...readyNow);
+      }else{
+        if(backups.length&&!transferController?.signal.aborted)await runPan123Backups(backups);
+        // 启用 123 时只有备份成功的主题才清恢复副本；失败/暂停保留原包。
+        const cleanupFiles=[...readyNow,...backupEntries.filter(entry=>entry.record.original_123?.key).map(entry=>entry.file)];
+        if(cleanupFiles.length)await completeLocalFiles(cleanupFiles);
+        if(!transferController?.signal.aborted&&cleanupFiles.length)offerLocalCleanup(cleanupFiles, `本次 ${cleanupFiles.length} 个主题已处理完成，可以删掉本地原包释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
+      }
       return;
     }
     // 本地服务模式也要有看得见的进度：先把条亮出来，再提交任务，随后由
@@ -5288,11 +5305,48 @@ const pickedFileSources = new WeakMap();
 const localFileIds = new WeakMap();
 let transferDatabase, localTransferRows=[];
 function transferDB() {
-  if(!transferDatabase)transferDatabase=new Promise((resolve,reject)=>{const r=indexedDB.open('reeden-transfers-v1',1);r.onupgradeneeded=()=>r.result.createObjectStore('files',{keyPath:'id'});r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});
+  if(!transferDatabase)transferDatabase=new Promise((resolve,reject)=>{
+    const r=indexedDB.open('reeden-transfers-v1',2);
+    r.onupgradeneeded=()=>{
+      const db=r.result;
+      if(!db.objectStoreNames.contains('files'))db.createObjectStore('files',{keyPath:'id'});
+      if(!db.objectStoreNames.contains('dirs'))db.createObjectStore('dirs');
+    };
+    r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);
+  });
   return transferDatabase;
 }
-async function transferStore(mode,action) {
-  const db=await transferDB();return new Promise((resolve,reject)=>{const tx=db.transaction('files',mode),request=action(tx.objectStore('files'));let result; if(request)request.onsuccess=()=>{result=request.result;};tx.oncomplete=()=>resolve(result);tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error);});
+async function transferStore(mode,action,storeName='files') {
+  const db=await transferDB();return new Promise((resolve,reject)=>{const tx=db.transaction(storeName,mode),request=action(tx.objectStore(storeName));let result; if(request)request.onsuccess=()=>{result=request.result;};tx.oncomplete=()=>resolve(result);tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error);});
+}
+const CLEANUP_DIRECTORIES_KEY='cleanup-directories';
+async function savedCleanupDirectories() {
+  try { const handles=await transferStore('readonly',store=>store.get(CLEANUP_DIRECTORIES_KEY),'dirs');return Array.isArray(handles)?handles:[]; }
+  catch { return []; }
+}
+async function sameCleanupDirectory(a,b) {
+  if(!a||!b)return false;
+  if(a===b)return true;
+  if(typeof a.isSameEntry==='function') { try { if(await a.isSameEntry(b))return true; } catch {} }
+  if(typeof b.isSameEntry==='function') { try { if(await b.isSameEntry(a))return true; } catch {} }
+  return a.kind===b.kind&&a.name===b.name;
+}
+async function rememberCleanupDirectory(handle) {
+  if(!handle)return;
+  try {
+    const saved=await savedCleanupDirectories(),kept=[];
+    for(const item of saved)if(!await sameCleanupDirectory(item,handle))kept.push(item);
+    kept.slice(-7).push(handle);
+    await transferStore('readwrite',store=>store.put(kept,CLEANUP_DIRECTORIES_KEY),'dirs');
+  } catch {}
+}
+async function ensureDirectoryWrite(handle) {
+  if(!handle)return false;
+  try {
+    if(typeof handle.queryPermission==='function'&&await handle.queryPermission({mode:'readwrite'})==='granted')return true;
+    if(typeof handle.requestPermission==='function')return await handle.requestPermission({mode:'readwrite'})==='granted';
+    return true;
+  } catch { return false; }
 }
 async function refreshLocalTransfers() {
   try {localTransferRows=(await transferStore('readonly',store=>store.getAll())).filter(row=>row.apiBase===apiBase);}catch{localTransferRows=[];}
@@ -5381,7 +5435,7 @@ function refreshCleanupHint() {
   hint.textContent = mode === "app"
     ? "本机文件删除：可用。上传成功后弹窗询问，删除由应用通过系统文件接口完成，系统可能再确认一次。"
     : mode === "picker"
-      ? "本机文件删除：可用。批量清理只需授权一次所在文件夹，不会逐个弹出保存提示。使用「选择文件夹」导入，可同时完成授权；每次删除前都会核对文件内容。"
+      ? "本机文件删除：可用。授权过的文件夹会记住，后续清理直接复用，不必每次重新选择；删除前仍会核对文件内容。"
       : "本机文件删除：当前浏览器不允许网页删除本机文件，上传后会列出清单让你手动清理（手机 APK 与桌面 Chrome/Edge 支持自动删除）。";
 }
 function registerPickedFiles(items, source = null) {
@@ -5453,6 +5507,7 @@ async function pickFolderWithAccess(inputId, handler) {
     input.click();
     return;
   }
+  await rememberCleanupDirectory(handle);
   try {
     const collected = await collectDirectoryFiles(handle);
     if (!collected.length) { toast("这个文件夹里没有可选文件"); return; }
@@ -5493,9 +5548,40 @@ async function directoryWriteGranted(directory) {
   try { return typeof directory.queryPermission !== 'function' || await directory.queryPermission({mode:'readwrite'}) === 'granted'; }
   catch { return false; }
 }
+async function matchCleanupTargets(folder,targets,candidates) {
+  const pending=candidates.filter(target=>!target.deletable);
+  if(!folder||!pending.length)return 0;
+  const entries=await collectDirectoryFiles(folder,'',new Set(pending.map(target=>target.name)));
+  let matched=0;
+  for(const target of pending) {
+    let candidatesForName=entries.filter(entry=>entry.file.name===target.name&&entry.file.size===target.size);
+    if(target.handle?.isSameEntry){
+      const exact=[];
+      for(const entry of candidatesForName)if(await target.handle.isSameEntry(entry.handle))exact.push(entry);
+      if(exact.length)candidatesForName=exact;
+    }
+    const matches=[];
+    for(const entry of candidatesForName)if(await sameLocalFile(entry.file,target.file))matches.push(entry);
+    if(matches.length!==1)continue;
+    const entry=matches[0];
+    Object.assign(target,{parent:entry.parent,handle:entry.handle,directory:folder,deletable:true});
+    const source=pickedFileSources.get(target.file)?.entry;
+    if(source)Object.assign(source,{parent:entry.parent,handle:entry.handle,directory:folder});
+    matched++;
+  }
+  return matched;
+}
 async function openCleanupDialog(targets, summary, options={}) {
   const dialog=$('#cleanupDialog');
   const bridge=nativeFileBridge(),canChoose=supportsDirectoryHandle();
+  // 先用上次保存且仍有效的目录句柄匹配，避免每次删除都重新弹文件夹授权。
+  // 这里只 query 权限；真正 request 必须留在用户点击确认的同步入口里。
+  const savedDirectories=await savedCleanupDirectories();
+  for(const directory of savedDirectories){
+    if(!targets.some(target=>!target.deletable))break;
+    if(!await directoryWriteGranted(directory))continue;
+    await matchCleanupTargets(directory,targets,targets);
+  }
   // Query only, once per root. Permission requests belong to the picker button's
   // direct click, never to a loop or a restored background transfer.
   const permissions=new Map();
@@ -5536,30 +5622,24 @@ async function openCleanupDialog(targets, summary, options={}) {
     const grantFolder=async()=>{
       if(busy||closed)return false;
       busy=true;render();
+      let matched=0;
       try{
-        // This call must happen before the first await in the click handler.
-        const folder=await window.showDirectoryPicker({id:'reeden-import',mode:'readwrite'});
-        if(!await directoryWriteGranted(folder))throw new Error('未获得文件夹的写入权限，请重新选择并允许修改。');
-        const entries=await collectDirectoryFiles(folder,'',new Set(targets.filter(t=>selected.has(t)&&!t.deletable).map(t=>t.name)));let matched=0;
-        for(const target of targets.filter(t=>selected.has(t)&&!t.deletable)){
-          let candidates=entries.filter(e=>e.file.name===target.name&&e.file.size===target.size);
-          if(target.handle?.isSameEntry){
-            const exact=[];
-            for(const entry of candidates)if(await target.handle.isSameEntry(entry.handle))exact.push(entry);
-            candidates=exact;
-          }
-          const matches=[];
-          for(const entry of candidates)if(await sameLocalFile(entry.file,target.file))matches.push(entry);
-          if(matches.length===1){
-            const entry=matches[0];Object.assign(target,{parent:entry.parent,handle:entry.handle,directory:folder,deletable:true});
-            const source=pickedFileSources.get(target.file)?.entry;
-            if(source)Object.assign(source,{parent:entry.parent,handle:entry.handle,directory:folder});
-            matched++;
-          }
+        const pendingTargets=()=>targets.filter(target=>selected.has(target)&&!target.deletable);
+        // 优先复用以前保存的目录句柄：只请求一次写权限，不再让用户重新选文件夹。
+        for(const directory of savedDirectories){
+          if(!pendingTargets().length)break;
+          if(!await ensureDirectoryWrite(directory))continue;
+          matched+=await matchCleanupTargets(directory,targets,pendingTargets());
         }
-        const remaining=targets.filter(t=>selected.has(t)&&!t.deletable).length;
+        if(pendingTargets().length&&supportsDirectoryHandle()){
+          const folder=await window.showDirectoryPicker({id:'reeden-import',mode:'readwrite'});
+          if(!await directoryWriteGranted(folder))throw new Error('未获得文件夹的写入权限，请重新选择并允许修改。');
+          await rememberCleanupDirectory(folder);
+          matched+=await matchCleanupTargets(folder,targets,pendingTargets());
+        }
+        const remaining=pendingTargets().length;
         if(!closed)$('#cleanupNote').textContent=remaining?`本次匹配 ${matched} 个，仍有 ${remaining} 个未匹配。请选择其余文件所在文件夹，或取消勾选；重名不唯一、内容已改变的文件会保留。`:`已核对 ${matched} 个文件。${options.note||'删除前会再次核对内容。'}`;
-        return !closed;
+        return !closed&&!remaining;
       }catch(error){if(!closed&&error.name!=='AbortError')$('#cleanupNote').textContent='授权失败：'+error.message;return false;}
       finally{busy=false;if(!closed)render();}
     };
