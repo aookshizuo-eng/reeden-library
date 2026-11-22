@@ -5418,11 +5418,15 @@ async function rememberCleanupDirectory(handle) {
     await transferStore('readwrite',store=>store.put(kept,CLEANUP_DIRECTORIES_KEY),'dirs');
   } catch {}
 }
+// 权限请求必须留在用户点击的同步手势里。旧实现先 await queryPermission() 再
+// await requestPermission()，两次 await 之间浏览器可能已消耗用户激活，request
+// 就被拒绝，只好退回 showDirectoryPicker 让用户每次重选文件夹。直接 request：
+// 已授权时浏览器会同步返回 'granted' 不再弹窗，未授权时在本次点击里弹一次即可。
 async function ensureDirectoryWrite(handle) {
   if(!handle)return false;
   try {
-    if(typeof handle.queryPermission==='function'&&await handle.queryPermission({mode:'readwrite'})==='granted')return true;
     if(typeof handle.requestPermission==='function')return await handle.requestPermission({mode:'readwrite'})==='granted';
+    if(typeof handle.queryPermission==='function')return await handle.queryPermission({mode:'readwrite'})==='granted';
     return true;
   } catch { return false; }
 }
@@ -5448,9 +5452,21 @@ async function rememberLocalFiles(files) {
   await refreshLocalTransfers();
 }
 async function completeLocalFiles(files) {
-  for(const file of files)importIssues.delete(localFileIds.get(file)||file);
-  const ids=files.map(file=>localFileIds.get(file)).filter(Boolean);
-  if(ids.length)await transferStore('readwrite',store=>{ids.forEach(id=>store.delete(id));});
+  // localFileIds 是以 File 对象为键的 WeakMap：同一文件跨会话恢复或重新构造后
+  // 对象引用变了，这里就查不到 id，IndexedDB 行删不掉，"未完成文件"横幅会一直挂。
+  // 先用映射，查不到再按文件名+大小回退匹配本地恢复行，确保已完成的副本被清掉。
+  const ids=new Set(),cleared=[];
+  for(const file of files||[]){
+    if(!file)continue;
+    let id=localFileIds.get(file);
+    if(!id){
+      const match=localTransferRows.find(row=>row&&row.file&&row.file.name===file.name&&Number(row.file.size)===Number(file.size));
+      if(match){id=match.id;localFileIds.set(file,id);}
+    }
+    if(id){ids.add(id);cleared.push(file);}
+  }
+  for(const file of cleared)importIssues.delete(localFileIds.get(file)||file);
+  if(ids.size)await transferStore('readwrite',store=>{for(const id of ids)store.delete(id);});
   await refreshLocalTransfers();
   renderImportIssues();
 }
