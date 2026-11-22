@@ -86,25 +86,25 @@ try{
     return data.records||data.items||[];
   },kind);
   const assets=await read('asset'),themes=await read('theme');
-  assert.equal(assets.length,3,`收藏应有图集 + 高亮 + SVG 共 3 条，实际 ${assets.length}`);
-  assert.equal(themes.length,1,'阅读主题必须继续留在主题库');
+  assert.equal(assets.length,4,`收藏应有图集 + 高亮 + 阅读主题 + SVG 共 4 条，实际 ${assets.length}`);
+  assert.equal(themes.length,0,'阅读主题不能再留在主题库');
   const galleryRecord=assets.find(item=>item.red_category==='图集');
   const highlightRecord=assets.find(item=>item.red_category==='高亮');
+  const readerRecord=assets.find(item=>item.red_category==='阅读主题');
   const svgRecord=assets.find(item=>item.asset_type==='svg');
-  assert.ok(galleryRecord&&highlightRecord&&svgRecord,'三类收藏都要入库');
+  assert.ok(galleryRecord&&highlightRecord&&readerRecord&&svgRecord,'四类收藏都要入库');
   assert.equal(galleryRecord.preview_kind,'gallery','图集预览必须走封面网格，不能沿用主题拼贴');
   assert.equal(highlightRecord.preview_kind,'highlight','高亮预览必须只排高亮图片');
   assert.ok(galleryRecord.preview_url&&highlightRecord.preview_url,'图集/高亮都要有预览图');
-  const theme=themes[0];
-  assert.equal(theme.container_format,'red_v1_gzip');
-  assert.equal(theme.preview_details?.kind,'reader','阅读主题预览必须走阅读背景 + 高亮这套');
-  assert.ok(theme.preview_light_url,'阅读主题要生成预览');
-  assert.ok((theme.categories||[]).includes('阅读主题'),`阅读主题应自动带上分类：${theme.categories}`);
+  assert.equal(readerRecord.container_format,'red_v1_gzip');
+  assert.equal(readerRecord.preview_kind,'reader','阅读主题预览必须走阅读背景 + 高亮这套');
+  assert.ok(readerRecord.preview_url,'阅读主题要生成预览');
+  assert.equal(readerRecord.extension,'red');
 
   await p.evaluate(()=>{location.hash='#assets';});
-  await p.waitForFunction(()=>document.querySelectorAll('#assetList .asset-card').length===3,{},{timeout:20000});
+  await p.waitForFunction(()=>document.querySelectorAll('#assetList .asset-card').length===4,{},{timeout:20000});
   const optionHandle=await p.locator('#assetCategoryFilter').evaluate(select=>[...select.options].map(option=>({value:option.value,label:option.textContent})));
-  for(const value of ['svg','html','red','gallery','highlight']){
+  for(const value of ['svg','html','red','gallery','highlight','reader']){
     assert.ok(optionHandle.some(option=>option.value===value),`收藏筛选缺少类型选项：${value}`);
   }
   const counts=async value=>{
@@ -112,17 +112,19 @@ try{
     await p.waitForTimeout(250);
     return p.locator('#assetList .asset-card').count();
   };
-  assert.equal(await counts('red'),2,'主题部件筛选应只剩图集 + 高亮');
+  assert.equal(await counts('red'),3,'主题部件筛选应剩图集 + 高亮 + 阅读主题');
   assert.equal(await counts('gallery'),1,'封面图集筛选应只剩图集');
   assert.equal(await counts('highlight'),1,'高亮筛选应只剩高亮包');
+  assert.equal(await counts('reader'),1,'阅读主题筛选应只剩阅读主题');
   assert.equal(await counts('svg'),1,'SVG 筛选应只剩 SVG 收藏');
   assert.equal(await counts('html'),0,'这次没有 HTML 收藏');
-  assert.equal(await counts('all'),3);
+  assert.equal(await counts('all'),4);
   const chips=await p.locator('#assetList .theme-categories em.is-key').allInnerTexts();
-  for(const name of ['图集','高亮','SVG']) assert.ok(chips.includes(name),`收藏卡缺少类型标签 ${name}：${chips.join(',')}`);
+  for(const name of ['图集','高亮','阅读主题','SVG']) assert.ok(chips.includes(name),`收藏卡缺少类型标签 ${name}：${chips.join(',')}`);
   await p.waitForFunction(()=>[...document.querySelectorAll('#assetList .asset-card img')].every(img=>img.complete&&img.naturalWidth>0),{},{timeout:20000});
   await p.evaluate(()=>{location.hash='#themes';});
-  await p.waitForFunction(()=>document.querySelectorAll('#themeList .theme-card img').length>0,{},{timeout:20000});
+  await p.waitForTimeout(600);
+  assert.equal(await p.locator('#themeList .theme-card').count(),0,'主题库不应再有阅读主题卡');
   assert.deepEqual(errors,[]);
-  console.log('PASS: 收藏库按 SVG / HTML / 主题部件分类，图集只排封面、阅读主题读阅读背景 + 高亮、单独高亮只排高亮图。');
+  console.log('PASS: 收藏库按 SVG / HTML / 主题部件分类，图集只排封面、阅读主题进收藏库并读阅读背景 + 高亮、单独高亮只排高亮图。');
 }finally{await browser.close();await new Promise(resolve=>server.close(resolve));}

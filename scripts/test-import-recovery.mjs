@@ -51,14 +51,13 @@ function records(){return [...bucket.items].filter(([key])=>key.startsWith('reco
 try{
   const p=await page(),files=[];for(let i=0;i<64;i++)files.push(await make('混合批次'+i));files.splice(17,0,bad);files.push({name:'阅读主题 - 旧版样例.red',mimeType:'application/octet-stream',buffer:reader});
   await p.locator('#unifiedInput').setInputFiles(files);await p.waitForFunction(()=>document.querySelectorAll('#reviewList .review-card').length===65&&!document.querySelector('#pauseTransfer').offsetParent,{},{timeout:60000});
-  assert.match(await p.locator('#importIssueSummary').innerText(),/1 个文件/);assert.match(await p.locator('#reviewList').innerText(),/保留原始 gzip/);assert.equal((await rows(p)).length,66);
+  assert.match(await p.locator('#importIssueSummary').innerText(),/1 个文件/);assert.match(await p.locator('#reviewList').innerText(),/阅读主题包：收录进收藏库/);assert.equal((await rows(p)).length,66);
   await p.reload();await p.waitForSelector('#localResumePanel:not([hidden])');await p.locator('#resumeLocalTransfers').evaluate(button=>{button.click();button.click();});
   await p.waitForFunction(()=>document.querySelector('#localResumeText').textContent.includes('1 个未完成')&&!document.querySelector('#resumeLocalTransfers').disabled,{},{timeout:60000});
   assert.equal(records().length,65);assert.equal((await rows(p)).length,1);assert.match(await p.locator('#unifiedImportStatus').innerText(),/1 项待处理|1 个.*无法读取/);assert.doesNotMatch(await p.locator('#unifiedImportStatus').innerText(),/请先勾选/);
   const legacy=records().find(record=>record.container_format==='red_v1_gzip');assert.ok(legacy);assert.notEqual(legacy.author,'阅读主题');
-  // 入库用的是可读文件名 `<name>-压缩.red`（objectFileName 带 label），不是裸 sha；
-  // 按内容在 compressed/ 前缀下找落盘对象，断言阅读主题字节原样保留。
-  const stored=[...bucket.items].find(([key,value])=>key.startsWith('compressed/')&&value.bytes&&Buffer.from(value.bytes).equals(reader));
+  // 阅读主题现在按收藏品存进 assets/（原包不改写），按内容找落盘对象确认字节原样。
+  const stored=[...bucket.items].find(([key,value])=>key.startsWith('assets/')&&value.bytes&&Buffer.from(value.bytes).equals(reader));
   assert.ok(stored,'阅读主题原始 gzip 字节必须原样落盘（不转 ZIP、不重编码）');
   await p.locator('#retryImportIssues').click();await p.waitForFunction(()=>!document.querySelector('#retryImportIssues').disabled);assert.equal(records().length,65);assert.equal((await rows(p)).length,1);
   await p.locator('#resumeLocalTransfers').click();await p.waitForFunction(()=>document.querySelector('#unifiedImportStatus').textContent.includes('仍无法读取')&&!document.querySelector('#resumeLocalTransfers').disabled);

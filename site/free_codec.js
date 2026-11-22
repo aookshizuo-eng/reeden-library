@@ -792,6 +792,20 @@
       tallCandidates[0].role = "shelf";
       if (tallCandidates.length > 1) tallCandidates[tallCandidates.length - 1].role = "reader";
     }
+    // 新版导出会把背景图裁成方形或异形（例如 2048x2048、1170x2532），尺寸规则
+    // 全部落空。这时预览只能拿封面去填手机屏，看起来像阅读主题拼错了。按面积
+    // 兜底：最大的图当书架背景，第二大的竖图当阅读背景。只对应用主题生效，
+    // 封面图集不受影响。
+    const bundleTheme = String(parsed.header?.resourceType || "") === "themeBundle";
+    if (bundleTheme && found.length && !found.some(item => item.role === "shelf")) {
+      const unbound = found.filter(item => !item.role && item.width && item.height);
+      if (unbound.length) {
+        const byArea = [...unbound].sort((a, b) => b.width * b.height - a.width * a.height);
+        byArea[0].role = "shelf";
+        const readerCandidate = byArea.slice(1).find(item => item.width / item.height <= .85);
+        if (readerCandidate) readerCandidate.role = "reader";
+      }
+    }
     return { theme, documents };
   }
   async function extractPrivatePreviewImages(value, options = {}) {
