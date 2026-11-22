@@ -43,10 +43,16 @@ await context.addInitScript(()=>{
 });
 const p=await context.newPage();p.on('pageerror',e=>errors.push(e.message));
 const calls=[];
-// 反向断言：备份阶段若复用入库内存字节，就不该再从 R2 GET 原包。
-const originalGets=[];
+// 反向断言：原包只进 123，不写 R2、也不从 R2 回读；压缩版仍要写 R2。
+const originalGets=[],originalWrites=[],compressedWrites=[];
 await p.route('**/api/objects/originals/**',async route=>{
-  if(route.request().method()==='GET')originalGets.push(route.request().url());
+  const method=route.request().method();
+  if(method==='GET')originalGets.push(route.request().url());
+  if(method==='PUT')originalWrites.push(route.request().url());
+  return route.continue();
+});
+await p.route('**/api/objects/compressed/**',async route=>{
+  if(route.request().method()==='PUT')compressedWrites.push(route.request().url());
   return route.continue();
 });
 // 123 控制面：浏览器直连，返回完整上传序列。并发多主题时用 etag（=md5）区分各自文件。
@@ -107,19 +113,23 @@ try{
   const rootList=calls.filter(c=>c==='DIRECT /b/api//file/list/new').length;
   // 3 个主题：目根目录查询（找备份目录）应远少于主题数（目录已缓存）。
   const completed=(status.backup.match(/本次 (\d+) 个原包已备份/)||[])[1];
-  console.log(JSON.stringify({calls,status,resultWrite,originalGets:originalGets.length,check:{
+  console.log(JSON.stringify({calls,status,resultWrite,originalGets:originalGets.length,originalWrites:originalWrites.length,compressedWrites:compressedWrites.length,check:{
     directControl:directControl.length>0,
     directPut:directPut.length>0,
     workerTransitZero:workerTransit.length===0,
     noJsErrors:errors.length===0,
+    noR2OriginalWrite:originalWrites.length===0,
     noR2ReDownload:originalGets.length===0,
+    compressedInR2:compressedWrites.length===3,
     backed:completed,
   }},null,2));
   assert.ok(directControl.length>0,'控制面必须走浏览器直连 /b/api');
   assert.ok(directPut.length>0,'数据面必须浏览器直传 presigned 节点');
   assert.equal(workerTransit.length,0,'不得退回 Worker 海外中转');
+  assert.equal(originalWrites.length,0,'启用 123 备份时原包不得写入 R2');
+  assert.equal(compressedWrites.length,3,'压缩版必须写入 R2');
   assert.equal(originalGets.length,0,'备份阶段不得再从 R2 下载原包（应复用入库内存字节）');
   assert.equal(completed,'3','3 个主题应全部备份成功（并发隔离）');
   assert.deepEqual(errors,[]);
-  console.log('PASS: 123 backup browser-direct + byte reuse + concurrent; Worker transit 0, no R2 re-download.');
+  console.log('PASS: 原包直传 123、压缩版入 R2；Worker 中转 0、R2 原包写入/回读 0。');
 }finally{await browser.close();await new Promise(resolve=>server.close(resolve));}

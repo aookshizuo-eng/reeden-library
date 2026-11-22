@@ -1009,9 +1009,10 @@ function pan123BackupConfig() {
 }
 let backupPhaseActive=false;
 const deferredPan123=[];
-// 入库阶段原包字节已在浏览器内存，暂存下来供紧随其后的备份直接复用，
-// 省掉每个主题一次 R2 往返。备份结束（成功/失败/暂停）后即释放，不长期占用内存。
+// 原包只备份到 123，不写 R2；入库阶段原包字节已在浏览器内存，暂存下来供
+// 紧随其后的备份直接复用。成功后释放；失败/暂停保留到本次会话内重试。
 const backupByteStash=new Map();
+function pendingPan123Backup(record){return !record.original_123?.key&&(backupByteStash.has(record.id)||!!record.original_url);}
 function pan123BackupEnabled(){return !!pan123BackupConfig().token && $('#backupTo123')?.checked!==false;}
 // 问题3：备份走的还是 Worker -> Cloudflare 海外出口 -> 123，这是慢+易失败的根因。
 // 登录/校验/列清单早已浏览器直连，唯独上传原包还留在海外中转。这里把控制面
@@ -1063,16 +1064,17 @@ async function pan123DirectBackup(record,codec,config,inMemoryBytes,context){
   let md5=record.original_md5;
   const fileName=(String(record.source_name||redDownloadLabel(record)).replace(/\.red$/i,'').replace(/[\\/:*?"<>|]/g,'_').slice(0,200)||'theme')+'.red';
   const folder=String(config.folder||'').replace(/^\/+|\/+$/g,'');
-  // 慢的根源之一：入库时原包字节已经在浏览器内存里，旧实现却丢掉它、备份阶段
-  // 再从 R2 下载一趟。这里优先复用入库时暂存的字节，只有重试旧记录才回退 R2。
+  // 原包只备份到 123，正常入库直接用本地字节；只有历史记录（曾经存过 R2）
+  // 重试时才回退 R2。若原包未存 R2 且内存字节已释放，则明确提示重新选文件。
   let bytes=inMemoryBytes;
   if(!bytes){
-    transferStage('从 R2 读取原包（直连备份）',record.name||record.id);
+    if(!record.original_url)throw new Error('原包内存字节已释放且未存 R2，请重新选择文件后备份到 123');
+    transferStage('从 R2 读取原包（历史记录重试）',record.name||record.id);
     const raw=await transferFetch(assetUrl(record.original_url),{headers:requestHeaders()},180000);
     if(!raw.ok)throw new Error(`无法读取 R2 原包（HTTP ${raw.status}）`);
     bytes=new Uint8Array(await raw.arrayBuffer());
   }
-  if(!bytes.length)throw new Error('R2 原包为空');
+  if(!bytes.length)throw new Error('原包为空');
   if(!md5){
     const result=await runCodecTask('hashes',{items:[{bytes}],options:{concurrency:1}},async()=>({results:[{md5:await codec.md5Hex(bytes)}]}));
     md5=result.results[0].md5;record.original_md5=md5;updateCachedRecord(record);
@@ -1090,7 +1092,7 @@ async function pan123DirectBackup(record,codec,config,inMemoryBytes,context){
   }
   const info=await pan123DirectRequest(token,'/file/upload_request',{method:'POST',body:{driveId:0,duplicate:0,etag:md5,fileName,parentFileId:parent,size:bytes.length,type:0}});
   if(!info.Reuse){
-    if(!info.Bucket||!info.Key||!info.StorageNode||!info.FileId)throw new Error('123 未返回完整上传参数，原包仍保留在 R2');
+    if(!info.Bucket||!info.Key||!info.StorageNode||!info.FileId)throw new Error('123 未返回完整上传参数，原包仍保留在本地');
     const common={StorageNode:info.StorageNode,bucket:info.Bucket,key:info.Key,uploadId:String(info.UploadId||'')};
     const chunkSize=16*1024*1024,parts=Math.max(1,Math.ceil(bytes.length/chunkSize));
     // 分块并发：旧实现每块"鉴权→PUT→鉴权→PUT"串行，往返次数随块数线性叠加。
@@ -1108,7 +1110,7 @@ async function pan123DirectBackup(record,codec,config,inMemoryBytes,context){
     await pan123DirectRequest(token,'/file/upload_complete/v2',{method:'POST',body:{...common,fileId:info.FileId,fileSize:bytes.length,isMultipart:parts>1}});
   }
   const stored=(await listFolder(parent)).find(item=>item&&String(item.FileName)===fileName);
-  if(!stored||Number(stored.Type)!==0||Number(stored.Size)!==bytes.length||String(stored.Etag||'').toLowerCase()!==md5)throw new Error('123 尚未确认原包落盘，未记为成功；R2 副本仍在');
+  if(!stored||Number(stored.Type)!==0||Number(stored.Size)!==bytes.length||String(stored.Etag||'').toLowerCase()!==md5)throw new Error('123 尚未确认原包落盘，未记为成功；本地原包仍在');
   const result={ok:true,provider:'123pan',key:folder?`${folder}/${fileName}`:fileName,fileId:String(stored.FileId),bytes:bytes.length,sha256,reused:false};
   await persistPan123BackupResult(record,md5,result);return result;
 }
@@ -1121,10 +1123,11 @@ async function backupOriginalTo123(record,codec,inMemoryBytes,context){
   }catch(error){
     if(transferController?.signal.aborted)return {paused:true};
     const message=String(error?.message||'');
-    // 只有浏览器直连本身不可达（CORS/网络）才回退 Worker；会话过期、同名冲突等
-    // 是真实业务结果，回退也是同样的失败，直接上报更诚实。
-    const canFallback=error instanceof TypeError||/Failed to fetch|NetworkError|Load failed|直连|跨域|CORS/i.test(message);
+    // 只有浏览器直连本身不可达（CORS/网络）才回退 Worker；原包只备份到 123 的
+    // 新记录没有 R2 副本，不能回退。会话过期、同名冲突也直接上报更诚实。
+    const canFallback=!!record.original_url&&(error instanceof TypeError||/Failed to fetch|NetworkError|Load failed|直连|跨域|CORS/i.test(message));
     if(canFallback)return backupOriginalTo123ViaWorker(record,codec);
+    if(!record.original_url&&(error instanceof TypeError||/Failed to fetch|NetworkError|Load failed|直连|跨域|CORS/i.test(message)))return {error:'浏览器直连 123 不可用，且原包未存 R2；请恢复网络后重新选择文件备份'};
     error.stage ||= 'direct-backup';
     const failure=pan123Failure(error,'backup');record.original_123_error=failure;updateCachedRecord(record);
     return {error:failure};
@@ -1135,6 +1138,7 @@ async function backupOriginalTo123ViaWorker(record,codec) {
   const config=pan123BackupConfig();if(!config.token)return {error:'尚未连接 123 云盘'};
   let stage='source-checksum';
   try {
+    if(!record.original_url)throw new Error('原包未存 R2，且浏览器直连不可用；请重新选择文件后备份到 123');
     let md5=record.original_md5;
     if(!md5){
       transferStage('为旧记录补齐备份校验',record.name||record.id);
@@ -1156,27 +1160,30 @@ async function backupOriginalTo123ViaWorker(record,codec) {
   }
 }
 async function runPan123Backups(records) {
-  const pending=records.filter(record=>record.original_url&&!record.original_123?.key);if(!pending.length)return;
-  const status=$('#pan123BackupStatus');operationMessage(status,'R2 已入库，正在单独备份到 123…');backupPhaseActive=true;const previous=suppressCloudJob;suppressCloudJob=true;
-  beginTransferProgress('R2 已入库 · 123 原包备份',pending.length,pending.map(item=>item.name));$('#pauseTransfer').textContent='暂停 123 备份';
+  const pending=records.filter(pendingPan123Backup);if(!pending.length)return;
+  const status=$('#pan123BackupStatus');operationMessage(status,'压缩版已入 R2，正在把原包直接备份到 123…');backupPhaseActive=true;const previous=suppressCloudJob;suppressCloudJob=true;
+  beginTransferProgress('压缩版已入 R2 · 原包直传 123',pending.length,pending.map(item=>item.name));$('#pauseTransfer').textContent='暂停 123 备份';
   let backed=0,issue='';
   try {
     const codec=await browserCodec();
     const config=pan123BackupConfig();
     // 一批主题共享同一个目标目录与 listFolder 句柄：目录 FileId 只解析一次。
     const context={listFolder:pan123ListFolderFactory(config.token)};
-    // 主题级并发：旧实现 for 循环逐个备份，一批 66 个主题串行等待。改为有上限的
-    // 并发，同时复用入库时暂存的字节，省掉每个主题一次 R2 下载 + 目录查询。
+    // 主题级并发：复用入库时暂存的本地字节，原包不写 R2；只有历史记录重试才读 R2。
     const width=Math.min(3,pending.length);
     const outcomes=await mapConcurrent(pending,width,async record=>{
       if(transferController.signal.aborted)return {paused:true};
       transferStage('备份原包到 123',record.name||record.id);
       const bytes=backupByteStash.get(record.id);
+      let result;
       try{
-        const result=await backupOriginalTo123(record,codec,bytes,context);
+        result=await backupOriginalTo123(record,codec,bytes,context);
         if(!result?.paused&&!result?.error)transferDone(record.name);
         return result;
-      }finally{backupByteStash.delete(record.id);}
+      }finally{
+        // 成功才释放；失败/暂停保留内存字节，当前会话内可直接重试。
+        if(result?.ok)backupByteStash.delete(record.id);
+      }
     });
     const paused=transferController.signal.aborted;
     for(const result of outcomes){
@@ -1184,16 +1191,20 @@ async function runPan123Backups(records) {
       if(result?.error&&!issue)issue=result.error;
       else if(!result?.error)backed++;
     }
-    const message=issue?`R2 已入库；本次 ${backed} 个原包已备份，${issue}。可稍后重试待备份，无需重新上传。`:paused?'R2 已入库；123 备份已暂停，可稍后重试待备份。':`R2 已入库；本次 ${backed} 个原包已备份到 123。`;
+    const message=issue?`压缩版已入 R2；本次 ${backed} 个原包已备份，${issue}。可稍后重试待备份，无需重新上传。`:paused?'压缩版已入 R2；123 备份已暂停，可稍后重试待备份。':`压缩版已入 R2；本次 ${backed} 个原包已备份到 123。`;
     operationMessage(status,message,!!issue);finishTransferProgress(message,issue?1:0);
-  }catch(error){operationMessage(status,`R2 已入库；123 备份未完成：${error.message}`,true);finishTransferProgress('R2 已入库；123 备份稍后重试',1);}
-  finally{backupByteStash.clear();backupPhaseActive=false;suppressCloudJob=previous;$('#pauseTransfer').textContent='暂停，稍后继续';renderThemes();updateBulkControls();}
+  }catch(error){operationMessage(status,`压缩版已入 R2；123 备份未完成：${error.message}`,true);finishTransferProgress('压缩版已入 R2；123 备份稍后重试',1);}
+  finally{
+    const retained=new Set(pending.filter(record=>backupByteStash.has(record.id)).map(record=>record.id));
+    for(const id of [...backupByteStash.keys()])if(!retained.has(id))backupByteStash.delete(id);
+    backupPhaseActive=false;suppressCloudJob=previous;$('#pauseTransfer').textContent='暂停，稍后继续';renderThemes();updateBulkControls();
+  }
 }
 async function retryPan123Backups() {
   if(state.operation)return;await whenStorageReady();await ensureWriteAccess();
-  if(!pan123BackupConfig().token){operationMessage($('#pan123BackupStatus'),'请先连接 123 云盘。R2 原包已保留。',true);return;}
+  if(!pan123BackupConfig().token){operationMessage($('#pan123BackupStatus'),'请先连接 123 云盘。未备份的原包仍保留在本地或历史 R2 副本。',true);return;}
   setView('import');setOperation('backup-123');
-  try{await runPan123Backups(state.themes.filter(record=>record.original_url&&!record.original_123?.key));}finally{setOperation('');}
+  try{await runPan123Backups(state.themes.filter(pendingPan123Backup));}finally{setOperation('');}
 }
 // 123 的 /b/api 接口同样返回 Access-Control-Allow-Origin: *，浏览器可以用自己的
 // 网络出口直连。登录已经走直连了，但「测试连接」此前还绕回同步 Worker —— 请求从
@@ -2716,7 +2727,7 @@ function updateBulkControls() {
   }
   $$("#themeDialog form input, #themeDialog form button, #recordDialog form input, #recordDialog form button, #recordDialog [data-record-sync], #recordDialog [data-record-delete]").forEach(input => { input.disabled = Boolean(state.operation); });
   if($("#backupTo123"))$("#backupTo123").disabled=!!state.operation;
-  if($("#retryPan123Backups"))$("#retryPan123Backups").disabled=!!state.operation||!state.themes.some(item=>item.original_url&&!item.original_123?.key);
+  if($("#retryPan123Backups"))$("#retryPan123Backups").disabled=!!state.operation||!state.themes.some(pendingPan123Backup);
   $("#selectDuplicateImports").disabled=![...state.review,...state.pending].some(item=>item.duplicateKind)||!!state.operation;
   $("#removeSelectedImports").disabled=!selections.review.size||!!state.operation;
   const chosenReview = state.review.filter(item => selections.review.has(item.staging_id));
@@ -4254,6 +4265,8 @@ async function commitThemes(ids = [...selections.review]) {
       // click looked like it did nothing for a moment.
       transferStage("加载压缩引擎", "");
       const codec = await browserCodec();
+      // 原包只备份到 123 时不写 R2；未启用 123 则维持原行为，原包仍进 R2。
+      const backupOriginals = pan123BackupEnabled();
       let finished = 0;
       const started=performance.now();
       const width=Math.min(3,processingConcurrency(),selected.some(item=>(item.file?.size||0)>32*1024*1024)?((Number(navigator.deviceMemory)||4)>=8?2:1):3);
@@ -4278,11 +4291,17 @@ async function commitThemes(ids = [...selections.review]) {
             const previewUpload=async()=>{if(!preview)return '';const bytes=new Uint8Array(await preview.arrayBuffer());return uploadBrowserObject('previews',await codec.sha256Hex(bytes),'jpg',bytes,'image/jpeg',name+'-预览');};
             transferStage('上传压缩包与预览',name);
             const [compressedPath,previewPath]=await Promise.all([uploadBrowserObject('compressed',assetSha,'red',compressedBytes,'application/octet-stream',name+'-压缩'),previewUpload()]);
-            transferStage('等待 R2 原包确认',name);return {compressedBytes,assetSha,compressedPath,previewPath,previewDetails};
+            transferStage(backupOriginals?'压缩包已入 R2，准备备份原包':'等待 R2 原包确认',name);return {compressedBytes,assetSha,compressedPath,previewPath,previewDetails};
           };
-          const operations=await Promise.allSettled([prepare(),uploadBrowserObject('originals',originalSha,'red',raw,'application/octet-stream',name+'-原包'),pan123BackupEnabled()?runCodecTask('hashes',{items:[{bytes:raw}],options:{concurrency:1}},async()=>({results:[{md5:await codec.md5Hex(raw)}]})):null]);
+          // 原包只备份到 123：启用备份时不写 R2，只算 md5；否则保持原包入库 R2。
+          const operations=await Promise.allSettled([
+            prepare(),
+            backupOriginals?null:uploadBrowserObject('originals',originalSha,'red',raw,'application/octet-stream',name+'-原包'),
+            backupOriginals?runCodecTask('hashes',{items:[{bytes:raw}],options:{concurrency:1}},async()=>({results:[{md5:await codec.md5Hex(raw)}]})):null
+          ]);
           const failure=operations.slice(0,2).find(result=>result.status==='rejected');if(failure)throw failure.reason;
-          const [{compressedBytes,assetSha,compressedPath,previewPath,previewDetails},originalPath,checksums]=operations.map(result=>result.value);
+          const [{compressedBytes,assetSha,compressedPath,previewPath,previewDetails},uploadedOriginalPath,checksums]=operations.map(result=>result.value);
+          const originalPath=backupOriginals?'':uploadedOriginalPath;
           transferStage("保存资源记录",name);
           const record = await uploadBrowserRecord({
             kind: "theme", id: `theme-${assetSha.slice(0, 16)}`, name: item.info.name || item.info.source_name, author: item.info.author || "作者未记录",
@@ -4293,12 +4312,13 @@ async function commitThemes(ids = [...selections.review]) {
             auto_categories: item.info.auto_categories || (item.info.auto_category ? [item.info.auto_category] : []),
             compressed_url: compressedPath, library_url: compressedPath, preview_light_url: previewPath, preview_dark_url: "", preview_details: previewDetails,
             saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: "", original_url: originalPath,
+            original_storage: backupOriginals?'123pan':'r2',
             original_md5:checksums?.results?.[0]?.md5||"",original_123:null,original_123_error:""
           }, codec);
-          // 备份加速：把入库时已在内存的原包字节暂存，紧随其后的 123 备份直接复用，
-          // 不再从 R2 下载一趟。仅在备份开启且确实要备份时暂存，避免无谓占内存。
-          if(pan123BackupEnabled() && raw?.byteLength) backupByteStash.set(record.id, raw);
-          if(item.file)await completeLocalFiles([item.file]);
+          // 原包不会写 R2：把入库时已在内存的原包字节暂存，紧随其后的 123 备份直接复用。
+          if(backupOriginals && raw?.byteLength) backupByteStash.set(record.id, raw);
+          // 备份成功前不清除本地恢复副本，避免 123 失败时原包无处可取。
+          if(!backupOriginals && item.file)await completeLocalFiles([item.file]);
           transferDone(name);
           operationMessage($("#reviewBatchStatus"), `已完成主题 ${++finished} / ${selected.length}…`);
           return { item, record };
@@ -4317,15 +4337,16 @@ async function commitThemes(ids = [...selections.review]) {
       // failed items remain visible for retry.
       for (const item of selected) if (!failures.some(entry => entry.item === item)) { state.review = state.review.filter(review => review !== item); selections.review.delete(item.staging_id); }
       renderReview(); renderThemes(); renderJobs();
-      const completedFiles = results.filter(result => result.record && result.item?.file).map(result => result.item.file);
-      await completeLocalFiles(completedFiles);
       const elapsed=((performance.now()-started)/1000).toFixed(1);
       const message = transferController?.signal.aborted?`已暂停，${completed.length} 项已完成，未完成文件保留，可继续上传。`:failures.length ? `${completed.length} 个主题已保存到 R2，${failures.length} 个失败，请查看错误后重试。` : `${completed.length} 个主题已保存到 R2，耗时 ${elapsed} 秒${results.some(result=>result.reused)?"（重复原件已跳过）":""}。`;
       operationMessage($("#reviewBatchStatus"), message, Boolean(failures.length)); toast(message);
-      const backups=pan123BackupEnabled()?results.filter(result=>result.record&&!result.reused).map(result=>result.record):[];
+      const backups=backupOriginals?results.filter(result=>result.record&&!result.reused).map(result=>result.record):[];
       if(backups.length&&!transferController?.signal.aborted){if(commitBatchBusy)deferredPan123.push(...backups);else await runPan123Backups(backups);}
-      if(commitBatchBusy)deferredCleanup.push(...completedFiles);
-      else if(!transferController?.signal.aborted)offerLocalCleanup(completedFiles, `本次 ${completedFiles.length} 个主题已压缩并保存到 R2，可以删掉本地原包释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
+      // 启用 123 时只有备份成功的主题才释放本地恢复副本；失败/暂停保留原包。
+      const cleanupFiles=results.filter(result=>result.record&&result.item?.file&&(!backupOriginals||result.reused||result.record.original_123?.key)).map(result=>result.item.file);
+      if(cleanupFiles.length)await completeLocalFiles(cleanupFiles);
+      if(commitBatchBusy)deferredCleanup.push(...cleanupFiles);
+      else if(!transferController?.signal.aborted&&cleanupFiles.length)offerLocalCleanup(cleanupFiles, `本次 ${cleanupFiles.length} 个主题已处理完成，可以删掉本地原包释放空间。`).catch(error => toast(`本地文件清理失败：${error.message || error}`));
       return;
     }
     // 本地服务模式也要有看得见的进度：先把条亮出来，再提交任务，随后由
