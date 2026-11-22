@@ -147,11 +147,11 @@ export default function Shell() {
         </section>
 
         <section className="view" id="assetsView" data-view-panel="assets" hidden>
-          <div className="title-row catalog-title"><div><h1 tabIndex={-1}>收藏库</h1><p className="lede">浏览已收藏的 SVG 和 HTML 文件。</p></div><div className="title-meta"><span id="assetCount" aria-live="polite">正在读取…</span></div></div>
+          <div className="title-row catalog-title"><div><h1 tabIndex={-1}>收藏库</h1><p className="lede">浏览已收藏的 SVG、HTML，以及归类到「图集 / 高亮」的 RED 包。</p></div><div className="title-meta"><span id="assetCount" aria-live="polite">正在读取…</span></div></div>
           <section className="asset-area">
             <LibrarySearch id="assetSearchInput" label="搜索收藏" placeholder="搜索名称、作者或标签" />
             <LibraryTools kind="asset" refreshId="refreshAssets">
-              <select className="catalog-select" id="assetCategoryFilter" aria-label="收藏筛选"><option value="all">全部收藏</option><option value="ungrouped">未分类</option><option value="author">已填写作者</option><option value="style">已填写风格</option></select>
+              <select className="catalog-select" id="assetCategoryFilter" aria-label="收藏筛选"><option value="all">全部收藏</option><option value="gallery">图集</option><option value="highlight">高亮</option><option value="ungrouped">未分类</option><option value="author">已填写作者</option><option value="style">已填写风格</option></select>
 
             </LibraryTools>
             <p className="cache-info" data-cache-info></p>
@@ -159,7 +159,7 @@ export default function Shell() {
             <LibraryBulk kind="asset" />
             <div id="assetList" className="theme-list catalog-grid asset-list"></div>
             <LibraryPager kind="asset" />
-            <div className="empty-state" id="assetEmpty" hidden><h3>还没有收藏</h3><p>导入 SVG 或 HTML 文件开始。</p><Button variant="outline" data-library-empty="asset">导入文件</Button></div>
+            <div className="empty-state" id="assetEmpty" hidden><h3>还没有收藏</h3><p>导入 SVG、HTML，或加入 RED 图集 / 高亮包开始。</p><Button variant="outline" data-library-empty="asset">导入文件</Button></div>
           </section>
         </section>
 

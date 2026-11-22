@@ -683,6 +683,19 @@ const PRIVATE_REPACK_HEADER = {version:2,resourceType:"themeBundle",payloadType:
 function privateHeaderRepackSupported(header) {
   return Boolean(header) && typeof header === "object" && Object.keys(PRIVATE_REPACK_HEADER).every(key => header[key] === PRIVATE_REPACK_HEADER[key]);
 }
+// 图集（coverGallery）和高亮规则包不是阅读主题：收进收藏库，各占一个分类。
+// 私有 v2 用公开头的 resourceType 判定；v1 gzip 的阅读/高亮包没有公开头，
+// 只能按文件名判定，且只认「高亮」这类明确标记，避免误伤普通阅读主题。
+function redAssetCategory(info) {
+  const resourceType = String(info?.header?.resourceType || "");
+  if (/coverGallery/i.test(resourceType)) return "图集";
+  if (/highlight/i.test(resourceType)) return "高亮";
+  if (String(info?.container_format || "") === "red_private_v2") return "";
+  const sourceName = String(info?.source_name || info?.name || "");
+  if (/封面图集|图集/.test(sourceName)) return "图集";
+  if (/高亮/.test(sourceName)) return "高亮";
+  return "";
+}
 function privatePrefix(raw) {
   if (raw.length < 12 || raw[0] !== 82 || raw[1] !== 69 || raw[2] !== 68 || raw[3] !== 16) throw new Error("不是 RED v2 加密主题");
   const headerLength = new DataView(raw.buffer, raw.byteOffset, raw.byteLength).getUint32(4, false);
@@ -3748,14 +3761,17 @@ function renderReview() {
     const preview = preferredPreview(item.preview_urls?.light, item.preview_urls?.dark);
     const duplicateThumbs = duplicate ? item.duplicates.map(candidate => `<div class="thumb-label">${previewImage(candidate.preview_light_url || candidate.preview_dark_url, `已有主题 ${candidate.name} · ${previewKind(candidate.preview_details)}`, "thumb", candidate.preview_details)}<span>${escapeHtml(candidate.name)}</span></div>`).join("") : "";
     const privateRebuildable = info.container_format === "red_private_v2" && privateHeaderRepackSupported(item.inspection?.header);
-    const privateNote = info.container_format === "red_private_v2"
+    const redAsset = info.red_asset || "";
+    const privateNote = redAsset
+      ? `<p class="review-meta">${redAsset}包：收录进收藏库「${redAsset}」分类，保留原文件并保存浏览器生成的预览，不当作阅读主题压缩。</p>`
+      : info.container_format === "red_private_v2"
       ? (!privateRebuildable
-        ? `<p class="review-meta">私有 RED 图集 / 高亮包：当前协议暂不支持压缩重封，将保留原包并保存浏览器生成的预览，可正常收录。</p>`
+        ? `<p class="review-meta">私有 RED 包：当前协议暂不支持压缩重封，将保留原包并保存浏览器生成的预览，可正常收录。</p>`
         : browserPrivateCompressionEnabled()
           ? `<p class="review-meta">加密主题：图片会在当前设备压缩，再由同步 Worker 认证清单、更新资源哈希并重新封包。</p>`
           : `<p class="review-meta">加密主题：先在「设置」填好同步 API 地址与 Token，图片就会在当前设备压缩，再由 Worker 认证清单、更新资源哈希并重新封包；未配置时只保存原包。</p>`)
       : info.container_format === "red_v1_gzip" ? '<p class="review-meta">阅读主题：保留原始 gzip 封装，不转换为 ZIP。</p>' : "";
-    return `<article class="review-card" data-review-id="${escapeHtml(item.staging_id)}"><div class="review-top"><div><label class="item-heading">${selectInput("review", item.staging_id, `待确认主题 ${info.name || info.source_name}`)}<span class="review-title">${escapeHtml(info.name || info.source_name)}</span></label><div class="review-meta">${escapeHtml(info.author || "作者未记录")} · ${formatBytes(info.bytes)} · ${escapeHtml(info.source_name)}</div></div><span class="badge ${duplicate ? "" : "is-good"}">${duplicate ? (item.duplicateKind==="exact"?"内容完全相同":`疑似重复 ${item.duplicates.length}`) : "未发现同名作者"}</span></div>${privateNote}${duplicate ? `<div class="duplicate-note">${item.duplicateKind==="exact"?"SHA-256 相同，可移除重复导入项。":"库中或本批有同名作者主题，可能为不同版本，请核对。"}</div><div class="duplicate-thumbs">${duplicateThumbs}</div>` : ""}<div class="duplicate-thumbs"><div class="thumb-label">${previewImage(preview.url, `待审核主题${preview.label} · ${previewKind(info.preview_details)}`, "thumb", info.preview_details)}<span>新主题 · ${preview.label}</span><span>${escapeHtml(previewKind(info.preview_details))} · 点击放大</span></div></div>${item.commitError ? `<p class="inline-error">${escapeHtml(item.commitError)}</p>` : ""}<div class="review-actions"><button class="primary-button commit-theme" data-id="${escapeHtml(item.staging_id)}">${info.container_format === "red_v1_gzip" ? "确认并保存阅读主题" : privateTheme ? "确认并保存原包（配好同步后可压缩）" : "确认并压缩保存"}${autoSyncEnabled() ? "并后台同步" : "（后台处理）"}</button><button class="secondary-button discard-review" data-id="${escapeHtml(item.staging_id)}">暂不处理</button></div></article>`;
+    return `<article class="review-card" data-review-id="${escapeHtml(item.staging_id)}"><div class="review-top"><div><label class="item-heading">${selectInput("review", item.staging_id, `待确认主题 ${info.name || info.source_name}`)}<span class="review-title">${escapeHtml(info.name || info.source_name)}</span></label><div class="review-meta">${escapeHtml(info.author || "作者未记录")} · ${formatBytes(info.bytes)} · ${escapeHtml(info.source_name)}</div></div><span class="badge ${duplicate ? "" : "is-good"}">${duplicate ? (item.duplicateKind==="exact"?"内容完全相同":`疑似重复 ${item.duplicates.length}`) : "未发现同名作者"}</span></div>${privateNote}${duplicate ? `<div class="duplicate-note">${item.duplicateKind==="exact"?"SHA-256 相同，可移除重复导入项。":"库中或本批有同名作者主题，可能为不同版本，请核对。"}</div><div class="duplicate-thumbs">${duplicateThumbs}</div>` : ""}<div class="duplicate-thumbs"><div class="thumb-label">${previewImage(preview.url, `待审核主题${preview.label} · ${previewKind(info.preview_details)}`, "thumb", info.preview_details)}<span>新主题 · ${preview.label}</span><span>${escapeHtml(previewKind(info.preview_details))} · 点击放大</span></div></div>${item.commitError ? `<p class="inline-error">${escapeHtml(item.commitError)}</p>` : ""}<div class="review-actions"><button class="primary-button commit-theme" data-id="${escapeHtml(item.staging_id)}">${redAsset ? "确认并收录到收藏库" : info.container_format === "red_v1_gzip" ? "确认并保存阅读主题" : privateTheme ? "确认并保存原包（配好同步后可压缩）" : "确认并压缩保存"}${autoSyncEnabled() ? "并后台同步" : "（后台处理）"}</button><button class="secondary-button discard-review" data-id="${escapeHtml(item.staging_id)}">暂不处理</button></div></article>`;
   }).join("");
   $$(".commit-theme").forEach(button => button.addEventListener("click", () => commitTheme(button.dataset.id)));
   $$(".discard-review").forEach(button => button.addEventListener("click", () => discardReview(button.dataset.id)));
@@ -3788,21 +3804,36 @@ function fontMatchesCategory(font) {
   return state.fontFilter === "all" || fontCategory(font) === state.fontFilter;
 }
 function assetTypeLabel(asset) {
-  return String(asset.asset_type || asset.extension || "").toLowerCase() === "svg" ? "SVG" : "HTML";
+  const type = String(asset.asset_type || asset.extension || "").toLowerCase();
+  // 图集 / 高亮是 RED 包，不是网页：标签直接显示分类，避免被当成 HTML。
+  if (type === "red") return String(asset.red_category || "RED");
+  return type === "svg" ? "SVG" : "HTML";
+}
+function assetRedCategory(asset) {
+  return String(asset.red_category || asset.category || "").trim();
 }
 function assetMatchesFilter(asset) {
   const mode = state.assetFilter || "all";
+  if (mode === "gallery" && assetRedCategory(asset) !== "图集") return false;
+  if (mode === "highlight" && assetRedCategory(asset) !== "高亮") return false;
   if (mode === "ungrouped" && (String(asset.author || "").trim() || String(asset.style || "").trim())) return false;
   if (mode === "author" && !String(asset.author || "").trim()) return false;
   if (mode === "style" && !String(asset.style || "").trim()) return false;
   const needle = String(state.assetSearch || "").trim().toLocaleLowerCase("zh-CN");
   if (!needle) return true;
-  return [asset.name, asset.file_name, asset.author, asset.style, ...(asset.tags || [])].some(value => String(value || "").toLocaleLowerCase("zh-CN").includes(needle));
+  return [asset.name, asset.file_name, asset.author, asset.style, assetRedCategory(asset), ...(asset.tags || [])].some(value => String(value || "").toLocaleLowerCase("zh-CN").includes(needle));
 }
 function assetPreview(asset, compact = false) {
   const url = assetUrl(asset.preview_url || asset.object_url || asset.url || "");
   if (!url) return `<div class="asset-preview-empty">暂无预览</div>`;
   const type = assetTypeLabel(asset);
+  const rawType = String(asset.asset_type || asset.extension || "").toLowerCase();
+  // RED 图集/高亮只有浏览器合成的 JPG 预览；直接给图片，不能塞 iframe。
+  if (rawType === "red") {
+    const preview = assetUrl(asset.preview_url || "");
+    if (!preview) return `<div class="asset-preview-empty">暂无预览</div>`;
+    return `<button class="preview-open asset-preview-button" type="button" aria-label="${escapeHtml(asset.name || asset.file_name || type)}，点击放大" data-preview-url="${escapeHtml(preview)}" data-preview-title="${escapeHtml(asset.name || asset.file_name || type)}" data-preview-description="${escapeHtml(type)}预览。"><img src="${escapeHtml(preview)}" alt="${escapeHtml(asset.name || asset.file_name || type)}" loading="lazy" /></button>`;
+  }
   if (type === "SVG") return `<button class="preview-open asset-preview-button" type="button" aria-label="${escapeHtml(asset.name || asset.file_name || "SVG")}，点击放大" data-preview-url="${escapeHtml(url)}" data-preview-title="${escapeHtml(asset.name || asset.file_name || "SVG")}" data-preview-description="SVG 收藏预览。"><img src="${escapeHtml(url)}" alt="${escapeHtml(asset.name || asset.file_name || "SVG")}" loading="lazy" /></button>`;
   // A blank sandbox keeps user HTML isolated from the library page while still
   // allowing CSS and markup to render for a useful thumbnail.
@@ -3810,6 +3841,9 @@ function assetPreview(asset, compact = false) {
 }
 function libraryRecordCard(kind,record,preview,caption) {
   const name=(kind==='font'?record.family:record.name)||record.name||record.file_name||'未命名',tags=recordTags(record),id=escapeHtml(record.id);
+  // 收藏库里图集 / 高亮要显示自己的分类，不能只靠预览角标的小字。
+  const redCategory = kind==='asset' ? assetRedCategory(record) : "";
+  const categories = kind==='font' ? [fontCategory(record)] : record.style ? [record.style] : [];
   // 字体卡片直接放下载入口，不必先点开详情。网络字体用 downloadUrl 的下载
   // 语义（download=1 + name=），本地未同步的字体无地址则不显示按钮。
   const fontDownload=kind==='font' ? downloadUrl(record.download_url||record.object_url||record.url||'',record.file_name||name) : '';
@@ -3819,7 +3853,7 @@ function libraryRecordCard(kind,record,preview,caption) {
   return `<article class="theme-card catalog-card ${kind}-card ${downloadAction?'has-download':''}" data-record-card="${kind}" data-${kind}-id="${id}">
     <button class="theme-card-hit" type="button" data-record-open="${kind}" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情"></button>
     <div class="theme-preview"><div class="theme-thumbnail catalog-${kind}-preview">${preview}</div><span class="preview-caption">${escapeHtml(caption)}</span><button class="theme-more" type="button" data-record-details="${kind}" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情">⋯</button></div>
-    <div class="theme-info">${isNewArrival(record)?'<span class="arrival-label">新入库</span>':''}<div class="item-heading">${selectInput(kind,record.id,name,isAssetBusy(kind,record.id))}<h3 class="theme-title">${escapeHtml(name)}</h3></div><div class="theme-meta"><span class="theme-categories">${[...(kind==='font'?[fontCategory(record)]:record.style?[record.style]:[]),...tags.slice(0,2)].map(tag=>`<em>${escapeHtml(tag)}</em>`).join('')}</span><span>${formatBytes(record.bytes)}</span></div>${record.sync_error?`<p class="inline-error">${escapeHtml(typeof record.sync_error==='string'?record.sync_error:Object.values(record.sync_error).join('；'))}</p>`:''}</div>
+    <div class="theme-info">${isNewArrival(record)?'<span class="arrival-label">新入库</span>':''}<div class="item-heading">${selectInput(kind,record.id,name,isAssetBusy(kind,record.id))}<h3 class="theme-title">${escapeHtml(name)}</h3></div><div class="theme-meta"><span class="theme-categories">${redCategory?`<em class="is-key">${escapeHtml(redCategory)}</em>`:''}${categories.filter(Boolean).map(tag=>`<em>${escapeHtml(tag)}</em>`).join('')}${tags.slice(0,2).map(tag=>`<em>${escapeHtml(tag)}</em>`).join('')}</span><span>${formatBytes(record.bytes)}</span></div>${record.sync_error?`<p class="inline-error">${escapeHtml(typeof record.sync_error==='string'?record.sync_error:Object.values(record.sync_error).join('；'))}</p>`:''}</div>
     ${downloadAction}
   </article>`;
 }
@@ -3840,13 +3874,14 @@ function assetCard(asset, imported = false) {
   if(!imported)return libraryRecordCard('asset',asset,assetPreview(asset,true),asset.author||assetTypeLabel(asset));
   const author = String(asset.author || "").trim();
   const style = String(asset.style || "").trim();
+  const redCategory = assetRedCategory(asset);
   const tags = Array.isArray(asset.tags) ? asset.tags.filter(Boolean) : [];
   const objectUrl = downloadUrl(asset.download_url || asset.object_url || asset.url || "", asset.file_name || asset.name);
   // 参考「进度条收藏夹」：标题和分类标签在上，预览在下，卡片贴紧排列；
   // 分类编辑收进 details，动作只留必要的几个。
   return `<article class="asset-card ${imported ? "asset-card-imported" : ""}" data-asset-id="${escapeHtml(asset.id || asset.sha256 || "")}">
     <div class="asset-card-body"><div class="asset-card-head"><label class="item-heading">${imported ? "" : selectInput("asset", asset.id, `收藏 ${asset.name || asset.file_name}`, isAssetBusy("asset", asset.id))}<span class="asset-title">${escapeHtml(asset.name || asset.file_name || "未命名收藏")}</span></label><span class="badge">${assetTypeLabel(asset)}</span></div>
-      <div class="asset-classifications">${author ? `<span class="category-chip">${escapeHtml(author)}</span>` : ""}${style ? `<span class="category-chip">${escapeHtml(style)}</span>` : ""}${tags.map(tag => `<span class="category-chip">#${escapeHtml(tag)}</span>`).join("")}${!author && !style && !tags.length ? `<span class="category-chip is-empty">未分类</span>` : ""}</div>
+      <div class="asset-classifications">${redCategory ? `<span class="category-chip is-key">${escapeHtml(redCategory)}</span>` : ""}${author ? `<span class="category-chip">${escapeHtml(author)}</span>` : ""}${style ? `<span class="category-chip">${escapeHtml(style)}</span>` : ""}${tags.map(tag => `<span class="category-chip">#${escapeHtml(tag)}</span>`).join("")}${!redCategory && !author && !style && !tags.length ? `<span class="category-chip is-empty">未分类</span>` : ""}</div>
     </div>
     <div class="asset-card-preview">${assetPreview(asset, imported)}<span class="preview-caption">${assetTypeLabel(asset)} · ${asset.bytes ? formatBytes(asset.bytes) : ""}</span></div>
     <div class="asset-actions">${savedToCloud(asset) ? "" : `<button class="text-button sync-asset" data-id="${escapeHtml(asset.id || "")}" data-completed="false">同步到 R2</button>`}${objectUrl ? `<a class="download-link" href="${escapeHtml(objectUrl)}" download="${escapeHtml(asset.file_name || asset.name || "asset")}">下载</a>` : ""}<button class="text-button danger-text delete-record" data-kind="asset" data-id="${escapeHtml(asset.id || "")}">删除</button></div>
@@ -4388,7 +4423,7 @@ async function analyzeFiles(files) {
         const tone = entries.previewTone || null;
         const toneCategories = themeToneCategories(tone, previewDetails);
         const autoCategory = toneCategories[0] || "";
-        const info = { ...identity, source_name: file.name, bytes: raw.length, container_format: inspection.format, compression_supported: inspection.compressionSupported !== false, preview_details: previewDetails, preview_tone: tone, auto_category: autoCategory, auto_categories: toneCategories };
+        const info = { ...identity, source_name: file.name, bytes: raw.length, container_format: inspection.format, compression_supported: inspection.compressionSupported !== false, preview_details: previewDetails, preview_tone: tone, auto_category: autoCategory, auto_categories: toneCategories, red_asset: redAssetCategory({header: inspection?.header, container_format: inspection.format, source_name: file.name}) };
         const duplicateRecords = browserDuplicateCandidates(identity.name, identity.author);
         return { staging_id: `browser-${crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`}`, file, original_sha256:originalSha, preview_blob:previewBlob, inspection, info, duplicates: duplicateRecords.map(record => ({ ...record })), preview_urls: { light: previewUrl, dark: "" } };
       };
@@ -4479,8 +4514,35 @@ async function commitThemes(ids = [...selections.review]) {
         try {
           transferStage("读取主题", name);
           const raw = item.bytes || new Uint8Array(await item.file.arrayBuffer());
-          const existing=state.themes.find(record=>[record.original_sha256,record.sha256].includes(item.original_sha256));
-          if(existing){await completeLocalFiles([item.file]);transferDone(name);finished++;return {item,record:existing,reused:true};}
+          // 图集 / 高亮包进收藏库，不和阅读主题混在一起；重导入时在收藏库里查重。
+          const redAsset = item.info?.red_asset || "";
+          const existing=redAsset
+            ? state.assets.find(record=>[record.original_sha256,record.sha256].includes(item.original_sha256))
+            : state.themes.find(record=>[record.original_sha256,record.sha256].includes(item.original_sha256));
+          if(existing){await completeLocalFiles([item.file]);transferDone(name);finished++;return {item,record:existing,reused:true,redAsset:Boolean(redAsset)};}
+          if (redAsset) {
+            transferStage(`上传${redAsset}原包`, name);
+            const assetSha = item.original_sha256 || await codec.sha256Hex(raw);
+            const fileName = item.info?.source_name || `${name}.red`;
+            const objectPath = await uploadBrowserObject("assets", assetSha, "red", raw, "application/octet-stream", name);
+            let previewPath = "";
+            if (item.preview_blob) {
+              const previewBytes = new Uint8Array(await item.preview_blob.arrayBuffer());
+              previewPath = await uploadBrowserObject("previews", await codec.sha256Hex(previewBytes), "jpg", previewBytes, "image/jpeg", name + "-预览");
+            }
+            transferStage("写入收藏记录", name);
+            const record = await uploadBrowserRecord({
+              kind: "asset", id: `asset-${assetSha.slice(0, 16)}`, asset_type: "red", extension: "red",
+              category: redAsset, red_category: redAsset, file_name: fileName, name, author: "", style: "", tags: [],
+              sha256: assetSha, original_sha256: assetSha, bytes: raw.length, mime: "application/octet-stream",
+              object_url: objectPath, url: objectPath, preview_url: previewPath,
+              saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
+            }, codec);
+            await completeLocalFiles([item.file]);
+            transferDone(name);
+            operationMessage($("#reviewBatchStatus"), `已收录${redAsset} ${++finished} / ${selected.length}…`);
+            return { item, record, redAsset: true };
+          }
           const encrypted=item.inspection?.format==='red_private_v2'||item.info?.container_format==='red_private_v2'||raw[3]===16;
           // 封面图集/高亮包的私有头不被 Worker 支持，压缩函数会原样返回：
           // 这种情况下要标记为原样保存，卡片才会显示「下载原样主题」而不是压缩版。
@@ -4536,20 +4598,23 @@ async function commitThemes(ids = [...selections.review]) {
           return { item, error };
         }
       });
-      const completed = results.filter(result => result.record).map(result => result.record);
+      const completed = results.filter(result => result.record && !result.redAsset).map(result => result.record);
+      const addedAssets = results.filter(result => result.record && result.redAsset).map(result => result.record);
       const failures = results.filter(result => result.error);
       finishTransferProgress("主题处理完成", failures.length);
       state.themes = latestRecords([...completed, ...state.themes]);
+      if (addedAssets.length) state.assets = latestRecords([...addedAssets, ...state.assets]);
       // Match completed records back to staging items by insertion order/name;
       // failed items remain visible for retry.
       for (const item of selected) if (!failures.some(entry => entry.item === item)) { state.review = state.review.filter(review => review !== item); selections.review.delete(item.staging_id); }
-      renderReview(); renderThemes(); renderJobs();
+      renderReview(); renderThemes(); renderJobs(); if (addedAssets.length) renderAssets();
       const elapsed=((performance.now()-started)/1000).toFixed(1);
-      const message = transferController?.signal.aborted?`已暂停，${completed.length} 项已完成，未完成文件保留，可继续上传。`:failures.length ? `${completed.length} 个主题已保存到 R2，${failures.length} 个失败，请查看错误后重试。` : `${completed.length} 个主题已保存到 R2，耗时 ${elapsed} 秒${results.some(result=>result.reused)?"（重复原件已跳过）":""}。`;
+      const savedParts=[completed.length?`${completed.length} 个主题已保存到 R2`:"",addedAssets.length?`${addedAssets.length} 个图集/高亮已收录进收藏库`:""].filter(Boolean).join("，");
+      const message = transferController?.signal.aborted?`已暂停，${completed.length + addedAssets.length} 项已完成，未完成文件保留，可继续上传。`:failures.length ? `${savedParts || "本批未完成"}，${failures.length} 个失败，请查看错误后重试。` : `${savedParts || "本批已处理"}，耗时 ${elapsed} 秒${results.some(result=>result.reused)?"（重复原件已跳过）":""}。`;
       operationMessage($("#reviewBatchStatus"), message, Boolean(failures.length)); toast(message);
-      const backupEntries=backupOriginals?results.filter(result=>result.record&&!result.reused&&result.item?.file).map(result=>({file:result.item.file,record:result.record})):[];
+      const backupEntries=backupOriginals?results.filter(result=>result.record&&!result.redAsset&&!result.reused&&result.item?.file).map(result=>({file:result.item.file,record:result.record})):[];
       const backups=backupEntries.map(entry=>entry.record);
-      const readyNow=results.filter(result=>result.record&&result.item?.file&&(!backupOriginals||result.reused)).map(result=>result.item.file);
+      const readyNow=results.filter(result=>result.record&&!result.redAsset&&result.item?.file&&(!backupOriginals||result.reused)).map(result=>result.item.file);
       if(commitBatchBusy){
         // 整批还有字体/收藏要处理：备份和恢复副本都等 commitSelection 末尾统一结算。
         if(backups.length&&!transferController?.signal.aborted)deferredPan123.push(...backups);

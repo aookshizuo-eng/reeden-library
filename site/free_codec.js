@@ -185,20 +185,32 @@
     let document;
     try{document=JSON.parse(text(await gunzipBounded(raw.subarray(4))));}
     catch(error){if(error instanceof FreeCodecError)throw error;throw new FreeCodecError("阅读主题的 gzip 或 JSON 已损坏", "reader_data_invalid");}
-    if(document?.version!==1||document.type!=="readerColorSchema"||!Array.isArray(document.data)||!document.data.length||document.data.some(item=>!item||typeof item!=="object"||Array.isArray(item)))throw new FreeCodecError("不支持的 RED 旧版数据类型", "reader_type_unsupported");
-    const entries=[],metadata={...document,data:document.data.map(item=>{const {backgroundImageData,...rest}=item;return rest;})};
+    // v1 gzip 容器不只装阅读配色：高亮规则包也是 RED\x01，只是 type 不同。
+    // 不认这个类型会让整批高亮在“读取主题”阶段直接失败。
+    const readerTypes=new Set(["readerColorSchema","highlightRule","highlightRules"]);
+    if(document?.version!==1||!readerTypes.has(document.type)||!Array.isArray(document.data)||!document.data.length||document.data.some(item=>!item||typeof item!=="object"||Array.isArray(item)))throw new FreeCodecError("不支持的 RED 旧版数据类型", "reader_type_unsupported");
+    const entries=[],metadata={...document,data:document.data.map(item=>{const {backgroundImageData,images,...rest}=item;return rest;})};
     entries.push({name:"theme.json",bytes:textBytes(JSON.stringify(metadata))});
     let total=0;
     if(options.images!==false)for(const [index,item]of document.data.entries()){
-      if(!item?.backgroundImageData)continue;
-      try{
-        const encoded=String(item.backgroundImageData).replace(/^data:[^,]*;base64,/i,"");
-        const binary=root.atob(encoded);let bytes=Uint8Array.from(binary,char=>char.charCodeAt(0));
-        if(startsWith(bytes,[0x1f,0x8b]))bytes=await gunzipBounded(bytes,64*1024*1024);
-        total+=bytes.length;if(total>128*1024*1024)throw new FreeCodecError("阅读主题图片超过大小限制", "reader_size_limit");
-        const mime=mimeFromBytes(bytes),extension={"image/jpeg":"jpg","image/png":"png","image/webp":"webp","image/gif":"gif"}[mime];
-        if(extension)entries.push({name:`${item.themeMode==='dark'?'dark':'light'}/reader/background-${index}.${extension}`,bytes,role:"reader"});
-      }catch(error){if(error instanceof FreeCodecError)throw error;throw new FreeCodecError("阅读主题背景图片已损坏", "reader_image_invalid");}
+      // 高亮包的图片放在 images 映射里（每张一个 base64 gzip），阅读主题则用
+      // backgroundImageData。两条都收，预览才不会只剩一张空 JSON。
+      const sources=[];
+      if(item?.backgroundImageData)sources.push({key:"",value:item.backgroundImageData});
+      if(item?.images&&typeof item.images==="object")for(const [key,value]of Object.entries(item.images))if(typeof value==="string")sources.push({key,value});
+      for(const [sourceIndex,source]of sources.entries()){
+        try{
+          const encoded=String(source.value).replace(/^data:[^,]*;base64,/i,"");
+          const binary=root.atob(encoded);let bytes=Uint8Array.from(binary,char=>char.charCodeAt(0));
+          if(startsWith(bytes,[0x1f,0x8b]))bytes=await gunzipBounded(bytes,64*1024*1024);
+          total+=bytes.length;if(total>128*1024*1024)throw new FreeCodecError("阅读主题图片超过大小限制", "reader_size_limit");
+          const mime=mimeFromBytes(bytes),extension={"image/jpeg":"jpg","image/png":"png","image/webp":"webp","image/gif":"gif"}[mime];
+          if(!extension)continue;
+          const mode=item.themeMode==='dark'?'dark':'light';
+          if(document.type==="readerColorSchema")entries.push({name:`${mode}/reader/background-${index}.${extension}`,bytes,role:"reader"});
+          else entries.push({name:`${mode}/highlight/${index}-${source.key||sourceIndex}.${extension}`,bytes,role:"other"});
+        }catch(error){if(error instanceof FreeCodecError)throw error;throw new FreeCodecError("阅读主题背景图片已损坏", "reader_image_invalid");}
+      }
     }
     entries.containerFormat="red_v1_gzip";
     return entries;

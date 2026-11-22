@@ -219,7 +219,8 @@ function objectSpec(pathname) {
   if (kind === "records" && ext !== "json") return null;
   if (kind === "fonts" && !SAFE_EXT.has(ext)) return null;
   if (kind === "staging" && !STAGING_EXT.has(ext)) return null;
-  if (kind === "assets" && !new Set(["svg", "html"]).has(ext)) return null;
+  // RED 图集 / 高亮包也算收藏：保留 .red 原包，供收藏库直接下载。
+  if (kind === "assets" && !new Set(["svg", "html", "red"]).has(ext)) return null;
   const name = label ? (legacy ? `${label}~${tail}` : label) : tail;
   return {kind, sha: legacy ? tail : null, ext, label, filename: `${name}.${ext}`, key: `${kind}/${name}.${ext}`};
 }
@@ -461,7 +462,7 @@ function contentType(spec) {
     return spec.ext === "woff2" ? "font/woff2" : spec.ext === "woff" ? "font/woff" : "font/ttf";
   }
   if (spec.kind === "previews") return "image/jpeg";
-  if (spec.kind === "assets") return spec.ext === "svg" ? "image/svg+xml" : "text/html; charset=utf-8";
+  if (spec.kind === "assets") return spec.ext === "svg" ? "image/svg+xml" : spec.ext === "red" ? "application/octet-stream" : "text/html; charset=utf-8";
   return "application/json; charset=utf-8";
 }
 
