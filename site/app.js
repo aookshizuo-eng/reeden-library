@@ -225,7 +225,10 @@ function librarySummary() {
 // 收藏记录复用同一个原包对象，再从主题库删掉旧记录；删失败就保留原样重试。
 async function migrateReaderThemesToAssets() {
   if (!browserSyncEnabled() || state.operation) return;
-  const readers = state.themes.filter(theme => String(theme.container_format || "") === "red_v1_gzip" || theme.preview_details?.kind === "reader");
+  // 只认 RED\x01 容器：阅读配色 / 高亮方案都是这个封装。光看
+  // preview_details.kind==="reader" 会把加密应用主题误搬走（它们的目录是密文，
+  // 角色识别失败时预览会退化成 reader）。
+  const readers = state.themes.filter(theme => String(theme.container_format || "") === "red_v1_gzip");
   if (!readers.length) return;
   const codec = await browserCodec(), migrated = [];
   for (const theme of readers) {
@@ -274,6 +277,89 @@ async function migrateReaderThemesToAssets() {
   renderThemes(); renderAssets();
   toast(`已把 ${migrated.length} 个阅读主题移到收藏库`);
 }
+// 上一版把「加密应用主题」误判成阅读主题搬进了收藏库：它们的目录是密文，
+// 角色识别失败时 preview_details.kind 会退化成 reader，自动分类也写成阅读主题。
+// 回迁时不信记录上的字段，直接读原包前 16 字节看容器头：只有 RED\x01 才是
+// 真正的阅读配色 / 高亮方案，其余（加密主题、普通 ZIP 主题、封面图集）都搬回
+// 主题库，并清掉错误的「阅读主题」标签。
+async function objectContentLength(path) {
+  if (!path) return 0;
+  try {
+    const response = await transferFetch(apiUrl(path), { method: "HEAD", headers: requestHeaders() });
+    const length = Number(response.headers.get("Content-Length"));
+    return response.ok && Number.isFinite(length) && length > 0 ? length : 0;
+  } catch { return 0; }
+}
+// 只用 Range 取头部 16 字节，返回 RED 容器类型字节（1/2/4/16），读不到返回 0。
+async function objectRedContainer(path) {
+  if (!path) return 0;
+  try {
+    const response = await transferFetch(assetUrl(path), { headers: { ...requestHeaders(), Range: "bytes=0-15" } });
+    if (!response.ok) return 0;
+    const head = new Uint8Array(await response.arrayBuffer());
+    if (head.length < 4 || head[0] !== 82 || head[1] !== 69 || head[2] !== 68) return 0;
+    return head[3];
+  } catch { return 0; }
+}
+const RED_CONTAINER_FORMAT = { 2: "red_v2_gallery", 4: "red_v4", 16: "red_private_v2" };
+async function restoreMisclassifiedThemeAssets() {
+  if (!browserSyncEnabled() || state.operation) return;
+  const candidates = state.assets.filter(asset => asset.asset_type === "red" && assetRedCategory(asset) === "阅读主题");
+  if (!candidates.length) return;
+  const wrong = [];
+  for (const asset of candidates) {
+    const sourceUrl = String(asset.object_url || asset.url || "");
+    if (!sourceUrl) continue;
+    const container = await objectRedContainer(sourceUrl);
+    // 读不到头（对象在 123 备份里 / 网络失败）时退回记录上的容器字段。
+    const fallbackContainer = String(asset.container_format || "");
+    const isReader = container ? container === 1 : fallbackContainer === "red_v1_gzip";
+    if (!isReader) wrong.push({ asset, sourceUrl, container });
+  }
+  if (!wrong.length) return;
+  const codec = await browserCodec(), restored = [];
+  for (const { asset, sourceUrl, container } of wrong) {
+    const sha = String(asset.original_sha256 || asset.sha256 || "");
+    if (!sha) continue;
+    if (state.themes.some(theme => [theme.sha256, theme.original_sha256].includes(sha))) { restored.push(asset); continue; }
+    try {
+      const containerFormat = RED_CONTAINER_FORMAT[container] || String(asset.container_format || "red_private_v2");
+      const record = {
+        kind: "theme", id: `theme-${sha.slice(0, 16)}`,
+        name: asset.name || "", author: asset.author || "", style: asset.style || "",
+        file_name: asset.file_name || asset.source_file_name || "", source_file_name: asset.source_file_name || asset.file_name || "",
+        sha256: sha, original_sha256: sha, bytes: Number(asset.bytes) || await objectContentLength(sourceUrl), mime: "application/octet-stream",
+        container_format: containerFormat, compression_supported: containerFormat === "red_v4",
+        preview_light_url: asset.preview_url || "", preview_dark_url: "",
+        preview_details: { kind: "shelf_and_reader", simulation: true, encrypted_source: containerFormat === "red_private_v2" },
+        categories: [], auto_categories: [], tags: Array.isArray(asset.tags) ? asset.tags : [],
+        compressed_url: sourceUrl, original_url: sourceUrl, library_url: sourceUrl,
+        object_url: sourceUrl, url: sourceUrl,
+        saved_to_cloud: true, cloud: asset.cloud || "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
+      };
+      const bytes = new TextEncoder().encode(JSON.stringify(record));
+      record.record_sha256 = await codec.sha256Hex(bytes);
+      record.updated_at = record.imported_at = new Date().toISOString();
+      record.created_at = asset.created_at || record.updated_at;
+      await uploadBrowserObject("records", record.record_sha256, "json", bytes, "application/json", "", record);
+      state.themes.unshift(record);
+      restored.push(asset);
+    } catch (error) {
+      console.warn("应用主题回迁失败", asset.name, error);
+    }
+  }
+  if (!restored.length) return;
+  try {
+    await api("/api/library", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items: restored.map(asset => ({ kind: "asset", id: asset.id })) }) });
+  } catch (error) { console.warn("应用主题回迁：删除收藏记录失败", error); return; }
+  const ids = new Set(restored.map(asset => String(asset.id)));
+  ids.forEach(id => retiredAssetIds.add(id));
+  state.assets = state.assets.filter(asset => !ids.has(String(asset.id)));
+  browserLibraryRecordsCache = latestRecords([...state.themes, ...state.fonts, ...state.assets]);
+  saveDeviceSnapshot();
+  renderThemes(); renderAssets();
+  toast(`已把 ${restored.length} 个应用主题移回主题库`);
+}
 async function loadLibraryAfterConnection({fromSave = false} = {}) {
   const generation = ++libraryLoadGeneration;
   const remote = Boolean(apiBase);
@@ -310,6 +396,8 @@ async function loadLibraryAfterConnection({fromSave = false} = {}) {
       toast(`已读取本机库：${librarySummary()}`);
     }
     if (remote) {
+      // 先回迁被误判的应用主题，再把真正的阅读主题搬进收藏库，顺序不能反。
+      try { await restoreMisclassifiedThemeAssets(); } catch (error) { console.warn("应用主题回迁失败", error); }
       try { await migrateReaderThemesToAssets(); } catch (error) { console.warn("阅读主题迁移失败", error); }
     }
     refreshSettingsControls();
@@ -364,6 +452,8 @@ const selections = { review: new Set(), theme: new Set(), font: new Set(), asset
 // 已经迁移到收藏库的阅读主题 id。并发加载时旧快照可能晚到，这里再挡一次，
 // 避免主题库刚清空又被旧数据填回来。
 const retiredThemeIds = new Set();
+// 反方向：被误迁进收藏库的应用主题。删完记录后旧快照可能晚到，这里同样再挡一次。
+const retiredAssetIds = new Set();
 // 本地服务模式下「确认上传」是提交后台任务；记住这批 job id，轮询回来时把
 // 进度写进用户眼前那条进度条，而不是让用户只看见一句「已加入后台」。
 const trackedJobIds = new Set();
@@ -2153,6 +2243,9 @@ function redPartKind(entries, info = {}) {
   const names = (entries || []).map(entry => String(entry?.name || ""));
   if (/coverGallery/i.test(resourceType)) return "gallery";
   if (/highlight/i.test(resourceType)) return "highlight";
+  // themeBundle 是完整应用主题（书架 / 封面 / 启动图），不是可拆的部件。
+  // 加密包里目录不可读，角色识别可能只认出阅读背景，不能因此判成阅读主题。
+  if (/themeBundle/i.test(resourceType)) return "";
   if (names.some(name => /(^|\/)highlight\//i.test(name))) return "highlight";
   // v1 gzip 容器（RED\x01）没有目录结构可看：纯配色阅读主题只有一份
   // theme.json，靠 type 区分阅读配色和高亮规则，否则会被当成普通主题。
@@ -2701,8 +2794,16 @@ function hueColorFamily(hue, saturation = 1, light = .5) {
   if (h < 320) return "粉色系";
   return "红色系";
 }
+// 「阅读主题」这个分类只给 RED\x01 阅读配色包。加密应用主题（RED\x10）的目录
+// 是密文，预览可能只认出阅读背景，不能因此被归成阅读主题——否则主题库里的
+// 正常应用主题会被打上错误标签、甚至被迁进收藏库。
+function isReaderThemePackage(previewDetails = {}) {
+  const container = String(previewDetails.container || previewDetails.container_format || "");
+  if (container) return container === "red_v1_gzip";
+  return previewDetails.kind === "reader";
+}
 function themeToneCategory(tone, previewDetails = {}) {
-  if (!tone) return previewDetails.kind === "reader" ? "阅读主题" : "";
+  if (!tone) return isReaderThemePackage(previewDetails) ? "阅读主题" : "";
   const light = Number(tone.light) || 0, saturation = Number(tone.saturation) || 0;
   // 有明确主色相时优先给色系，这是用户要的“试着识别色系”；亮度档仍单独保留
   // 一份（下面 themeCategoryList 会把两者合并），暗色主题一眼能看出来。
@@ -2721,7 +2822,7 @@ function themeToneCategories(tone, previewDetails = {}) {
     else if (light > .78 && primary !== "明亮" && saturation < .3) list.push("明亮");
     if (tone.colorFamily && tone.colorFamily !== primary) list.push(tone.colorFamily);
   }
-  if (previewDetails?.kind === "reader" && !list.includes("阅读主题")) list.push("阅读主题");
+  if (isReaderThemePackage(previewDetails) && !list.includes("阅读主题")) list.push("阅读主题");
   return list;
 }
 function themeCategoryList(theme) {
@@ -2729,7 +2830,10 @@ function themeCategoryList(theme) {
   const auto = Array.isArray(theme?.auto_categories) && theme.auto_categories.length
     ? theme.auto_categories
     : theme?.auto_category ? [theme.auto_category] : [];
-  return [...new Set([...own, ...auto].map(item => String(item || "").trim()).filter(Boolean))];
+  const list = [...new Set([...own, ...auto].map(item => String(item || "").trim()).filter(Boolean))];
+  // 旧记录可能带着误判出来的「阅读主题」标签；只有 RED\x01 阅读配色包才保留。
+  const container = String(theme?.container_format || "");
+  return container && container !== "red_v1_gzip" ? list.filter(item => item !== "阅读主题") : list;
 }
 function preferredPreview(light, dark) {
   return {url: light || dark || "", label: light ? "日间" : dark ? "夜间补位" : "暂无预览"};
@@ -4239,7 +4343,7 @@ async function loadAssets(force = false) {
     const currentTime = Date.parse(current?.updated_at || current?.created_at || "") || 0;
     if (!current || nextTime >= currentTime) latest.set(key, item);
   });
-  state.assets = [...latest.values()];
+  state.assets = [...latest.values()].filter(item => !retiredAssetIds.has(String(item.id)));
   catalogStatus("asset");
   renderAssets();
   renderImportedAssets();
@@ -4736,15 +4840,23 @@ async function analyzeFiles(files) {
         identity.name = themeIdentity(identity).title;
         // 图集 / 阅读主题 / 高亮包各用一套预览：它们不是书架 + 启动图那种主题。
         const redPart = redPartKind(entries, { header: inspection?.header, container_format: inspection.format, source_name: file.name });
+        // 加密应用主题的目录是密文：角色识别偶尔只认出阅读背景，预览就会退化成
+        // 「阅读背景与高亮」，自动分类跟着写成阅读主题，甚至被迁进收藏库。这里
+        // 对 resourceType=themeBundle 的包统一按应用主题记录，不再报 reader。
+        const bundleAppTheme = String(inspection?.header?.resourceType || "") === "themeBundle";
+        const compositionKind = () => {
+          const kind = redPart || previewCompositionKind(entries);
+          return !redPart && bundleAppTheme && (kind === "reader" || kind === "single") ? "shelf_and_reader" : kind;
+        };
         let previewUrl = "", previewBlob=null;
-        let previewDetails = { kind: redPart || previewCompositionKind(entries), simulation: true, encrypted_source: inspection.format === "red_private_v2" };
+        let previewDetails = { kind: compositionKind(), container: inspection.format, simulation: true, encrypted_source: inspection.format === "red_private_v2" };
         if (entries.length) {
           // 部件预览失败（例如极端小图解码不了）时退回主题预览，宁可样式旧一点也不能没图。
           const preview = redPart
             ? (await composeRedPartPreviewBlob(entries, codec, redPart)) || await composeThemePreviewBlob(entries, codec)
             : await composeThemePreviewBlob(entries, codec);
           if (preview) {previewBlob=preview;previewUrl = URL.createObjectURL(preview);}
-          previewDetails = { ...previewDetails, kind: redPart || previewCompositionKind(entries) };
+          previewDetails = { ...previewDetails, kind: compositionKind() };
         }
         const tone = entries.previewTone || null;
         const toneCategories = themeToneCategories(tone, previewDetails);
