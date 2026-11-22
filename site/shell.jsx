@@ -149,15 +149,13 @@ export default function Shell() {
         <section className="view" id="assetsView" data-view-panel="assets" hidden>
           <div className="title-row catalog-title"><div><h1 tabIndex={-1}>收藏库</h1><p className="lede">浏览已收藏的 SVG、HTML，以及归类到「图集 / 高亮 / 阅读主题」的 RED 包。</p></div><div className="title-meta"><span id="assetCount" aria-live="polite">正在读取…</span></div></div>
           <section className="asset-area">
+            <div className="asset-filter-tabs" id="assetFilterTabs" role="tablist" aria-label="收藏分类"></div>
             <LibrarySearch id="assetSearchInput" label="搜索收藏" placeholder="搜索名称、作者或标签" />
-            <LibraryTools kind="asset" refreshId="refreshAssets">
-              <select className="catalog-select" id="assetCategoryFilter" aria-label="收藏筛选"><option value="all">全部收藏</option><optgroup label="类型"><option value="svg">SVG</option><option value="html">HTML</option><option value="red">主题部件</option></optgroup><optgroup label="主题部件"><option value="gallery">封面图集</option><option value="highlight">高亮包</option><option value="reader">阅读主题</option></optgroup><optgroup label="分类"><option value="ungrouped">未分类</option><option value="author">已填写作者</option><option value="style">已填写风格</option></optgroup></select>
-
-            </LibraryTools>
+            <LibraryTools kind="asset" refreshId="refreshAssets"></LibraryTools>
             <p className="cache-info" data-cache-info></p>
             <p className="catalog-status" data-library-status="asset" role="status">正在读取收藏…</p>
             <LibraryBulk kind="asset" />
-            <div id="assetList" className="theme-list catalog-grid asset-list"></div>
+            <div id="assetList" className="theme-list catalog-grid asset-list asset-library-grid"></div>
             <LibraryPager kind="asset" />
             <div className="empty-state" id="assetEmpty" hidden><h3>还没有收藏</h3><p>导入 SVG、HTML，或加入 RED 图集 / 高亮包 / 阅读主题开始。</p><Button variant="outline" data-library-empty="asset">导入文件</Button></div>
           </section>

@@ -159,7 +159,7 @@ try{
 
   await p.evaluate(()=>{location.hash='#assets';});
   await p.waitForFunction(()=>document.querySelectorAll('#assetList .asset-card').length===3,{},{timeout:20000});
-  await p.locator('#assetCategoryFilter').selectOption('reader');
+  await p.locator('#assetFilterTabs [data-asset-filter="reader"]').click();
   await p.waitForTimeout(250);
   assert.equal(await p.locator('#assetList .asset-card').count(),3,'阅读主题筛选应命中三条');
   await p.waitForFunction(()=>[...document.querySelectorAll('#assetList .asset-card img')].every(img=>img.complete&&img.naturalWidth>0),{},{timeout:20000});

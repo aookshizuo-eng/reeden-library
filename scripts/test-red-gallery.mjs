@@ -105,7 +105,7 @@ try{
   }
   await p.evaluate(()=>{location.hash='#assets';});
   await p.waitForFunction(()=>document.querySelectorAll('#assetList .asset-card').length===2,{},{timeout:20000});
-  await p.locator('#assetCategoryFilter').selectOption('gallery');
+  await p.locator('#assetFilterTabs [data-asset-filter="gallery"]').click();
   await p.waitForTimeout(250);
   assert.equal(await p.locator('#assetList .asset-card').count(),2,'图集筛选应命中两条');
   await p.waitForFunction(()=>[...document.querySelectorAll('#assetList .asset-card img')].every(img=>img.complete&&img.naturalWidth>0),{},{timeout:20000});

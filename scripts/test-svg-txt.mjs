@@ -80,8 +80,11 @@ try{
   // 收藏库卡片：SVG 徽标 + 真实图片预览。
   await p.evaluate(()=>{location.hash='#assets';});
   await p.waitForFunction(()=>document.querySelectorAll('#assetList .asset-card').length===1,{},{timeout:20000});
-  const caption=await p.locator('#assetList .asset-card .preview-caption').first().textContent();
-  assert.match(caption,/SVG/,'收藏卡必须标成 SVG，不能被当成 HTML');
+  // 紧凑卡片把类型放进实心分类标签、大小放到元信息行，不再用预览角标。
+  const tag=await p.locator('#assetList .asset-card .theme-categories em.is-key').first().textContent();
+  assert.match(tag,/SVG/,'收藏卡必须标成 SVG，不能被当成 HTML');
+  const size=await p.locator('#assetList .asset-card .asset-compact-size').first().textContent();
+  assert.match(size,/B$|KB$|MB$/,'收藏卡要显示文件大小');
   // 卡片缩略图是懒加载的，等它真正解码完再看尺寸。
   await p.waitForFunction(()=>{const img=document.querySelector('#assetList .asset-card img');return img&&img.complete&&img.naturalWidth>0;},{},{timeout:15000}).catch(()=>{});
   const image=await p.locator('#assetList .asset-card img').first().evaluate(img=>({w:img.naturalWidth,h:img.naturalHeight,src:img.currentSrc||img.src}));

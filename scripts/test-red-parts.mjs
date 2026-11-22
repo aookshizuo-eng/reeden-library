@@ -103,21 +103,20 @@ try{
 
   await p.evaluate(()=>{location.hash='#assets';});
   await p.waitForFunction(()=>document.querySelectorAll('#assetList .asset-card').length===4,{},{timeout:20000});
-  const optionHandle=await p.locator('#assetCategoryFilter').evaluate(select=>[...select.options].map(option=>({value:option.value,label:option.textContent})));
-  for(const value of ['svg','html','red','gallery','highlight','reader']){
-    assert.ok(optionHandle.some(option=>option.value===value),`收藏筛选缺少类型选项：${value}`);
+  const tabValues=await p.locator('#assetFilterTabs [data-asset-filter]').evaluateAll(tabs=>tabs.map(tab=>tab.dataset.assetFilter));
+  for(const value of ['all','svg','gallery','highlight','reader']){
+    assert.ok(tabValues.includes(value),`收藏分类标签缺少：${value}`);
   }
   const counts=async value=>{
-    await p.locator('#assetCategoryFilter').selectOption(value);
+    await p.locator(`#assetFilterTabs [data-asset-filter="${value}"]`).click();
     await p.waitForTimeout(250);
     return p.locator('#assetList .asset-card').count();
   };
-  assert.equal(await counts('red'),3,'主题部件筛选应剩图集 + 高亮 + 阅读主题');
-  assert.equal(await counts('gallery'),1,'封面图集筛选应只剩图集');
-  assert.equal(await counts('highlight'),1,'高亮筛选应只剩高亮包');
-  assert.equal(await counts('reader'),1,'阅读主题筛选应只剩阅读主题');
-  assert.equal(await counts('svg'),1,'SVG 筛选应只剩 SVG 收藏');
-  assert.equal(await counts('html'),0,'这次没有 HTML 收藏');
+  assert.equal(await counts('gallery'),1,'封面图集标签应只剩图集');
+  assert.equal(await counts('highlight'),1,'高亮标签应只剩高亮包');
+  assert.equal(await counts('reader'),1,'阅读主题标签应只剩阅读主题');
+  assert.equal(await counts('svg'),1,'SVG 标签应只剩 SVG 收藏');
+  assert.equal(await counts('html'),0,'这次没有 HTML 收藏，点进去应空');
   assert.equal(await counts('all'),4);
   const chips=await p.locator('#assetList .theme-categories em.is-key').allInnerTexts();
   for(const name of ['图集','高亮','阅读主题','SVG']) assert.ok(chips.includes(name),`收藏卡缺少类型标签 ${name}：${chips.join(',')}`);

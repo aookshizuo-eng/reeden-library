@@ -3928,7 +3928,7 @@ function catalogPage(kind) {
   const updated = item => Date.parse(order === "added" || order === "oldest" ? item.imported_at || item.created_at || item.updated_at || "" : item.updated_at || item.created_at || "") || 0;
   visible.sort((a, b) => (order === "name" ? 0 : order === "size" ? bytes(b) - bytes(a) : order === "oldest" ? updated(a) - updated(b) : updated(b) - updated(a)) || byName(a, b));
   const count = $(`#${kind}Count`);
-  const noun = kind === "asset" ? "项收藏" : `个${name}`;
+  const noun = kind === "asset" ? "个收藏" : `个${name}`;
   count.textContent = visible.length === all.length ? `${all.length} ${noun}` : `${visible.length} / ${all.length} ${noun}`;
   const empty = $(`#${kind}Empty`);
   empty.hidden = visible.length > 0;
@@ -4240,9 +4240,49 @@ function assetMatchesFilter(asset) {
   if (mode === "ungrouped" && (String(asset.author || "").trim() || String(asset.style || "").trim())) return false;
   if (mode === "author" && !String(asset.author || "").trim()) return false;
   if (mode === "style" && !String(asset.style || "").trim()) return false;
+  return assetMatchesSearch(asset);
+}
+function assetMatchesSearch(asset) {
   const needle = String(state.assetSearch || "").trim().toLocaleLowerCase("zh-CN");
   if (!needle) return true;
   return [asset.name, asset.file_name, asset.author, asset.style, assetRedCategory(asset), ...(asset.tags || [])].some(value => String(value || "").toLocaleLowerCase("zh-CN").includes(needle));
+}
+// 收藏库顶部用「标签页」代替下拉框：参考「进度条收藏夹」，常用分类一眼可见、
+// 直接带数量，不必先展开下拉再找。数量跟搜索结果走，和字体库的计数规则一致。
+const ASSET_FILTER_TABS = [
+  { value: "all", label: "全部" },
+  { value: "gallery", label: "封面图集" },
+  { value: "highlight", label: "高亮包" },
+  { value: "reader", label: "阅读主题" },
+  { value: "svg", label: "SVG" },
+  { value: "html", label: "HTML" },
+  { value: "ungrouped", label: "未分类" },
+];
+function assetFilterCounts(assets) {
+  const counts = { all: assets.length, gallery: 0, highlight: 0, reader: 0, svg: 0, html: 0, ungrouped: 0, red: 0 };
+  assets.forEach(asset => {
+    const type = String(asset.asset_type || asset.extension || "").toLowerCase();
+    if (type === "svg") counts.svg += 1;
+    else if (type === "html") counts.html += 1;
+    else if (type === "red") counts.red += 1;
+    const category = assetRedCategory(asset);
+    if (category === "图集") counts.gallery += 1;
+    else if (category === "高亮") counts.highlight += 1;
+    else if (category === "阅读主题") counts.reader += 1;
+    if (!String(asset.author || "").trim() && !String(asset.style || "").trim()) counts.ungrouped += 1;
+  });
+  return counts;
+}
+function renderAssetFilterTabs() {
+  const container = $("#assetFilterTabs");
+  if (!container) return;
+  const counts = assetFilterCounts(state.assets.filter(assetMatchesSearch));
+  if (state.assetFilter !== "all" && !ASSET_FILTER_TABS.some(tab => tab.value === state.assetFilter)) state.assetFilter = "all";
+  // 七个固定分类常驻（数量为 0 也留着）：标签位置稳定，点一下就知道这类是空的，
+  // 不会因为数量变化而整排重排。
+  container.innerHTML = ASSET_FILTER_TABS
+    .map(tab => `<button class="filter-chip asset-filter-tab${tab.value === state.assetFilter ? " is-active" : ""}" type="button" role="tab" aria-selected="${tab.value === state.assetFilter}" data-asset-filter="${tab.value}">${escapeHtml(tab.label)} <span>${counts[tab.value] || 0}</span></button>`)
+    .join("");
 }
 function assetPreview(asset, compact = false) {
   const url = assetUrl(asset.preview_url || asset.object_url || asset.url || "");
@@ -4273,6 +4313,18 @@ function libraryRecordCard(kind,record,preview,caption) {
   // 下载入口放在卡片右下角、做成实心按钮：之前是元信息行里一个灰色小字，
   // 在截图里几乎看不见。absolute + z-index 保证它盖在整卡点击层之上。
   const downloadAction=fontDownload?`<a class="download-link catalog-download" href="${escapeHtml(fontDownload)}" download="${escapeHtml(record.file_name||name)}" aria-label="下载字体 ${escapeHtml(name)}">↓ 下载</a>`:'';
+  if (kind === 'asset') {
+    // 参考「进度条收藏夹」：标题和分类标签在上、小缩略图在下，一张卡只占一列宽，
+    // 一屏能扫到十几二十个收藏。卡片只留「分类 + 第一个标签」两段元信息（没标签时
+    // 退回作者），文件名、SHA、全部标签留在详情弹窗——之前每张卡 16:9 大图加两行
+    // 元信息，四个收藏就占满一屏。
+    return `<article class="theme-card catalog-card asset-card asset-compact" data-record-card="asset" data-asset-id="${id}">
+    <button class="theme-card-hit" type="button" data-record-open="asset" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情"></button>
+    <div class="asset-compact-head"><div class="item-heading">${selectInput('asset',record.id,name,isAssetBusy('asset',record.id))}<h3 class="asset-compact-title">${escapeHtml(name)}</h3></div><div class="asset-compact-meta"><span class="theme-categories">${typeCategory?`<em class="is-key">${escapeHtml(typeCategory)}</em>`:''}${tags.length?`<em>${escapeHtml(tags[0])}</em>`:String(record.author||'').trim()?`<em>${escapeHtml(String(record.author).trim())}</em>`:''}</span><span class="asset-compact-size">${record.bytes?formatBytes(record.bytes):''}</span></div></div>
+    <div class="theme-preview"><div class="theme-thumbnail catalog-asset-preview">${preview}</div><button class="theme-more" type="button" data-record-details="asset" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情">⋯</button></div>
+    ${record.sync_error?`<p class="inline-error">${escapeHtml(typeof record.sync_error==='string'?record.sync_error:Object.values(record.sync_error).join('；'))}</p>`:''}
+  </article>`;
+  }
   return `<article class="theme-card catalog-card ${kind}-card ${downloadAction?'has-download':''}" data-record-card="${kind}" data-${kind}-id="${id}">
     <button class="theme-card-hit" type="button" data-record-open="${kind}" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情"></button>
     <div class="theme-preview"><div class="theme-thumbnail catalog-${kind}-preview">${preview}</div><span class="preview-caption">${escapeHtml(caption)}</span><button class="theme-more" type="button" data-record-details="${kind}" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情">⋯</button></div>
@@ -4315,7 +4367,9 @@ function renderAssets() {
   const list = $("#assetList");
   const visible = catalogPage("asset");
   list.innerHTML = visible.map(asset => assetCard(asset)).join("");
-  $('#assetCategoryFilter').value=state.assetFilter;
+  renderAssetFilterTabs();
+  const legacyFilter = $("#assetCategoryFilter");
+  if (legacyFilter) legacyFilter.value = state.assetFilter;
   $$(".sync-asset").forEach(button => button.addEventListener("click", () => syncAsset(button.dataset.id)));
   $$(".delete-record[data-kind='asset']").forEach(button => button.addEventListener("click", () => deleteSelectedRecords("asset", [button.dataset.id])));
   updateBulkControls();
@@ -6843,7 +6897,13 @@ document.addEventListener("submit", event => {
   if (recordForm) { event.preventDefault(); saveRecordClassification(recordForm); }
 });
 $('#fontCategoryFilters').addEventListener('change',event=>{state.fontFilter=event.target.value;libraryPage.font=1;renderFonts();});
-$('#assetCategoryFilter').addEventListener('change',event=>{state.assetFilter=event.target.value;libraryPage.asset=1;renderAssets();});
+// 收藏分类标签页：点一下切换分类，数量由 renderAssetFilterTabs 重新统计。
+document.addEventListener('click',event=>{
+  const tab=event.target.closest('[data-asset-filter]');if(!tab)return;
+  state.assetFilter=tab.dataset.assetFilter;libraryPage.asset=1;renderAssets();
+});
+const assetCategorySelect=$('#assetCategoryFilter');
+if(assetCategorySelect)assetCategorySelect.addEventListener('change',event=>{state.assetFilter=event.target.value;libraryPage.asset=1;renderAssets();});
 $('#closeRecordDialog').addEventListener('click',()=>$('#recordDialog').close());
 document.addEventListener('click',event=>{
   const button=event.target.closest('[data-record-open],[data-record-details]');if(!button)return;

@@ -92,11 +92,11 @@ try{
   const previews=await p.locator('#assetList .theme-thumbnail img').evaluateAll(images=>images.map(image=>({src:image.currentSrc||image.src,w:image.naturalWidth})));
   assert.equal(previews.length,2,'两张收藏卡都要有图片预览');
   assert.ok(previews.every(item=>item.w>0&&item.src.includes('/previews/')),`预览必须是已上传的 JPG：${JSON.stringify(previews)}`);
-  await p.locator('#assetCategoryFilter').selectOption('gallery');
+  await p.locator('#assetFilterTabs [data-asset-filter="gallery"]').click();
   await p.waitForFunction(()=>document.querySelectorAll('#assetList .asset-card').length===1,{},{timeout:10000});
-  await p.locator('#assetCategoryFilter').selectOption('highlight');
+  await p.locator('#assetFilterTabs [data-asset-filter="highlight"]').click();
   await p.waitForFunction(()=>document.querySelectorAll('#assetList .asset-card').length===1,{},{timeout:10000});
-  await p.locator('#assetCategoryFilter').selectOption('all');
+  await p.locator('#assetFilterTabs [data-asset-filter="all"]').click();
   await p.waitForFunction(()=>document.querySelectorAll('#assetList .asset-card').length===2,{},{timeout:10000});
   assert.deepEqual(errors,[]);
   console.log('PASS: 图集/高亮 RED 可预览、收录进收藏库并带分类筛选，主题库保持干净。');

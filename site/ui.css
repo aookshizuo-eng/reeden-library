@@ -169,6 +169,55 @@
 .view .catalog-grid.is-list {grid-template-columns:1fr;gap:12px;}
 .catalog-grid.is-list .theme-card {display:grid;grid-template-columns:168px minmax(0,1fr);gap:14px;align-items:center;padding:8px;}
 .catalog-grid.is-list .theme-thumbnail,.catalog-grid.is-list .preview-empty {aspect-ratio:3/2;border-radius:6px;}
+
+/* 收藏库：分类标签页 + 紧凑卡片。参考「进度条收藏夹」——标题与分类在上、
+   缩略图在下，一张卡只占一列宽，一屏能扫到十几个收藏；作者、标签、SHA 这些
+   留给点开后的详情弹窗，不再让每张卡都撑成 16:9 大图。 */
+.asset-filter-tabs {display:flex;gap:6px;margin:0 0 14px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none;}
+.asset-filter-tabs::-webkit-scrollbar {display:none;}
+.asset-filter-tab {flex:0 0 auto;display:inline-flex;align-items:center;gap:5px;min-height:30px;padding:0 12px;border-radius:999px;font-size:12px;white-space:nowrap;}
+.asset-filter-tab span {color:var(--faint);font-size:11px;font-variant-numeric:tabular-nums;}
+.asset-filter-tab.is-active {font-weight:600;}
+.asset-filter-tab.is-active span {color:var(--accent);}
+.view .catalog-grid.asset-library-grid {grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:14px 12px;align-items:stretch;}
+.view .catalog-grid.asset-library-grid .asset-compact {display:flex;flex-direction:column;gap:0;padding:8px 8px 9px;border:1px solid var(--border);border-radius:12px;background:var(--surface);overflow:hidden;}
+.asset-library-grid .asset-compact-head {display:flex;flex-direction:column;gap:5px;min-width:0;padding:0 1px 7px;}
+.asset-library-grid .asset-compact-head .item-heading {gap:7px;align-items:flex-start;min-height:0;}
+.asset-library-grid .asset-compact .item-select {position:static;inset:auto;width:15px;height:15px;flex:0 0 15px;margin:2px 0 0;appearance:auto;-webkit-appearance:auto;border:0;border-radius:0;background:none;box-shadow:none;accent-color:var(--accent);}
+.asset-library-grid .asset-compact-title {margin:0;color:var(--text);font-size:12.5px;font-weight:600;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;}
+.asset-library-grid .asset-compact-meta {display:flex;align-items:center;justify-content:space-between;gap:6px;font-size:10.5px;color:var(--faint);}
+.asset-library-grid .theme-categories {margin-left:0;gap:3px;flex-wrap:nowrap;min-width:0;overflow:hidden;}
+.asset-library-grid .theme-categories em {font-size:10px;line-height:1.7;padding:1px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;}
+.asset-library-grid .theme-categories em:not(.is-key) {padding:0;background:transparent;color:var(--faint);font-size:10.5px;}
+.asset-compact-size {flex:0 0 auto;font-variant-numeric:tabular-nums;}
+.asset-library-grid .asset-compact .theme-preview {padding:0;}
+.asset-library-grid .asset-compact .theme-thumbnail {aspect-ratio:4/3;max-height:none;border:1px solid var(--rule);border-radius:9px;background:#f7f3ea;padding:5px;}
+.asset-library-grid .asset-compact .theme-thumbnail img {object-fit:contain;object-position:center;}
+.asset-library-grid .asset-compact .preview-caption {display:none;}
+.asset-library-grid .asset-compact .theme-more {top:5px;right:5px;width:24px;height:24px;font-size:13px;}
+.asset-library-grid .asset-preview-empty {height:100%;border-radius:9px;}
+.asset-library-grid .asset-compact .inline-error {margin:6px 0 0;font-size:10.5px;}
+.asset-library-grid .asset-compact:hover .theme-thumbnail {border-color:var(--control);}
+/* 密度切到「列表」时仍按一行一个排，缩略图固定在左、标题在右。 */
+.view .catalog-grid.asset-library-grid.is-list {grid-template-columns:1fr;gap:10px;}
+.view .catalog-grid.asset-library-grid.is-list .asset-compact {display:grid;grid-template-columns:96px minmax(0,1fr);grid-template-areas:"thumb head";align-items:center;gap:10px;padding:8px 10px;border-radius:10px;}
+.asset-library-grid.is-list .asset-compact .theme-preview {grid-area:thumb;}
+.asset-library-grid.is-list .asset-compact-head {grid-area:head;padding:0;}
+.asset-library-grid.is-list .asset-compact .theme-thumbnail {aspect-ratio:1;padding:4px;border-radius:8px;}
+.asset-library-grid.is-list .asset-compact .item-select {margin:0;}
+@media(max-width:680px) {
+  .asset-filter-tabs {margin-bottom:12px;gap:5px;}
+  .view .catalog-grid.asset-library-grid {grid-template-columns:repeat(3,minmax(0,1fr));gap:9px 8px;}
+  .view .catalog-grid.asset-library-grid .asset-compact {padding:6px 6px 7px;border-radius:10px;}
+  .asset-library-grid .asset-compact-title {font-size:11.5px;line-height:1.35;}
+  .asset-library-grid .asset-compact-head {gap:4px;padding-bottom:6px;}
+  .asset-library-grid .theme-categories em {font-size:9px;padding:0 5px;line-height:1.65;}
+  .asset-library-grid .theme-categories em.is-key {padding:0 5px;}
+  .asset-compact-size {display:none;}
+  .asset-library-grid .asset-compact .theme-thumbnail {aspect-ratio:1;border-radius:8px;padding:4px;}
+  .asset-library-grid .asset-compact .theme-more {display:none;}
+  .view .catalog-grid.asset-library-grid.is-list .asset-compact {grid-template-columns:76px minmax(0,1fr);gap:9px;padding:7px 9px;}
+}
 .catalog-bulk .catalog-selection-hint {flex-basis:100%;font-size:12px;color:var(--muted);}
 .library-tools [data-catalog-selection] {height:40px;}
 .pagination {flex-wrap:wrap;gap:10px;}
