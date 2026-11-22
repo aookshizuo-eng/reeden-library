@@ -64,6 +64,7 @@ export function LibraryBulk({kind}) {
     {kind==='theme'&&<label className="select-label"><input type="checkbox" data-download-extras="theme" />附带原包与预览</label>}
     <Button variant="outline" id={`downloadSelected${capital}`} disabled>下载所选</Button><Button variant="outline" id={`syncSelected${plural}`} disabled>同步所选</Button>
     {kind==='theme'&&<Button variant="outline" id="bulkCategoryTheme" disabled>修改类别</Button>}
+    {kind==='theme'&&<Button variant="outline" id="bulkAuthorTheme" disabled>修改作者</Button>}
     <Button variant="outline" data-bulk-tags={kind}>批量标签</Button><Button variant="destructive" id={`deleteSelected${capital}`} disabled>删除所选</Button><Button variant="ghost" data-clear-selection={kind} hidden>清空已选</Button>
     <span className="catalog-selection-hint" id={`${kind}SelectionHint`} role="status" hidden>点击卡片选择，点右上角查看详情。</span><span className="bulk-status" id={`${kind}BatchStatus`} role="status"></span>
   </div>;

@@ -2757,6 +2757,8 @@ function updateBulkControls() {
   // 一堆主题、没选收藏时按钮一直是灰的。
   const bulkCategoryButton = $("#bulkCategoryTheme");
   if (bulkCategoryButton) bulkCategoryButton.disabled = Boolean(state.operation) || !selections.theme.size;
+  const bulkAuthorButton = $("#bulkAuthorTheme");
+  if (bulkAuthorButton) bulkAuthorButton.disabled = Boolean(state.operation) || !selections.theme.size;
   const eligible = Object.fromEntries(Object.keys(selections).map(kind => [kind, new Set(selectableIds(kind))]));
   $$("[data-selection]").forEach(input => {
     input.checked = selections[input.dataset.selection].has(input.dataset.id);
@@ -3079,6 +3081,58 @@ async function applyBulkThemeCategories() {
     renderThemes();
     dialog?.close();
     toast(failed ? `已更新 ${done} 个主题，${failed} 个失败` : `已把类别写入 ${done} 个主题`);
+  } finally { setOperation(""); }
+}
+/* 批量作者：和单项「名称与作者」编辑走同一个 PATCH 接口，只提交 author，
+   后端会保留作品名、类别、标签，避免出现两套互相打架的写入路径。 */
+async function patchThemeAuthor(theme, author) {
+  await ensureRecordReference(theme);
+  const result = await api(`/api/themes/${encodeURIComponent(theme.id)}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ record_sha256: theme.record_sha256, author }),
+  });
+  Object.assign(theme, result.item || {});
+  updateCachedRecord(theme);
+  return theme;
+}
+function updateBulkAuthorApply() {
+  const button = $("#bulkAuthorApply");
+  if (!button) return;
+  const count = bulkCategoryTargets().length;
+  const author = String($("#bulkAuthorInput")?.value || "").trim();
+  button.textContent = `应用到 ${count} 个主题${author ? `（${author}）` : "（清空作者）"}`;
+  button.disabled = Boolean(state.operation) || !count;
+}
+function openBulkAuthorDialog() {
+  const targets = bulkCategoryTargets();
+  if (!targets.length) { toast("先勾选要修改的主题"); return; }
+  const dialog = $("#bulkAuthorDialog");
+  if (!dialog) return;
+  const names = targets.slice(0, 3).map(theme => themeIdentity(theme).title).join("、");
+  $("#bulkAuthorSub").textContent = `将修改 ${targets.length} 个主题：${names}${targets.length > 3 ? " 等" : ""}`;
+  const input = $("#bulkAuthorInput");
+  if (input) { input.value = ""; }
+  updateBulkAuthorApply();
+  if (!dialog.open) dialog.showModal();
+  input?.focus();
+}
+async function applyBulkThemeAuthors() {
+  const targets = bulkCategoryTargets();
+  if (!targets.length || state.operation) return;
+  const author = String($("#bulkAuthorInput")?.value || "").trim();
+  const dialog = $("#bulkAuthorDialog"), applyButton = $("#bulkAuthorApply");
+  setOperation("theme-authors");
+  let done = 0, failed = 0;
+  try {
+    await ensureWriteAccess();
+    for (const theme of targets) {
+      if (applyButton) applyButton.textContent = `处理中 ${done + failed + 1}/${targets.length}`;
+      try { await patchThemeAuthor(theme, author); done++; } catch { failed++; }
+    }
+    if (browserSyncEnabled()) saveDeviceSnapshot();
+    renderThemes();
+    dialog?.close();
+    toast(failed ? `已更新 ${done} 个主题，${failed} 个失败` : `已把作者「${author || "作者未记录"}」写入 ${done} 个主题`);
   } finally { setOperation(""); }
 }
 function splitTags(value) { return [...new Set(String(value || "").split(/[,，;；\n]+/).map(value => value.trim().slice(0, 24)).filter(Boolean))].slice(0, 30); }
@@ -5938,6 +5992,12 @@ $("#bulkCategoryCancel")?.addEventListener("click", () => $("#bulkCategoryDialog
 $("#bulkCategoryApply")?.addEventListener("click", applyBulkThemeCategories);
 $("#bulkCategoryAdd")?.addEventListener("click", addBulkCategoryFromInput);
 $("#bulkCategoryInput")?.addEventListener("keydown", event => { if (event.key === "Enter") { event.preventDefault(); addBulkCategoryFromInput(); } });
+$("#bulkAuthorTheme")?.addEventListener("click", openBulkAuthorDialog);
+$("#closeBulkAuthor")?.addEventListener("click", () => $("#bulkAuthorDialog")?.close());
+$("#bulkAuthorCancel")?.addEventListener("click", () => $("#bulkAuthorDialog")?.close());
+$("#bulkAuthorApply")?.addEventListener("click", applyBulkThemeAuthors);
+$("#bulkAuthorInput")?.addEventListener("input", updateBulkAuthorApply);
+$("#bulkAuthorDialog")?.addEventListener("cancel", event => { if (state.operation) event.preventDefault(); });
 document.querySelectorAll('input[name="bulkCategoryMode"]').forEach(input => input.addEventListener("change", updateBulkCategoryApply));
 $("#downloadSelectedFont").addEventListener("click", () => downloadSelectedRecords("font"));
 $("#downloadSelectedAsset").addEventListener("click", () => downloadSelectedRecords("asset"));
