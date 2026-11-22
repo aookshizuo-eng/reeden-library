@@ -685,15 +685,11 @@ function privateHeaderRepackSupported(header) {
 }
 // 图集（coverGallery）和高亮规则包不是阅读主题：收进收藏库，各占一个分类。
 // 私有 v2 用公开头的 resourceType 判定；v1 gzip 的阅读/高亮包没有公开头，
-// 只能按文件名判定，且只认「高亮」这类明确标记，避免误伤普通阅读主题。
+// 先看解码出来的图片角色，再退回文件名，避免误伤普通阅读主题。
 function redAssetCategory(info) {
-  const resourceType = String(info?.header?.resourceType || "");
-  if (/coverGallery/i.test(resourceType)) return "图集";
-  if (/highlight/i.test(resourceType)) return "高亮";
-  if (String(info?.container_format || "") === "red_private_v2") return "";
-  const sourceName = String(info?.source_name || info?.name || "");
-  if (/封面图集|图集/.test(sourceName)) return "图集";
-  if (/高亮/.test(sourceName)) return "高亮";
+  const kind = redPartKind(info?.entries, info);
+  if (kind === "gallery") return "图集";
+  if (kind === "highlight") return "高亮";
   return "";
 }
 function privatePrefix(raw) {
@@ -2086,6 +2082,131 @@ async function composeThemePreviewBlob(entries, codec) {
   entries.previewCategory = themeToneCategories(finalTone, {kind: entries.previewKind})[0] || "";
   return blob;
 }
+// 图集 / 阅读主题 / 高亮包都属于「主题部件」，但预览不能共用书架那套拼贴：
+// 图集只有封面，拼书架和手机屏只会出现一堆被裁掉的书封；高亮包是一段段
+// 文字底色，塞进 9:19.5 的手机屏会糊成一条色带。这里按部件类型各画一套。
+function redPartKind(entries, info = {}) {
+  const resourceType = String(info?.header?.resourceType || "");
+  const names = (entries || []).map(entry => String(entry?.name || ""));
+  if (/coverGallery/i.test(resourceType)) return "gallery";
+  if (/highlight/i.test(resourceType)) return "highlight";
+  if (names.some(name => /(^|\/)highlight\//i.test(name))) return "highlight";
+  if ((entries || []).some(entry => entry?.role === "reader")) return "reader";
+  // v2 加密主题的目录是密文，文件名不可信：认不出部件类型就按普通主题处理。
+  if (String(info?.container_format || "") === "red_private_v2") return "";
+  const sourceName = String(info?.source_name || info?.name || "");
+  if (/封面图集|图集/.test(sourceName)) return "gallery";
+  if (/高亮/.test(sourceName)) return "highlight";
+  return "";
+}
+async function composeRedPartPreviewBlob(entries, codec, mode) {
+  if (!Array.isArray(entries) || !entries.length || typeof createImageBitmap !== "function") return null;
+  const canvas = document.createElement("canvas");
+  canvas.width = 1000; canvas.height = 1000;
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+  const items = [];
+  for (const entry of entries) {
+    const mime = codec.mimeFromBytes(entry.bytes, entry.name);
+    if (!mime?.startsWith("image/")) continue;
+    try {
+      const bitmap = await createImageBitmap(new Blob([entry.bytes], {type: mime}));
+      items.push({ entry, bitmap, width: bitmap.width, height: bitmap.height });
+    } catch {}
+  }
+  if (!items.length) return null;
+  try {
+    const roundPath = (x, y, width, height, radius) => {
+      context.beginPath();
+      if (typeof context.roundRect === "function") { context.roundRect(x, y, width, height, radius); return; }
+      const r = Math.min(radius, width / 2, height / 2);
+      context.moveTo(x + r, y); context.lineTo(x + width - r, y); context.quadraticCurveTo(x + width, y, x + width, y + r);
+      context.lineTo(x + width, y + height - r); context.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+      context.lineTo(x + r, y + height); context.quadraticCurveTo(x, y + height, x, y + height - r);
+      context.lineTo(x, y + r); context.quadraticCurveTo(x, y, x + r, y); context.closePath();
+    };
+    // fit=contain 保证封面图 / 高亮条整块可见，不会被卡片比例裁掉。
+    const card = (item, x, y, width, height, radius, fit = "contain") => {
+      context.save();
+      roundPath(x, y, width, height, radius);
+      context.fillStyle = "#fffdf8"; context.fill();
+      context.clip();
+      const scale = (fit === "cover" ? Math.max : Math.min)(width / item.width, height / item.height);
+      const drawWidth = item.width * scale, drawHeight = item.height * scale;
+      context.drawImage(item.bitmap, x + (width - drawWidth) / 2, y + (height - drawHeight) / 2, drawWidth, drawHeight);
+      context.restore();
+      context.save();
+      roundPath(x + .5, y + .5, width - 1, height - 1, radius);
+      context.strokeStyle = "rgba(29,26,21,.12)"; context.lineWidth = 1; context.stroke();
+      context.restore();
+    };
+    context.fillStyle = "#f2eee5"; context.fillRect(0, 0, 1000, 1000);
+    if (mode === "gallery") {
+      // 封面图集：只按封面本身的网格排列，不画手机屏和书架。
+      const covers = items.slice(0, 6);
+      const columns = covers.length <= 2 ? covers.length : covers.length <= 4 ? 2 : 3;
+      const rows = Math.ceil(covers.length / columns);
+      const gap = 18, margin = 54;
+      const cellWidth = (1000 - margin * 2 - gap * (columns - 1)) / columns;
+      const cellHeight = (1000 - margin * 2 - gap * (rows - 1)) / rows;
+      covers.forEach((item, index) => {
+        card(item, margin + (index % columns) * (cellWidth + gap), margin + Math.floor(index / columns) * (cellHeight + gap), cellWidth, cellHeight, 20);
+      });
+    } else if (mode === "highlight") {
+      // 单独的高亮包：只排高亮图片本身，一条一块，不掺背景图。
+      const strips = items.slice(0, 4);
+      const gap = 20, margin = 84;
+      const height = Math.min(230, (1000 - margin * 2 - gap * (strips.length - 1)) / strips.length);
+      let y = (1000 - (strips.length * height + (strips.length - 1) * gap)) / 2;
+      for (const item of strips) { card(item, margin, y, 1000 - margin * 2, height, 18); y += height + gap; }
+    } else {
+      // 阅读主题：左页是阅读背景，右边是高亮图片，一眼能看出阅读观感。
+      const background = items.find(item => item.entry?.role === "reader") || items[0];
+      const highlights = items.filter(item => item !== background).slice(0, 3);
+      const pageWidth = highlights.length ? 620 : 760;
+      const pageX = highlights.length ? 52 : (1000 - pageWidth) / 2;
+      const pageY = 70;
+      card(background, pageX, pageY, pageWidth, 860, 24, "cover");
+      if (highlights.length) {
+        const columnX = pageX + pageWidth + 34;
+        const columnWidth = 1000 - columnX - 52;
+        const gap = 18;
+        const height = (860 - gap * (highlights.length - 1)) / highlights.length;
+        let y = pageY;
+        for (const item of highlights) { card(item, columnX, y, columnWidth, height, 14); y += height + gap; }
+      }
+    }
+    // 阅读主题仍会自动分类，采样口径和主题预览保持一致（亮度 / 饱和 / 主色系）。
+    try {
+      const sample = document.createElement("canvas");
+      sample.width = 48; sample.height = 48;
+      const sampleContext = sample.getContext("2d", {willReadFrequently: true});
+      if (sampleContext) {
+        sampleContext.drawImage(canvas, 0, 0, 48, 48);
+        const data = sampleContext.getImageData(0, 0, 48, 48).data;
+        let r = 0, g = 0, b = 0;
+        for (let index = 0; index < data.length; index += 4) { r += data[index]; g += data[index + 1]; b += data[index + 2]; }
+        const pixels = data.length / 4; r /= pixels; g /= pixels; b /= pixels;
+        const max = Math.max(r, g, b), min = Math.min(r, g, b);
+        let hue = 0; const delta = max - min;
+        if (delta) {
+          if (max === r) hue = ((g - b) / delta) % 6;
+          else if (max === g) hue = (b - r) / delta + 2;
+          else hue = (r - g) / delta + 4;
+          hue *= 60; if (hue < 0) hue += 360;
+        }
+        const light = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+        const saturation = max ? (max - min) / max : 0;
+        try { entries.previewTone = {light, saturation, warm: hue < 90, colorFamily: hueColorFamily(hue, saturation, light), hueStrength: saturation > .18 ? 1.4 : 0}; } catch {}
+      }
+    } catch {}
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", .86));
+    try { entries.previewKind = mode; } catch {}
+    return blob;
+  } finally {
+    items.forEach(item => item.bitmap.close?.());
+  }
+}
 /**
  * Classify a font from its rendered glyph shapes instead of its file name.
  * One FontFace load also produces the specimen image stored in R2, so font
@@ -2498,7 +2619,9 @@ function previewKind(details = {}) {
   if (details?.kind === "shelf_and_reader") return "书架 + 阅读页";
   if (details?.kind === "shelf") return "书架模拟";
   if (details?.kind === "splash") return "启动图";
-  if (details?.kind === "reader") return "阅读页";
+  if (details?.kind === "reader") return "阅读背景与高亮";
+  if (details?.kind === "gallery") return "封面图集";
+  if (details?.kind === "highlight") return "高亮图片";
   if (details?.kind === "single") return "主题图片";
   return "主题预览";
 }
@@ -3823,7 +3946,7 @@ function fontMatchesCategory(font) {
 function assetTypeLabel(asset) {
   const type = String(asset.asset_type || asset.extension || "").toLowerCase();
   // 图集 / 高亮是 RED 包，不是网页：标签直接显示分类，避免被当成 HTML。
-  if (type === "red") return String(asset.red_category || "RED");
+  if (type === "red") return String(asset.red_category || "主题部件");
   return type === "svg" ? "SVG" : "HTML";
 }
 function assetRedCategory(asset) {
@@ -3831,6 +3954,11 @@ function assetRedCategory(asset) {
 }
 function assetMatchesFilter(asset) {
   const mode = state.assetFilter || "all";
+  // 收藏库先按大类分：SVG / HTML / 主题部件（RED 包），再在部件里分图集、高亮。
+  const type = String(asset.asset_type || asset.extension || "").toLowerCase();
+  if (mode === "svg" && type !== "svg") return false;
+  if (mode === "html" && type !== "html" && type !== "") return false;
+  if (mode === "red" && type !== "red") return false;
   if (mode === "gallery" && assetRedCategory(asset) !== "图集") return false;
   if (mode === "highlight" && assetRedCategory(asset) !== "高亮") return false;
   if (mode === "ungrouped" && (String(asset.author || "").trim() || String(asset.style || "").trim())) return false;
@@ -3860,6 +3988,8 @@ function libraryRecordCard(kind,record,preview,caption) {
   const name=(kind==='font'?record.family:record.name)||record.name||record.file_name||'未命名',tags=recordTags(record),id=escapeHtml(record.id);
   // 收藏库里图集 / 高亮要显示自己的分类，不能只靠预览角标的小字。
   const redCategory = kind==='asset' ? assetRedCategory(record) : "";
+  // SVG / HTML 也给一个实心分类标签，收藏库一眼能分出网页和主题部件。
+  const typeCategory = kind==='asset' ? (redCategory || assetTypeLabel(record)) : "";
   const categories = kind==='font' ? [fontCategory(record)] : record.style ? [record.style] : [];
   // 字体卡片直接放下载入口，不必先点开详情。网络字体用 downloadUrl 的下载
   // 语义（download=1 + name=），本地未同步的字体无地址则不显示按钮。
@@ -3870,7 +4000,7 @@ function libraryRecordCard(kind,record,preview,caption) {
   return `<article class="theme-card catalog-card ${kind}-card ${downloadAction?'has-download':''}" data-record-card="${kind}" data-${kind}-id="${id}">
     <button class="theme-card-hit" type="button" data-record-open="${kind}" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情"></button>
     <div class="theme-preview"><div class="theme-thumbnail catalog-${kind}-preview">${preview}</div><span class="preview-caption">${escapeHtml(caption)}</span><button class="theme-more" type="button" data-record-details="${kind}" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情">⋯</button></div>
-    <div class="theme-info">${isNewArrival(record)?'<span class="arrival-label">新入库</span>':''}<div class="item-heading">${selectInput(kind,record.id,name,isAssetBusy(kind,record.id))}<h3 class="theme-title">${escapeHtml(name)}</h3></div><div class="theme-meta"><span class="theme-categories">${redCategory?`<em class="is-key">${escapeHtml(redCategory)}</em>`:''}${categories.filter(Boolean).map(tag=>`<em>${escapeHtml(tag)}</em>`).join('')}${tags.slice(0,2).map(tag=>`<em>${escapeHtml(tag)}</em>`).join('')}</span><span>${formatBytes(record.bytes)}</span></div>${record.sync_error?`<p class="inline-error">${escapeHtml(typeof record.sync_error==='string'?record.sync_error:Object.values(record.sync_error).join('；'))}</p>`:''}</div>
+    <div class="theme-info">${isNewArrival(record)?'<span class="arrival-label">新入库</span>':''}<div class="item-heading">${selectInput(kind,record.id,name,isAssetBusy(kind,record.id))}<h3 class="theme-title">${escapeHtml(name)}</h3></div><div class="theme-meta"><span class="theme-categories">${typeCategory?`<em class="is-key">${escapeHtml(typeCategory)}</em>`:''}${categories.filter(Boolean).map(tag=>`<em>${escapeHtml(tag)}</em>`).join('')}${tags.slice(0,2).map(tag=>`<em>${escapeHtml(tag)}</em>`).join('')}</span><span>${formatBytes(record.bytes)}</span></div>${record.sync_error?`<p class="inline-error">${escapeHtml(typeof record.sync_error==='string'?record.sync_error:Object.values(record.sync_error).join('；'))}</p>`:''}</div>
     ${downloadAction}
   </article>`;
 }
@@ -4430,17 +4560,22 @@ async function analyzeFiles(files) {
           if (plain?.author) identity.author = plain.author;
         }
         identity.name = themeIdentity(identity).title;
+        // 图集 / 阅读主题 / 高亮包各用一套预览：它们不是书架 + 启动图那种主题。
+        const redPart = redPartKind(entries, { header: inspection?.header, container_format: inspection.format, source_name: file.name });
         let previewUrl = "", previewBlob=null;
-        let previewDetails = { kind: previewCompositionKind(entries), simulation: true, encrypted_source: inspection.format === "red_private_v2" };
+        let previewDetails = { kind: redPart || previewCompositionKind(entries), simulation: true, encrypted_source: inspection.format === "red_private_v2" };
         if (entries.length) {
-          const preview = await composeThemePreviewBlob(entries, codec);
+          // 部件预览失败（例如极端小图解码不了）时退回主题预览，宁可样式旧一点也不能没图。
+          const preview = redPart
+            ? (await composeRedPartPreviewBlob(entries, codec, redPart)) || await composeThemePreviewBlob(entries, codec)
+            : await composeThemePreviewBlob(entries, codec);
           if (preview) {previewBlob=preview;previewUrl = URL.createObjectURL(preview);}
-          previewDetails = { ...previewDetails, kind: previewCompositionKind(entries) };
+          previewDetails = { ...previewDetails, kind: redPart || previewCompositionKind(entries) };
         }
         const tone = entries.previewTone || null;
         const toneCategories = themeToneCategories(tone, previewDetails);
         const autoCategory = toneCategories[0] || "";
-        const info = { ...identity, source_name: file.name, bytes: raw.length, container_format: inspection.format, compression_supported: inspection.compressionSupported !== false, preview_details: previewDetails, preview_tone: tone, auto_category: autoCategory, auto_categories: toneCategories, red_asset: redAssetCategory({header: inspection?.header, container_format: inspection.format, source_name: file.name}) };
+        const info = { ...identity, source_name: file.name, bytes: raw.length, container_format: inspection.format, compression_supported: inspection.compressionSupported !== false, preview_details: previewDetails, preview_tone: tone, auto_category: autoCategory, auto_categories: toneCategories, red_asset: redAssetCategory({header: inspection?.header, container_format: inspection.format, source_name: file.name, entries}) };
         const duplicateRecords = browserDuplicateCandidates(identity.name, identity.author);
         return { staging_id: `browser-${crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`}`, file, original_sha256:originalSha, preview_blob:previewBlob, inspection, info, duplicates: duplicateRecords.map(record => ({ ...record })), preview_urls: { light: previewUrl, dark: "" } };
       };
@@ -4550,7 +4685,7 @@ async function commitThemes(ids = [...selections.review]) {
             transferStage("写入收藏记录", name);
             const record = await uploadBrowserRecord({
               kind: "asset", id: `asset-${assetSha.slice(0, 16)}`, asset_type: "red", extension: "red",
-              category: redAsset, red_category: redAsset, file_name: fileName, name, author: "", style: "", tags: [],
+              category: redAsset, red_category: redAsset, preview_kind: item.info?.preview_details?.kind || "", file_name: fileName, name, author: "", style: "", tags: [],
               sha256: assetSha, original_sha256: assetSha, bytes: raw.length, mime: "application/octet-stream",
               object_url: objectPath, url: objectPath, preview_url: previewPath,
               saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""

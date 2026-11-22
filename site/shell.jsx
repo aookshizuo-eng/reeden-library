@@ -151,7 +151,7 @@ export default function Shell() {
           <section className="asset-area">
             <LibrarySearch id="assetSearchInput" label="搜索收藏" placeholder="搜索名称、作者或标签" />
             <LibraryTools kind="asset" refreshId="refreshAssets">
-              <select className="catalog-select" id="assetCategoryFilter" aria-label="收藏筛选"><option value="all">全部收藏</option><option value="gallery">图集</option><option value="highlight">高亮</option><option value="ungrouped">未分类</option><option value="author">已填写作者</option><option value="style">已填写风格</option></select>
+              <select className="catalog-select" id="assetCategoryFilter" aria-label="收藏筛选"><option value="all">全部收藏</option><optgroup label="类型"><option value="svg">SVG</option><option value="html">HTML</option><option value="red">主题部件</option></optgroup><optgroup label="主题部件"><option value="gallery">封面图集</option><option value="highlight">高亮包</option></optgroup><optgroup label="分类"><option value="ungrouped">未分类</option><option value="author">已填写作者</option><option value="style">已填写风格</option></optgroup></select>
 
             </LibraryTools>
             <p className="cache-info" data-cache-info></p>
