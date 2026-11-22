@@ -1010,7 +1010,100 @@ function pan123BackupConfig() {
 let backupPhaseActive=false;
 const deferredPan123=[];
 function pan123BackupEnabled(){return !!pan123BackupConfig().token && $('#backupTo123')?.checked!==false;}
-async function backupOriginalTo123(record,codec) {
+// 问题3：备份走的还是 Worker -> Cloudflare 海外出口 -> 123，这是慢+易失败的根因。
+// 登录/校验/列清单早已浏览器直连，唯独上传原包还留在海外中转。这里把控制面
+// （/b/api/*，CORS 全开）和数据面（presigned 节点 PUT，123 官方网页也是浏览器直传）
+// 全部搬到用户自己的网络出口；结果只写一个元数据回 Worker，不经手字节、不代发 123。
+// 浏览器直连因 CORS/网络不可达时，自动回退到下面的 Worker 中转兜底，不比现状更差。
+function safePan123TransferUrl(value){
+  let url;try{url=new URL(String(value||''));}catch{throw new Error('123 返回了无效的传输地址');}
+  const host=url.hostname.toLowerCase();
+  if(url.protocol!=='https:'||url.username||url.password||(url.port&&url.port!=='443')||host==='localhost'||host.endsWith('.localhost')||/^\d{1,3}(\.\d{1,3}){3}$/.test(host))throw new Error('123 返回了不安全的传输地址');
+  return url.href;
+}
+async function persistPan123BackupResult(record,md5,result){
+  const response=await transferFetch(apiUrl('/api/backup/123/result'),{method:'POST',headers:requestHeaders({'Content-Type':'application/json'}),body:JSON.stringify({theme_id:record.id,md5,result})},30000);
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok||!data.ok)throw new Error(data.error||`备份结果写回失败（HTTP ${response.status}）`);
+  if(data.item){Object.assign(record,data.item);const current=state.themes.find(item=>item.id===record.id);if(current)Object.assign(current,data.item);updateCachedRecord(record);}
+  return data;
+}
+async function pan123DirectBackup(record,codec,config){
+  const token=config.token;
+  let md5=record.original_md5;
+  const fileName=(String(record.source_name||redDownloadLabel(record)).replace(/\.red$/i,'').replace(/[\\/:*?"<>|]/g,'_').slice(0,200)||'theme')+'.red';
+  const folder=String(config.folder||'').replace(/^\/+|\/+$/g,'');
+  transferStage('从 R2 读取原包（直连备份）',record.name||record.id);
+  const raw=await transferFetch(assetUrl(record.original_url),{headers:requestHeaders()},180000);
+  if(!raw.ok)throw new Error(`无法读取 R2 原包（HTTP ${raw.status}）`);
+  const bytes=new Uint8Array(await raw.arrayBuffer());
+  if(!bytes.length)throw new Error('R2 原包为空');
+  if(!md5){
+    const result=await runCodecTask('hashes',{items:[{bytes}],options:{concurrency:1}},async()=>({results:[{md5:await codec.md5Hex(bytes)}]}));
+    md5=result.results[0].md5;record.original_md5=md5;updateCachedRecord(record);
+  }
+  const listFolder=async(parent)=>{
+    const data=await pan123DirectRequest(token,'/file/list/new',{params:{driveId:0,limit:100,next:'0',orderBy:'file_id',orderDirection:'desc',parentFileId:String(parent),trashed:'false',SearchData:'',Page:1,OnlyLookAbnormalFile:0,event:'homeListFile',operateType:4,inDirectSpace:'false'}});
+    return Array.isArray(data.InfoList)?data.InfoList:[];
+  };
+  let parent=0;
+  for(const name of folder.split('/').filter(Boolean)){
+    if(name.length>240||name==='.'||name==='..')throw new Error('123 备份目录名称无效');
+    let found=(await listFolder(parent)).find(item=>item&&String(item.FileName)===name);
+    if(!found){
+      await pan123DirectRequest(token,'/file/upload_request',{method:'POST',body:{driveId:0,etag:'',fileName:name,parentFileId:parent,size:0,type:1,duplicate:0,NotReuse:true,event:'newCreateFolder',operateType:1}});
+      found=(await listFolder(parent)).find(item=>item&&String(item.FileName)===name);
+    }
+    if(!found||Number(found.Type)!==1)throw new Error(`123 备份目录不可用：${name}`);
+    parent=Number(found.FileId);
+  }
+  const existing=(await listFolder(parent)).find(item=>item&&String(item.FileName)===fileName);
+  const sha256=await codec.sha256Hex(bytes);
+  if(existing){
+    if(Number(existing.Type)!==0||Number(existing.Size)!==bytes.length||String(existing.Etag||'').toLowerCase()!==md5)throw new Error('123 备份目录已有同名但不同的文件，未覆盖');
+    const result={ok:true,provider:'123pan',key:folder?`${folder}/${fileName}`:fileName,fileId:String(existing.FileId),bytes:bytes.length,sha256,reused:true};
+    await persistPan123BackupResult(record,md5,result);return result;
+  }
+  const info=await pan123DirectRequest(token,'/file/upload_request',{method:'POST',body:{driveId:0,duplicate:0,etag:md5,fileName,parentFileId:parent,size:bytes.length,type:0}});
+  if(!info.Reuse){
+    if(!info.Bucket||!info.Key||!info.StorageNode||!info.FileId)throw new Error('123 未返回完整上传参数，原包仍保留在 R2');
+    const common={StorageNode:info.StorageNode,bucket:info.Bucket,key:info.Key,uploadId:String(info.UploadId||'')};
+    const chunkSize=16*1024*1024,parts=Math.max(1,Math.ceil(bytes.length/chunkSize));
+    for(let number=1;number<=parts;number++){
+      if(transferController?.signal.aborted)return {paused:true};
+      const auth=await pan123DirectRequest(token,parts===1?'/file/s3_upload_object/auth':'/file/s3_repare_upload_parts_batch',{method:'POST',body:{...common,partNumberStart:number,partNumberEnd:number+1}});
+      const url=safePan123TransferUrl(auth?.presignedUrls?.[String(number)]);
+      const chunk=bytes.subarray((number-1)*chunkSize,Math.min(bytes.length,number*chunkSize));
+      const response=await uploadRequest(url,{method:'PUT'},`${record.name||record.id} · 第 ${number}/${parts} 块`);
+      if(!response.ok)throw new Error(`123 分块上传失败（HTTP ${response.status}）`);
+    }
+    await pan123DirectRequest(token,'/file/upload_complete/v2',{method:'POST',body:{...common,fileId:info.FileId,fileSize:bytes.length,isMultipart:parts>1}});
+  }
+  const stored=(await listFolder(parent)).find(item=>item&&String(item.FileName)===fileName);
+  if(!stored||Number(stored.Type)!==0||Number(stored.Size)!==bytes.length||String(stored.Etag||'').toLowerCase()!==md5)throw new Error('123 尚未确认原包落盘，未记为成功；R2 副本仍在');
+  const result={ok:true,provider:'123pan',key:folder?`${folder}/${fileName}`:fileName,fileId:String(stored.FileId),bytes:bytes.length,sha256,reused:false};
+  await persistPan123BackupResult(record,md5,result);return result;
+}
+async function backupOriginalTo123(record,codec){
+  const config=pan123BackupConfig();if(!config.token)return {error:'尚未连接 123 云盘'};
+  try{
+    const direct=await pan123DirectBackup(record,codec,config);
+    if(direct?.paused)return direct;
+    return direct;
+  }catch(error){
+    if(transferController?.signal.aborted)return {paused:true};
+    const message=String(error?.message||'');
+    // 只有浏览器直连本身不可达（CORS/网络）才回退 Worker；会话过期、同名冲突等
+    // 是真实业务结果，回退也是同样的失败，直接上报更诚实。
+    const canFallback=error instanceof TypeError||/Failed to fetch|NetworkError|Load failed|直连|跨域|CORS/i.test(message);
+    if(canFallback)return backupOriginalTo123ViaWorker(record,codec);
+    error.stage ||= 'direct-backup';
+    const failure=pan123Failure(error,'backup');record.original_123_error=failure;updateCachedRecord(record);
+    return {error:failure};
+  }
+}
+// Worker 中转兜底：仅在浏览器无法直连 123（多为 CORS/网络限制）时使用。
+async function backupOriginalTo123ViaWorker(record,codec) {
   const config=pan123BackupConfig();if(!config.token)return {error:'尚未连接 123 云盘'};
   let stage='source-checksum';
   try {

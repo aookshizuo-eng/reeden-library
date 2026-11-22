@@ -1322,6 +1322,26 @@ async function savePan123Result(env,source,result,error,md5) {
     updated.record_sha256=sha;data.records[data.records.indexOf(current)]=updated;return updated;
   });
 }
+// Browser-direct backup calls this only to persist the RESULT of an upload the
+// browser already performed against 123 over the user's own network. No file
+// bytes pass through the Worker and no 123 API is proxied here, so there is no
+// overseas Cloudflare egress to trigger 123's risk control. The token here is
+// the SYNC_WRITE_TOKEN (same as every other library write), never the 123 session.
+async function savePan123DirectResult(request, env) {
+  if (!originAllowed(request, env, {write: true})) return json({error: "Origin 不在允许列表中"}, 403, request, env);
+  if (!checkWriteToken(request, env)) return json({error: "写回备份结果需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
+  let payload;
+  try { payload = await request.json(); } catch { throw problem(400, '备份结果不是有效 JSON'); }
+  const themeId = String(payload?.theme_id || "");
+  const md5 = String(payload?.md5 || "").toLowerCase();
+  const error = String(payload?.error || "").slice(0, 500);
+  const result = payload?.result && typeof payload.result === "object" ? payload.result : null;
+  if (!themeId || !/^[a-f0-9]{32}$/.test(md5)) return json({error: "缺少主题 id 或有效的 MD5 校验值"}, 400, request, env);
+  const source = (await latestLibraryRecords(env, 'theme')).find(item => String(item.id) === themeId);
+  if (!source) return json({error: "主题记录不存在"}, 404, request, env);
+  const item = await savePan123Result(env, source, result?.ok ? result : null, error || (result?.ok ? "" : "123 直连备份未完成"), md5);
+  return json({ok: true, item}, 200, request, env);
+}
 async function backupOriginalTo123(request, env, fetchImpl = fetch) {
   if (!originAllowed(request, env, {write: true})) return json({error: "Origin 不在允许列表中"}, 403, request, env);
   if (!checkWriteToken(request, env)) return json({error: "123 备份接口需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
@@ -1481,6 +1501,7 @@ async function routeRequest(request, env) {
     if(!(request.headers.get('Content-Type')||'').includes('application/json'))return json({error:'此接口仅接受 R2 原包记录 JSON'},400,request,env);
     return backupOriginalTo123(request,env);
   }
+  if (url.pathname === "/api/backup/123/result" && request.method === "POST") return savePan123DirectResult(request, env);
   if (url.pathname === "/api/backup/123" && request.method === "POST") return backupOriginalTo123(request, env);
   const classificationUpdate = url.pathname.match(/^\/api\/(assets|themes|fonts)\/([^/]+)$/);
   if (classificationUpdate && request.method === "PATCH") {
@@ -1510,4 +1531,4 @@ export async function handle(request,env) {
 }
 export default {fetch: handle};
 
-export const __test = {configuredOrigins, corsHeaders, originAllowed, objectSpec, maxUpload, digestHex, base64Bytes, base64String, decryptPrivateManifest, repackPrivateRed, privateDirectory, sealPrivatePrefix, listJobs, createJob, updateJob, deleteJob, backupOriginalTo123, verifyPan123, listPan123Backups, loginPan123, downloadSelected, downloadEntries, crc32Bytes, headerText, deleteStagingObject,loadLibraryIndex,mutateLibraryIndex,readTicket,mayRead};
+export const __test = {configuredOrigins, corsHeaders, originAllowed, objectSpec, maxUpload, digestHex, base64Bytes, base64String, decryptPrivateManifest, repackPrivateRed, privateDirectory, sealPrivatePrefix, listJobs, createJob, updateJob, deleteJob, backupOriginalTo123, savePan123DirectResult, verifyPan123, listPan123Backups, loginPan123, downloadSelected, downloadEntries, crc32Bytes, headerText, deleteStagingObject,loadLibraryIndex,mutateLibraryIndex,readTicket,mayRead};

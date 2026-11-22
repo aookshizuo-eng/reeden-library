@@ -106,6 +106,20 @@ assert.equal(keptAuto.status, 200);
 const keptAutoItem = (await keptAuto.json()).item;
 assert.deepEqual(keptAutoItem.auto_categories, ["明亮"], "不带 auto_categories 时应保留原值");
 assert.deepEqual(keptAutoItem.categories, ["手动", "新增"]);
+// 浏览器直连备份：字节由浏览器直传 123，Worker 只接收结果元数据并写回记录。
+// 这条接口不得接触字节、也不得代发 123，只把 original_123 结果落到对应主题。
+const directMd5 = createHash("md5").update("direct backup bytes").digest("hex");
+const directTheme = encoder.encode(JSON.stringify({kind: "theme", id: "theme-direct-1", name: "直连备份测试", original_md5: directMd5}));
+const directThemeSha = await sha256(directTheme);
+await handle(new Request(`https://worker.example/api/objects/records/${directThemeSha}.json`, {method: "PUT", headers: headers(), body: directTheme}), env);
+const directResult = {ok: true, provider: "123pan", key: "Red-Garden-Backup/direct.red", fileId: "88", bytes: 1234, sha256: await sha256(encoder.encode("direct backup bytes")), reused: false};
+const resultWrite = await handle(new Request("https://worker.example/api/backup/123/result", {method: "POST", headers: headers({"Content-Type": "application/json"}), body: JSON.stringify({theme_id: "theme-direct-1", md5: directMd5, result: directResult})}), env);
+assert.equal(resultWrite.status, 200);
+assert.equal((await resultWrite.json()).item.original_123.fileId, "88", "直连备份结果必须写回 original_123");
+const resultDenied = await __test.savePan123DirectResult(new Request("https://worker.example/api/backup/123/result", {method: "POST", headers: {Origin: origin, "Content-Type": "application/json"}, body: JSON.stringify({theme_id: "theme-direct-1", md5: directMd5})}), env);
+assert.equal(resultDenied.status, 401, "写回结果接口必须校验 SYNC_WRITE_TOKEN");
+const resultBadMd5 = await handle(new Request("https://worker.example/api/backup/123/result", {method: "POST", headers: headers({"Content-Type": "application/json"}), body: JSON.stringify({theme_id: "theme-direct-1", md5: "bad", result: directResult})}), env);
+assert.equal(resultBadMd5.status, 400, "缺少有效 MD5 必须拒绝");
 // Deletion removes the record and unreferenced objects while preserving an
 // object still referenced by another record.
 const sharedBytes = encoder.encode("shared-object");
