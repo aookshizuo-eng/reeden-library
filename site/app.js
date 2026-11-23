@@ -360,6 +360,116 @@ async function restoreMisclassifiedThemeAssets() {
   renderThemes(); renderAssets();
   toast(`已把 ${restored.length} 个应用主题移回主题库`);
 }
+// 收藏库的「刷新预览」：RED 包重新拉原包、按当前容器重画预览图并写一条新版本记录
+// （记录是不可变的，新版本靠 updated_at 覆盖旧的）；SVG / HTML 是浏览器即时渲染，
+// 重新载入预览元素即可。刷新范围＝当前这一页看得见的收藏，不会一口气重拉全库。
+async function saveRefreshedAsset(asset, patch, codec = null, blob = null) {
+  const worker = codec || await browserCodec();
+  let nextPreview = patch.preview_url || "";
+  if (blob) {
+    const previewBytes = new Uint8Array(await blob.arrayBuffer());
+    nextPreview = await uploadBrowserObject("previews", await worker.sha256Hex(previewBytes), "jpg", previewBytes, "image/jpeg", `${asset.name || "收藏"}-预览`);
+  }
+  if (!nextPreview) return asset;
+  // 记录是不可变对象：同一个 id 再写一条 records 会被 Worker 当成重放忽略
+  // （索引里还是旧版本），预览地址必须走 PATCH 才会落到库索引。
+  const payload = {record_sha256: asset.record_sha256, preview_url: nextPreview};
+  if (patch.preview_kind) payload.preview_kind = patch.preview_kind;
+  if (patch.preview_details) payload.preview_details = patch.preview_details;
+  const result = await api(`/api/${recordKindPath("asset")}/${encodeURIComponent(asset.id)}`, {
+    method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload),
+  });
+  const next = {...asset, ...patch, preview_url: nextPreview, ...(result?.item || {})};
+  const index = state.assets.findIndex(item => String(item.id) === String(asset.id));
+  if (index >= 0) state.assets[index] = next;
+  updateCachedRecord(next);
+  return next;
+}
+// 从 object 池取回原包，按容器类型重画预览：图集 / 阅读主题 / 高亮各一套；
+// 加密包先用明文图片拼，拼不出图再请 Worker 解出高亮规则摘要画色条。
+async function rebuildAssetPreviewBlob(asset, codec) {
+  const source = String(asset.object_url || asset.url || asset.download_url || "");
+  if (!source) return null;
+  const response = await fetchWithReadTimeout(assetUrl(source), {headers: requestHeaders(), cache: "no-store"}, 60000);
+  if (!response.ok) throw new Error(`读取原包失败（HTTP ${response.status}）`);
+  const raw = new Uint8Array(await response.arrayBuffer());
+  let entries = [], inspection;
+  try {
+    entries = await codec.readZipEntries(raw);
+    inspection = {format: entries.containerFormat || "red_v4", header: null};
+  } catch (error) {
+    if (error?.code !== "private_red_unsupported") throw error;
+    inspection = await codec.inspectContainer(raw);
+    entries = await codec.extractPrivatePreviewImages(raw);
+  }
+  const sourceName = asset.file_name || asset.source_file_name || asset.name || "";
+  const kind = redPartKind(entries, {header: inspection?.header, container_format: inspection.format, source_name: sourceName});
+  let blob = null;
+  if (entries.length) {
+    blob = kind ? (await composeRedPartPreviewBlob(entries, codec, kind)) || await composeThemePreviewBlob(entries, codec) : await composeThemePreviewBlob(entries, codec);
+  }
+  if (!blob && String(inspection?.format || "") === "red_private_v2" && /highlight/i.test(String(inspection?.header?.resourceType || ""))) {
+    const summary = await privatePreviewSummary(raw).catch(() => null);
+    if (summary) blob = await composeHighlightRulePreviewBlob(summary, asset.name);
+  }
+  return blob;
+}
+// SVG / HTML 的预览地址不变，重载时加个时间戳绕开缓存，点一次就能看到最新内容。
+function reloadAssetPreviewElements() {
+  const stamp = String(Date.now());
+  $$("#assetList .asset-preview-button img, #importedAssetList .asset-preview-button img").forEach(image => {
+    const source = image.getAttribute("src");
+    if (!source) return;
+    const url = new URL(source, location.href);
+    url.searchParams.set("v", stamp);
+    image.src = url.href;
+  });
+  $$("#assetList .asset-html-preview, #importedAssetList .asset-html-preview").forEach(frame => {
+    const source = frame.getAttribute("src");
+    if (!source) return;
+    const url = new URL(source, location.href);
+    url.searchParams.set("v", stamp);
+    frame.src = url.href;
+  });
+}
+async function refreshAssetPreviews() {
+  if (state.operation) { toast("请等待当前操作完成"); return; }
+  const visible = catalogPage("asset");
+  if (!visible.length) { toast("这一页没有收藏可刷新"); return; }
+  const button = $("#refreshAssetPreviews");
+  const label = button?.textContent || "刷新预览";
+  if (button) { button.disabled = true; button.textContent = "刷新中…"; }
+  let rebuilt = 0, reloaded = 0, failed = 0;
+  try {
+    const cloud = browserSyncEnabled();
+    const codec = cloud ? await browserCodec() : null;
+    for (const asset of visible) {
+      const type = String(asset.asset_type || asset.extension || "").toLowerCase();
+      if (type !== "red") { reloaded += 1; continue; }
+      // 本地老服务没有对象池，只能重载已有预览，不能重画。
+      if (!codec || !asset.object_url) { failed += 1; continue; }
+      try {
+        const blob = await rebuildAssetPreviewBlob(asset, codec);
+        if (!blob) { failed += 1; continue; }
+        const category = assetRedCategory(asset);
+        await saveRefreshedAsset(asset, {preview_kind: category === "高亮" ? "highlight" : (asset.preview_kind || "")}, codec, blob);
+        rebuilt += 1;
+      } catch (error) {
+        console.warn("刷新收藏预览失败", asset.name, error);
+        failed += 1;
+      }
+    }
+  } finally {
+    if (button) { button.disabled = false; button.textContent = label; }
+  }
+  renderAssets();
+  if (reloaded) reloadAssetPreviewElements();
+  const parts = [];
+  if (rebuilt) parts.push(`重画 ${rebuilt} 个 RED 预览`);
+  if (reloaded) parts.push(`重载 ${reloaded} 个网页预览`);
+  if (failed) parts.push(`${failed} 个失败`);
+  toast(parts.length ? `预览已刷新：${parts.join("，")}` : "没有可刷新的预览");
+}
 // 入库早于「高亮规则预览」的收藏没有图。补一次预览：读原包 → Worker 解出规则
 // 摘要 → 画图 → 上传 previews → 写一条新版本记录（记录不可变，用新版本覆盖旧的）。
 async function repairMissingPrivatePreviews() {
@@ -383,20 +493,10 @@ async function repairMissingPrivatePreviews() {
       if (!summary) continue;
       const blob = await composeHighlightRulePreviewBlob(summary, asset.name);
       if (!blob) continue;
-      const previewBytes = new Uint8Array(await blob.arrayBuffer());
-      const previewPath = await uploadBrowserObject("previews", await codec.sha256Hex(previewBytes), "jpg", previewBytes, "image/jpeg", `${asset.name || "高亮规则"}-预览`);
-      const next = {
-        ...asset, preview_url: previewPath, preview_kind: "highlight",
+      await saveRefreshedAsset(asset, {
+        preview_kind: "highlight",
         preview_details: {...(asset.preview_details || {}), kind: "highlight", rules: Array.isArray(summary.rules) ? summary.rules.length : 0, rule_count: Number(summary.rule_count) || 0},
-        author: assetAuthor(asset), updated_at: new Date().toISOString(),
-      };
-      delete next.record_sha256;
-      const bytes = new TextEncoder().encode(JSON.stringify(next));
-      next.record_sha256 = await codec.sha256Hex(bytes);
-      await uploadBrowserObject("records", next.record_sha256, "json", bytes, "application/json", "", next);
-      const index = state.assets.findIndex(item => String(item.id) === String(asset.id));
-      if (index >= 0) state.assets[index] = next;
-      updateCachedRecord(next);
+      }, codec, blob);
       repaired += 1;
     } catch (error) {
       console.warn("高亮规则预览补全失败", asset.name, error);
@@ -4420,8 +4520,35 @@ function assetPreview(asset, compact = false) {
   if (type === "SVG") return `<button class="preview-open asset-preview-button" type="button" aria-label="${escapeHtml(asset.name || asset.file_name || "SVG")}，点击放大" data-preview-url="${escapeHtml(url)}" data-preview-title="${escapeHtml(asset.name || asset.file_name || "SVG")}" data-preview-description="SVG 收藏预览。"><img src="${escapeHtml(url)}" alt="${escapeHtml(asset.name || asset.file_name || "SVG")}" loading="lazy" /></button>`;
   // A blank sandbox keeps user HTML isolated from the library page while still
   // allowing CSS and markup to render for a useful thumbnail.
-  return `<iframe class="asset-html-preview ${compact ? "is-compact" : ""}" title="${escapeHtml(asset.name || asset.file_name || "HTML")} 预览" src="${escapeHtml(url)}" sandbox="" loading="lazy"></iframe>`;
+  // iframe 外面套一层定尺寸的框：页面按桌面宽度排版，再整体缩到卡片里。直接把
+  // 页面塞进 140px 宽的 iframe 会触发窄屏排版、出现横向滚动条，内容被裁掉。
+  return `<div class="asset-html-frame${compact ? " is-compact" : ""}"><iframe class="asset-html-preview" title="${escapeHtml(asset.name || asset.file_name || "HTML")} 预览" src="${escapeHtml(url)}" sandbox="" loading="lazy"></iframe></div>`;
 }
+// HTML 预览统一按 1024px 宽的桌面视口排版，再等比缩放到外层框里：整页内容都能
+// 看到，也不会把模板自带的窄屏断点当成最终样式。缩放比只取决于外层框的宽度，
+// iframe 绝对定位，不会出现「缩放 → 重排 → 再缩放」的回环。
+const HTML_PREVIEW_VIEWPORT_WIDTH = 1024;
+function fitHtmlPreviewFrame(frame) {
+  const preview = frame.querySelector(".asset-html-preview");
+  const width = frame.clientWidth, height = frame.clientHeight;
+  if (!preview || width < 2 || height < 2) return;
+  const scale = width / HTML_PREVIEW_VIEWPORT_WIDTH;
+  preview.style.width = `${HTML_PREVIEW_VIEWPORT_WIDTH}px`;
+  preview.style.height = `${Math.round(height / scale)}px`;
+  preview.style.transform = `scale(${scale})`;
+  frame.classList.add("is-fitted");
+}
+function fitHtmlPreviews(root = document) {
+  root.querySelectorAll(".asset-html-frame").forEach(fitHtmlPreviewFrame);
+}
+function scheduleFitHtmlPreviews(root = document) {
+  requestAnimationFrame(() => fitHtmlPreviews(root));
+}
+let htmlPreviewFitTimer;
+addEventListener("resize", () => {
+  clearTimeout(htmlPreviewFitTimer);
+  htmlPreviewFitTimer = setTimeout(() => fitHtmlPreviews(), 120);
+});
 function libraryRecordCard(kind,record,preview,caption) {
   const name=(kind==='font'?record.family:record.name)||record.name||record.file_name||'未命名',tags=recordTags(record),id=escapeHtml(record.id);
   // 收藏库里图集 / 高亮要显示自己的分类，不能只靠预览角标的小字。
@@ -4444,7 +4571,7 @@ function libraryRecordCard(kind,record,preview,caption) {
     return `<article class="theme-card catalog-card asset-card asset-compact" data-record-card="asset" data-asset-id="${id}">
     <button class="theme-card-hit" type="button" data-record-open="asset" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情"></button>
     <div class="asset-compact-head"><div class="item-heading">${selectInput('asset',record.id,name,isAssetBusy('asset',record.id))}<h3 class="asset-compact-title">${escapeHtml(name)}</h3></div><div class="asset-compact-meta"><span class="theme-categories">${typeCategory?`<em class="is-key">${escapeHtml(typeCategory)}</em>`:''}<em class="${author?'':'is-empty'}" title="${author?`作者：${escapeHtml(author)}`:'未填写作者，点开卡片可以补上'}">${escapeHtml(author||'未填作者')}</em></span><span class="asset-compact-size">${record.bytes?formatBytes(record.bytes):''}</span></div></div>
-    <div class="theme-preview"><div class="theme-thumbnail catalog-asset-preview">${preview}</div><button class="theme-more" type="button" data-record-details="asset" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情">⋯</button></div>
+    <div class="theme-preview"><div class="theme-thumbnail catalog-asset-preview${preview.includes("asset-html-frame") ? " is-html" : ""}">${preview}</div><button class="theme-more" type="button" data-record-details="asset" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情">⋯</button></div>
     ${record.sync_error?`<p class="inline-error">${escapeHtml(typeof record.sync_error==='string'?record.sync_error:Object.values(record.sync_error).join('；'))}</p>`:''}
   </article>`;
   }
@@ -4466,6 +4593,7 @@ function openRecordDialog(kind,id) {
   $('[data-record-delete]',body).onclick=async()=>{await deleteSelectedRecords(kind,[id]);if(!state[kind+'s'].some(item=>String(item.id)===String(id)))dialog.close();};
   if(font){$$('[data-font-retry]',body).forEach(button=>button.addEventListener('click',event=>{event.stopPropagation();retryFontPreview(record);}));loadFontPreviewFace(record);}
   if(!dialog.open)dialog.showModal();
+  scheduleFitHtmlPreviews(body);
   updateBulkControls();
 }
 function assetCard(asset, imported = false) {
@@ -4496,12 +4624,14 @@ function renderAssets() {
   $$(".sync-asset").forEach(button => button.addEventListener("click", () => syncAsset(button.dataset.id)));
   $$(".delete-record[data-kind='asset']").forEach(button => button.addEventListener("click", () => deleteSelectedRecords("asset", [button.dataset.id])));
   updateBulkControls();
+  scheduleFitHtmlPreviews(list);
 }
 function renderImportedAssets() {
   const assets = state.importAssetIds.map(id => state.assets.find(asset => asset.id === id)).filter(Boolean);
   $("#assetImportResults").hidden = !assets.length;
   $("#assetBatchDescription").textContent = `本批 ${assets.length} 个收藏；此前收录的文件在收藏库中单独查看。`;
   $("#importedAssetList").innerHTML = assets.map(asset => assetCard(asset, true)).join("");
+  scheduleFitHtmlPreviews($("#importedAssetList"));
 }
 async function loadAssets(force = false) {
   let records = [];
@@ -6816,6 +6946,7 @@ for (const [kind, {render}] of Object.entries(libraryKinds)) {
   const capital = kind[0].toUpperCase() + kind.slice(1);
   const refreshId = kind === "asset" ? "refreshAssets" : `refresh${capital}s`;
   $(`#${refreshId}`).addEventListener("click", () => refreshCatalog(kind));
+  if (kind === "asset") $("#refreshAssetPreviews").addEventListener("click", () => refreshAssetPreviews());
   let searchTimer;
   input.addEventListener("input", () => {
     state[kind + "Search"] = input.value;

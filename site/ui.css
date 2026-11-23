@@ -162,7 +162,7 @@
 .catalog-grid .font-specimen .specimen-hero {font-size:clamp(30px,4.6vw,52px);}
 /* 手机上父容器按 16/10 定高，min-height 会把样张底部顶出卡片被裁掉。 */
 @media(max-width:680px){.catalog-grid .font-preview-frame {min-height:0;}}
-.catalog-grid .asset-preview-button,.catalog-grid .asset-html-preview {width:100%;height:100%;min-height:0;max-height:none;aspect-ratio:auto;border:0;border-radius:0;padding:0;pointer-events:none;}
+.catalog-grid .asset-preview-button,.catalog-grid .asset-html-frame {width:100%;height:100%;min-height:0;max-height:none;aspect-ratio:auto;border:0;border-radius:0;padding:0;pointer-events:none;}
 .catalog-grid .asset-preview-button img {width:100%;height:100%;object-fit:contain;}
 .catalog-grid .theme-meta {justify-content:space-between;gap:8px;}
 .catalog-grid .theme-info .item-select {position:relative;inset:auto;filter:none;flex-shrink:0;}
@@ -193,6 +193,9 @@
 .asset-library-grid .asset-compact .theme-preview {padding:0;}
 .asset-library-grid .asset-compact .theme-thumbnail {aspect-ratio:4/3;max-height:none;border:1px solid var(--rule);border-radius:9px;background:#f7f3ea;padding:5px;}
 .asset-library-grid .asset-compact .theme-thumbnail img {object-fit:contain;object-position:center;}
+/* HTML 预览是等比缩放的整页，留内边距只会白占地方。 */
+.asset-library-grid .asset-compact .theme-thumbnail.is-html,
+.asset-library-grid.is-list .asset-compact .theme-thumbnail.is-html {padding:0;}
 .asset-library-grid .asset-compact .preview-caption {display:none;}
 .asset-library-grid .asset-compact .theme-more {top:5px;right:5px;width:24px;height:24px;font-size:13px;}
 .asset-library-grid .asset-preview-empty {height:100%;border-radius:9px;}
@@ -229,7 +232,7 @@
 .record-dialog-body {display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:24px;padding:20px;max-height:75dvh;overflow:auto;}
 .record-dialog-preview {min-width:0;}
 .record-dialog-preview .font-preview-frame {margin:0;aspect-ratio:4/3;}
-.record-dialog-preview .asset-preview-button,.record-dialog-preview .asset-html-preview {width:100%;height:360px;max-height:56dvh;}
+.record-dialog-preview .asset-preview-button,.record-dialog-preview .asset-html-frame {width:100%;height:360px;max-height:56dvh;}
 .record-dialog-preview .asset-preview-button img {object-fit:contain;width:100%;height:100%;}
 .record-dialog-fields {display:grid;gap:20px;align-content:start;min-width:0;}
 .record-dialog-fields form {display:grid;gap:13px;}
@@ -281,7 +284,7 @@
   .catalog-grid .theme-meta {flex-wrap:wrap;}
   .page-jump {justify-content:center;}
   .record-dialog-body {grid-template-columns:1fr;gap:16px;padding:16px;}
-  .record-dialog-preview .asset-preview-button,.record-dialog-preview .asset-html-preview {height:250px;}
+  .record-dialog-preview .asset-preview-button,.record-dialog-preview .asset-html-frame {height:250px;}
   .settings-section {grid-template-columns:1fr;gap:14px;padding:20px 0;}
   .settings-section.settings-disclosure > .settings-fields,.settings-section.settings-disclosure > form {margin-left:0;}
   .settings-disclosure > summary small {display:block;margin-left:16px;margin-top:3px;}

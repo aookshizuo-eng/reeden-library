@@ -89,6 +89,8 @@ try{
   await p.waitForFunction(()=>document.querySelectorAll('#assetList .asset-card').length===2,{},{timeout:20000});
   const chips=await p.locator('#assetList .theme-categories em.is-key, #assetList .category-chip.is-key').allInnerTexts();
   assert.ok(chips.includes('图集')&&chips.includes('高亮'),`收藏卡必须显示图集/高亮分类：${chips.join(',')}`);
+  // 缩略图是 loading="lazy"，卡片刚渲染时 naturalWidth 可能还是 0，等解码完再断言。
+  await p.waitForFunction(()=>[...document.querySelectorAll('#assetList .theme-thumbnail img')].every(image=>image.complete&&image.naturalWidth>0),{},{timeout:15000});
   const previews=await p.locator('#assetList .theme-thumbnail img').evaluateAll(images=>images.map(image=>({src:image.currentSrc||image.src,w:image.naturalWidth})));
   assert.equal(previews.length,2,'两张收藏卡都要有图片预览');
   assert.ok(previews.every(item=>item.w>0&&item.src.includes('/previews/')),`预览必须是已上传的 JPG：${JSON.stringify(previews)}`);
