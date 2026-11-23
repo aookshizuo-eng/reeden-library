@@ -118,6 +118,10 @@ try{
   assert.equal(await counts('svg'),1,'SVG 标签应只剩 SVG 收藏');
   assert.equal(await counts('html'),0,'这次没有 HTML 收藏，点进去应空');
   assert.equal(await counts('all'),4);
+  const tabCounts=await p.locator('#assetFilterTabs [data-asset-filter]').evaluateAll(tabs=>tabs.map(tab=>({value:tab.dataset.assetFilter,count:Number(tab.querySelector('span')?.textContent||0)})));
+  const sum=tabCounts.filter(tab=>tab.value!=='all').reduce((total,tab)=>total+tab.count,0);
+  assert.equal(sum,4,'各分类计数相加应等于全部，不能再出现未分类与其它分类重复');
+  assert.ok(!tabCounts.some(tab=>tab.value==='ungrouped'),'都能归类时不应再显示「未分类」标签');
   const chips=await p.locator('#assetList .theme-categories em.is-key').allInnerTexts();
   for(const name of ['图集','高亮','阅读主题','SVG']) assert.ok(chips.includes(name),`收藏卡缺少类型标签 ${name}：${chips.join(',')}`);
   await p.waitForFunction(()=>[...document.querySelectorAll('#assetList .asset-card img')].every(img=>img.complete&&img.naturalWidth>0),{},{timeout:20000});

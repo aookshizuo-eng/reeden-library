@@ -414,61 +414,67 @@ async function rebuildAssetPreviewBlob(asset, codec) {
   }
   return blob;
 }
-// SVG / HTML 的预览地址不变，重载时加个时间戳绕开缓存，点一次就能看到最新内容。
-function reloadAssetPreviewElements() {
+// 单个收藏的「刷新预览」：RED 包重新拉原包、按当前容器重画，并写一条新版本
+// 记录（记录不可变，新版本靠 updated_at 覆盖旧的）；SVG / HTML 是浏览器即时
+// 渲染，只给这一张卡的预览加时间戳重载，不碰其他收藏。
+function findAssetCard(assetId) {
+  return [...document.querySelectorAll("#assetList .asset-card, #importedAssetList .asset-card")]
+    .find(card => card.dataset.assetId === String(assetId)) || null;
+}
+function setAssetRefreshBusy(button, busy) {
+  if (!button) return;
+  if (busy && button.dataset.refreshLabel === undefined) button.dataset.refreshLabel = button.textContent;
+  button.disabled = busy;
+  button.setAttribute("aria-busy", busy ? "true" : "false");
+  button.textContent = busy ? "…" : (button.dataset.refreshLabel || "⟳");
+}
+function reloadAssetPreviewElements(root = document) {
   const stamp = String(Date.now());
-  $$("#assetList .asset-preview-button img, #importedAssetList .asset-preview-button img").forEach(image => {
-    const source = image.getAttribute("src");
+  root.querySelectorAll(".asset-preview-button img, .asset-html-preview").forEach(element => {
+    const source = element.getAttribute("src");
     if (!source) return;
     const url = new URL(source, location.href);
     url.searchParams.set("v", stamp);
-    image.src = url.href;
-  });
-  $$("#assetList .asset-html-preview, #importedAssetList .asset-html-preview").forEach(frame => {
-    const source = frame.getAttribute("src");
-    if (!source) return;
-    const url = new URL(source, location.href);
-    url.searchParams.set("v", stamp);
-    frame.src = url.href;
+    element.src = url.href;
   });
 }
-async function refreshAssetPreviews() {
-  if (state.operation) { toast("请等待当前操作完成"); return; }
-  const visible = catalogPage("asset");
-  if (!visible.length) { toast("这一页没有收藏可刷新"); return; }
-  const button = $("#refreshAssetPreviews");
-  const label = button?.textContent || "刷新预览";
-  if (button) { button.disabled = true; button.textContent = "刷新中…"; }
-  let rebuilt = 0, reloaded = 0, failed = 0;
+async function refreshAssetPreview(assetId, button = null) {
+  if (state.operation) { toast("请等待当前操作完成"); return false; }
+  const asset = state.assets.find(item => String(item.id) === String(assetId));
+  if (!asset) { toast("找不到这个收藏"); return false; }
+  setAssetRefreshBusy(button, true);
+  setOperation("refresh-preview");
+  let rebuilt = false;
   try {
-    const cloud = browserSyncEnabled();
-    const codec = cloud ? await browserCodec() : null;
-    for (const asset of visible) {
-      const type = String(asset.asset_type || asset.extension || "").toLowerCase();
-      if (type !== "red") { reloaded += 1; continue; }
-      // 本地老服务没有对象池，只能重载已有预览，不能重画。
-      if (!codec || !asset.object_url) { failed += 1; continue; }
-      try {
-        const blob = await rebuildAssetPreviewBlob(asset, codec);
-        if (!blob) { failed += 1; continue; }
-        const category = assetRedCategory(asset);
-        await saveRefreshedAsset(asset, {preview_kind: category === "高亮" ? "highlight" : (asset.preview_kind || "")}, codec, blob);
-        rebuilt += 1;
-      } catch (error) {
-        console.warn("刷新收藏预览失败", asset.name, error);
-        failed += 1;
-      }
+    const type = String(asset.asset_type || asset.extension || "").toLowerCase();
+    if (type === "red") {
+      // 本地老服务没有对象池，不能重画原包。
+      if (!browserSyncEnabled() || !asset.object_url) throw new Error("本地模式没有原包，暂时不能重画");
+      const codec = await browserCodec();
+      const blob = await rebuildAssetPreviewBlob(asset, codec);
+      if (!blob) throw new Error("这个包里没有能生成预览的内容");
+      const category = assetRedCategory(asset);
+      await saveRefreshedAsset(asset, {preview_kind: category === "高亮" ? "highlight" : (asset.preview_kind || "")}, codec, blob);
+      rebuilt = true;
     }
+  } catch (error) {
+    console.warn("刷新收藏预览失败", asset.name, error);
+    toast(`刷新失败：${error?.message || "请稍后再试"}`);
+    return false;
   } finally {
-    if (button) { button.disabled = false; button.textContent = label; }
+    setOperation("");
+    setAssetRefreshBusy(button, false);
   }
-  renderAssets();
-  if (reloaded) reloadAssetPreviewElements();
-  const parts = [];
-  if (rebuilt) parts.push(`重画 ${rebuilt} 个 RED 预览`);
-  if (reloaded) parts.push(`重载 ${reloaded} 个网页预览`);
-  if (failed) parts.push(`${failed} 个失败`);
-  toast(parts.length ? `预览已刷新：${parts.join("，")}` : "没有可刷新的预览");
+  if (rebuilt) { renderAssets(); renderImportedAssets(); }
+  const card = findAssetCard(assetId);
+  if (card) reloadAssetPreviewElements(card);
+  const dialogForm = $("#recordDialogBody [data-record-form]");
+  if ($("#recordDialog")?.open && dialogForm?.dataset.recordForm === String(assetId)) {
+    if (rebuilt) openRecordDialog("asset", assetId);
+    else reloadAssetPreviewElements($("#recordDialogBody"));
+  }
+  toast(rebuilt ? "预览已刷新" : "预览已重新载入");
+  return true;
 }
 // 入库早于「高亮规则预览」的收藏没有图。补一次预览：读原包 → Worker 解出规则
 // 摘要 → 画图 → 上传 previews → 写一条新版本记录（记录不可变，用新版本覆盖旧的）。
@@ -4431,11 +4437,24 @@ function fontMatchesSearch(font) {
 function fontMatchesCategory(font) {
   return state.fontFilter === "all" || fontCategory(font) === state.fontFilter;
 }
-function assetTypeLabel(asset) {
+// 每个收藏只属于一个主分类，"未分类" 是兜底，绝不和其它分类重叠。
+// 之前用「有没有作者/风格」判未分类，导致图集、SVG 同时出现在两个标签里。
+function assetPrimaryCategory(asset) {
+  const category = assetRedCategory(asset);
+  if (category === "图集" || category === "高亮" || category === "阅读主题") return category;
   const type = String(asset.asset_type || asset.extension || "").toLowerCase();
+  if (type === "svg") return "SVG";
+  if (type === "html" || type === "") return "HTML";
+  return "未分类";
+}
+function assetTypeLabel(asset) {
+  const category = assetPrimaryCategory(asset);
+  if (category === "未分类") {
+    const type = String(asset.asset_type || asset.extension || "").toLowerCase();
+    return type === "red" ? "主题部件" : "其他";
+  }
   // 图集 / 高亮是 RED 包，不是网页：标签直接显示分类，避免被当成 HTML。
-  if (type === "red") return String(asset.red_category || "主题部件");
-  return type === "svg" ? "SVG" : "HTML";
+  return category;
 }
 function assetRedCategory(asset) {
   return String(asset.red_category || asset.category || "").trim();
@@ -4451,15 +4470,9 @@ function assetAuthor(record) {
 }
 function assetMatchesFilter(asset) {
   const mode = state.assetFilter || "all";
-  // 收藏库先按大类分：SVG / HTML / 主题部件（RED 包），再在部件里分图集、高亮。
-  const type = String(asset.asset_type || asset.extension || "").toLowerCase();
-  if (mode === "svg" && type !== "svg") return false;
-  if (mode === "html" && type !== "html" && type !== "") return false;
-  if (mode === "red" && type !== "red") return false;
-  if (mode === "gallery" && assetRedCategory(asset) !== "图集") return false;
-  if (mode === "highlight" && assetRedCategory(asset) !== "高亮") return false;
-  if (mode === "reader" && assetRedCategory(asset) !== "阅读主题") return false;
-  if (mode === "ungrouped" && (String(asset.author || "").trim() || String(asset.style || "").trim())) return false;
+  const category = ASSET_FILTER_CATEGORY[mode];
+  if (category) return assetPrimaryCategory(asset) === category && assetMatchesSearch(asset);
+  // 兼容旧链接里残留的 author / style 值。
   if (mode === "author" && !String(asset.author || "").trim()) return false;
   if (mode === "style" && !String(asset.style || "").trim()) return false;
   return assetMatchesSearch(asset);
@@ -4473,25 +4486,20 @@ function assetMatchesSearch(asset) {
 // 直接带数量，不必先展开下拉再找。数量跟搜索结果走，和字体库的计数规则一致。
 const ASSET_FILTER_TABS = [
   { value: "all", label: "全部" },
-  { value: "gallery", label: "封面图集" },
-  { value: "highlight", label: "高亮包" },
-  { value: "reader", label: "阅读主题" },
-  { value: "svg", label: "SVG" },
-  { value: "html", label: "HTML" },
-  { value: "ungrouped", label: "未分类" },
+  { value: "gallery", label: "封面图集", category: "图集" },
+  { value: "highlight", label: "高亮包", category: "高亮" },
+  { value: "reader", label: "阅读主题", category: "阅读主题" },
+  { value: "svg", label: "SVG", category: "SVG" },
+  { value: "html", label: "HTML", category: "HTML" },
+  { value: "ungrouped", label: "未分类", category: "未分类" },
 ];
+const ASSET_FILTER_CATEGORY = Object.fromEntries(ASSET_FILTER_TABS.filter(tab => tab.category).map(tab => [tab.value, tab.category]));
 function assetFilterCounts(assets) {
-  const counts = { all: assets.length, gallery: 0, highlight: 0, reader: 0, svg: 0, html: 0, ungrouped: 0, red: 0 };
+  const counts = { all: assets.length };
+  ASSET_FILTER_TABS.forEach(tab => { if (tab.value !== "all") counts[tab.value] = 0; });
   assets.forEach(asset => {
-    const type = String(asset.asset_type || asset.extension || "").toLowerCase();
-    if (type === "svg") counts.svg += 1;
-    else if (type === "html") counts.html += 1;
-    else if (type === "red") counts.red += 1;
-    const category = assetRedCategory(asset);
-    if (category === "图集") counts.gallery += 1;
-    else if (category === "高亮") counts.highlight += 1;
-    else if (category === "阅读主题") counts.reader += 1;
-    if (!String(asset.author || "").trim() && !String(asset.style || "").trim()) counts.ungrouped += 1;
+    const tab = ASSET_FILTER_TABS.find(item => item.category === assetPrimaryCategory(asset));
+    if (tab) counts[tab.value] += 1;
   });
   return counts;
 }
@@ -4500,9 +4508,10 @@ function renderAssetFilterTabs() {
   if (!container) return;
   const counts = assetFilterCounts(state.assets.filter(assetMatchesSearch));
   if (state.assetFilter !== "all" && !ASSET_FILTER_TABS.some(tab => tab.value === state.assetFilter)) state.assetFilter = "all";
-  // 七个固定分类常驻（数量为 0 也留着）：标签位置稳定，点一下就知道这类是空的，
-  // 不会因为数量变化而整排重排。
+  // 固定分类常驻（数量为 0 也留着）让标签位置稳定；"未分类" 只是兜底，
+  // 没有这类收藏时干脆不显示，避免和真正的分类并列造成重复感。
   container.innerHTML = ASSET_FILTER_TABS
+    .filter(tab => tab.value !== "ungrouped" || counts.ungrouped > 0)
     .map(tab => `<button class="filter-chip asset-filter-tab${tab.value === state.assetFilter ? " is-active" : ""}" type="button" role="tab" aria-selected="${tab.value === state.assetFilter}" data-asset-filter="${tab.value}">${escapeHtml(tab.label)} <span>${counts[tab.value] || 0}</span></button>`)
     .join("");
 }
@@ -4551,11 +4560,11 @@ addEventListener("resize", () => {
 });
 function libraryRecordCard(kind,record,preview,caption) {
   const name=(kind==='font'?record.family:record.name)||record.name||record.file_name||'未命名',tags=recordTags(record),id=escapeHtml(record.id);
-  // 收藏库里图集 / 高亮要显示自己的分类，不能只靠预览角标的小字。
-  const redCategory = kind==='asset' ? assetRedCategory(record) : "";
   const author = kind==='asset' ? assetAuthor(record) : "";
   // SVG / HTML 也给一个实心分类标签，收藏库一眼能分出网页和主题部件。
-  const typeCategory = kind==='asset' ? (redCategory || assetTypeLabel(record)) : "";
+  // 每个收藏只有一个主分类标签，未归类的写「其他」，不再和类型徽标重复。
+  const primaryCategory = kind==='asset' ? assetPrimaryCategory(record) : "";
+  const typeCategory = primaryCategory === "未分类" ? "其他" : primaryCategory;
   const categories = kind==='font' ? [fontCategory(record)] : record.style ? [record.style] : [];
   // 字体卡片直接放下载入口，不必先点开详情。网络字体用 downloadUrl 的下载
   // 语义（download=1 + name=），本地未同步的字体无地址则不显示按钮。
@@ -4571,7 +4580,7 @@ function libraryRecordCard(kind,record,preview,caption) {
     return `<article class="theme-card catalog-card asset-card asset-compact" data-record-card="asset" data-asset-id="${id}">
     <button class="theme-card-hit" type="button" data-record-open="asset" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情"></button>
     <div class="asset-compact-head"><div class="item-heading">${selectInput('asset',record.id,name,isAssetBusy('asset',record.id))}<h3 class="asset-compact-title">${escapeHtml(name)}</h3></div><div class="asset-compact-meta"><span class="theme-categories">${typeCategory?`<em class="is-key">${escapeHtml(typeCategory)}</em>`:''}<em class="${author?'':'is-empty'}" title="${author?`作者：${escapeHtml(author)}`:'未填写作者，点开卡片可以补上'}">${escapeHtml(author||'未填作者')}</em></span><span class="asset-compact-size">${record.bytes?formatBytes(record.bytes):''}</span></div></div>
-    <div class="theme-preview"><div class="theme-thumbnail catalog-asset-preview${preview.includes("asset-html-frame") ? " is-html" : ""}">${preview}</div><button class="theme-more" type="button" data-record-details="asset" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情">⋯</button></div>
+    <div class="theme-preview"><div class="theme-thumbnail catalog-asset-preview${preview.includes("asset-html-frame") ? " is-html" : ""}">${preview}</div><button class="asset-refresh-preview" type="button" data-refresh-asset="${id}" title="只刷新这一张预览" aria-label="刷新 ${escapeHtml(name)} 的预览">⟳</button><button class="theme-more" type="button" data-record-details="asset" data-record-id="${id}" aria-label="查看 ${escapeHtml(name)} 的详情">⋯</button></div>
     ${record.sync_error?`<p class="inline-error">${escapeHtml(typeof record.sync_error==='string'?record.sync_error:Object.values(record.sync_error).join('；'))}</p>`:''}
   </article>`;
   }
@@ -4588,7 +4597,7 @@ function openRecordDialog(kind,id) {
   $('#recordDialogTitle').textContent=name;
   $('#recordDialogDescription').textContent=`${font?'字体':assetTypeLabel(record)} · ${formatBytes(record.bytes)} · ${syncLabel(record)}`;
   const url=downloadUrl(record.download_url||record.object_url||record.url||'',record.file_name||name);
-  body.innerHTML=`<div class="record-dialog-preview">${font?fontPreviewMarkup(record):assetPreview(record)}</div><div class="record-dialog-fields"><form class="asset-meta-form" data-record-form="${escapeHtml(record.id)}" data-record-kind="${kind}">${font?'':`<label>作者<input name="author" value="${escapeHtml(kind==='asset'?assetAuthor(record):(record.author||''))}" placeholder="留空也可以，之后随时补" /></label>`}<label>${font?'分类':'风格'}<input name="style" value="${escapeHtml(font?fontCategory(record):record.style||'')}" /></label><label>标签<input name="tags" value="${escapeHtml(recordTags(record).join(', '))}" placeholder="用逗号分隔" /></label><button class="secondary-button" type="submit">保存分类</button></form><div class="record-detail-actions">${url?`<a class="primary-button" href="${escapeHtml(url)}" download="${escapeHtml(record.file_name||name)}">${font?'下载字体':'下载文件'}</a>`:''}${savedToCloud(record)?'':`<button class="secondary-button" data-record-sync>同步到 R2</button>`}<button class="text-button danger-text" data-record-delete>删除</button></div><details><summary>文件信息</summary><p class="field-help">${escapeHtml(font?(record.file_name||''):assetFileNameLabel(record))}<br>SHA ${escapeHtml(record.sha256||'未记录')}</p>${record.cleanup_warning?`<p class="inline-error">${escapeHtml(typeof record.cleanup_warning==='string'?record.cleanup_warning:Object.values(record.cleanup_warning).join('；'))}</p>`:''}</details></div>`;
+  body.innerHTML=`<div class="record-dialog-preview">${font?fontPreviewMarkup(record):assetPreview(record)}</div><div class="record-dialog-fields"><form class="asset-meta-form" data-record-form="${escapeHtml(record.id)}" data-record-kind="${kind}">${font?'':`<label>作者<input name="author" value="${escapeHtml(kind==='asset'?assetAuthor(record):(record.author||''))}" placeholder="留空也可以，之后随时补" /></label>`}<label>${font?'分类':'风格'}<input name="style" value="${escapeHtml(font?fontCategory(record):record.style||'')}" /></label><label>标签<input name="tags" value="${escapeHtml(recordTags(record).join(', '))}" placeholder="用逗号分隔" /></label><button class="secondary-button" type="submit">保存分类</button></form><div class="record-detail-actions">${url?`<a class="primary-button" href="${escapeHtml(url)}" download="${escapeHtml(record.file_name||name)}">${font?'下载字体':'下载文件'}</a>`:''}${savedToCloud(record)?'':`<button class="secondary-button" data-record-sync>同步到 R2</button>`}${font?'':`<button class="secondary-button" data-refresh-asset="${escapeHtml(String(record.id))}" data-refresh-label="刷新预览">刷新预览</button>`}<button class="text-button danger-text" data-record-delete>删除</button></div><details><summary>文件信息</summary><p class="field-help">${escapeHtml(font?(record.file_name||''):assetFileNameLabel(record))}<br>SHA ${escapeHtml(record.sha256||'未记录')}</p>${record.cleanup_warning?`<p class="inline-error">${escapeHtml(typeof record.cleanup_warning==='string'?record.cleanup_warning:Object.values(record.cleanup_warning).join('；'))}</p>`:''}</details></div>`;
   const sync=$('[data-record-sync]',body);if(sync)sync.onclick=async()=>{sync.disabled=true;try{await(font?syncFont(id):syncAsset(id));openRecordDialog(kind,id);}finally{sync.disabled=false;}};
   $('[data-record-delete]',body).onclick=async()=>{await deleteSelectedRecords(kind,[id]);if(!state[kind+'s'].some(item=>String(item.id)===String(id)))dialog.close();};
   if(font){$$('[data-font-retry]',body).forEach(button=>button.addEventListener('click',event=>{event.stopPropagation();retryFontPreview(record);}));loadFontPreviewFace(record);}
@@ -4607,10 +4616,10 @@ function assetCard(asset, imported = false) {
   // 分类编辑收进 details，动作只留必要的几个。
   return `<article class="asset-card ${imported ? "asset-card-imported" : ""}" data-asset-id="${escapeHtml(asset.id || asset.sha256 || "")}">
     <div class="asset-card-body"><div class="asset-card-head"><label class="item-heading">${imported ? "" : selectInput("asset", asset.id, `收藏 ${asset.name || asset.file_name}`, isAssetBusy("asset", asset.id))}<span class="asset-title">${escapeHtml(asset.name || asset.file_name || "未命名收藏")}</span></label><span class="badge">${assetTypeLabel(asset)}</span></div>
-      <div class="asset-classifications">${redCategory ? `<span class="category-chip is-key">${escapeHtml(redCategory)}</span>` : ""}${author ? `<span class="category-chip">${escapeHtml(author)}</span>` : ""}${style ? `<span class="category-chip">${escapeHtml(style)}</span>` : ""}${tags.map(tag => `<span class="category-chip">#${escapeHtml(tag)}</span>`).join("")}${!redCategory && !author && !style && !tags.length ? `<span class="category-chip is-empty">未分类</span>` : ""}</div>
+      <div class="asset-classifications">${redCategory ? `<span class="category-chip is-key">${escapeHtml(redCategory)}</span>` : ""}${author ? `<span class="category-chip">${escapeHtml(author)}</span>` : ""}${style ? `<span class="category-chip">${escapeHtml(style)}</span>` : ""}${tags.map(tag => `<span class="category-chip">#${escapeHtml(tag)}</span>`).join("")}</div>
     </div>
     <div class="asset-card-preview">${assetPreview(asset, imported)}<span class="preview-caption">${assetTypeLabel(asset)} · ${asset.bytes ? formatBytes(asset.bytes) : ""}</span></div>
-    <div class="asset-actions">${savedToCloud(asset) ? "" : `<button class="text-button sync-asset" data-id="${escapeHtml(asset.id || "")}" data-completed="false">同步到 R2</button>`}${objectUrl ? `<a class="download-link" href="${escapeHtml(objectUrl)}" download="${escapeHtml(asset.file_name || asset.name || "asset")}">下载</a>` : ""}<button class="text-button danger-text delete-record" data-kind="asset" data-id="${escapeHtml(asset.id || "")}">删除</button></div>
+    <div class="asset-actions">${savedToCloud(asset) ? "" : `<button class="text-button sync-asset" data-id="${escapeHtml(asset.id || "")}" data-completed="false">同步到 R2</button>`}${objectUrl ? `<a class="download-link" href="${escapeHtml(objectUrl)}" download="${escapeHtml(asset.file_name || asset.name || "asset")}">下载</a>` : ""}<button class="text-button refresh-preview" type="button" data-refresh-asset="${escapeHtml(String(asset.id || ""))}">刷新预览</button><button class="text-button danger-text delete-record" data-kind="asset" data-id="${escapeHtml(asset.id || "")}">删除</button></div>
     <details class="asset-edit"><summary>编辑分类</summary><div class="asset-meta">${escapeHtml(assetFileNameLabel(asset))} · ${asset.bytes ? formatBytes(asset.bytes) : ""} · SHA ${escapeHtml(String(asset.sha256 || "").slice(0, 12))}</div><form class="asset-meta-form" data-record-form="${escapeHtml(asset.id || "")}" data-record-kind="asset"><div class="asset-meta-fields"><label>作者<input name="author" value="${escapeHtml(author)}" placeholder="作者" /></label><label>风格<input name="style" value="${escapeHtml(style)}" placeholder="风格" /></label><label>标签<input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="标签，用逗号分隔" /></label></div><button class="text-button" type="submit">保存分类</button></form></details>
   </article>`;
 }
@@ -6946,7 +6955,6 @@ for (const [kind, {render}] of Object.entries(libraryKinds)) {
   const capital = kind[0].toUpperCase() + kind.slice(1);
   const refreshId = kind === "asset" ? "refreshAssets" : `refresh${capital}s`;
   $(`#${refreshId}`).addEventListener("click", () => refreshCatalog(kind));
-  if (kind === "asset") $("#refreshAssetPreviews").addEventListener("click", () => refreshAssetPreviews());
   let searchTimer;
   input.addEventListener("input", () => {
     state[kind + "Search"] = input.value;
@@ -7168,6 +7176,12 @@ $('#fontCategoryFilters').addEventListener('change',event=>{state.fontFilter=eve
 document.addEventListener('click',event=>{
   const tab=event.target.closest('[data-asset-filter]');if(!tab)return;
   state.assetFilter=tab.dataset.assetFilter;libraryPage.asset=1;renderAssets();
+});
+// 刷新预览只作用于按钮所在的那一个收藏，卡片、详情、导入结果共用一个入口。
+document.addEventListener('click',event=>{
+  const button=event.target.closest('[data-refresh-asset]');if(!button||button.disabled)return;
+  event.preventDefault();event.stopPropagation();
+  refreshAssetPreview(button.dataset.refreshAsset,button);
 });
 const assetCategorySelect=$('#assetCategoryFilter');
 if(assetCategorySelect)assetCategorySelect.addEventListener('change',event=>{state.assetFilter=event.target.value;libraryPage.asset=1;renderAssets();});

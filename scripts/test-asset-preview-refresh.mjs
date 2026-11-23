@@ -137,15 +137,26 @@ try{
   assert.ok(htmlCard.coversFrame,'缩放后的 iframe 应正好盖住卡片预览框');
   assert.equal(htmlCard.clipped,'hidden','预览框要裁掉多余部分，不能撑出滚动条');
 
-  // 2) 刷新预览：图集记录原本没有预览图，点一下要按原包重画出来。
-  assert.ok(await p.locator('#refreshAssetPreviews').isVisible(),'收藏库缺少「刷新预览」入口');
-  await p.locator('#refreshAssetPreviews').click();
+  // 2) 刷新预览是「单个文件」的操作：点图集卡上的按钮只重画图集，
+  //    不能整页重拉，也不能顺手重载旁边 HTML 卡的预览。
+  const galleryId='asset-'+gallerySha.slice(0,16),htmlId='asset-'+htmlSha.slice(0,16);
+  const htmlSrcBefore=await p.locator(`#assetList .asset-card[data-asset-id="${htmlId}"] .asset-html-preview`).getAttribute('src');
+  assert.ok(await p.locator(`#assetList .asset-card[data-asset-id="${galleryId}"] [data-refresh-asset]`).isVisible(),'图集卡片缺少单卡刷新预览按钮');
+  await p.locator(`#assetList .asset-card[data-asset-id="${galleryId}"] [data-refresh-asset]`).click();
   assert.ok(await waitFor(()=>p.evaluate(()=>/预览已刷新/.test(document.querySelector('#toast')?.textContent||''))),'刷新预览没有回报结果');
   const previewed=await waitFor(async()=>{
-    const sources=await p.locator('#assetList .asset-card .asset-preview-button img').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('src')||''));
+    const sources=await p.locator(`#assetList .asset-card[data-asset-id="${galleryId}"] .asset-preview-button img`).evaluateAll(nodes=>nodes.map(node=>node.getAttribute('src')||''));
     return sources.some(source=>source.includes('/previews/'));
   });
   assert.ok(previewed,'图集卡片没有换上新的预览图');
+  const htmlSrcAfter=await p.locator(`#assetList .asset-card[data-asset-id="${htmlId}"] .asset-html-preview`).getAttribute('src');
+  assert.equal(htmlSrcAfter,htmlSrcBefore,'刷新一个收藏不应重载其它收藏的预览');
+  // 单卡按钮同样能即时重载 HTML 预览（缓存穿透）。
+  await p.locator(`#assetList .asset-card[data-asset-id="${htmlId}"] [data-refresh-asset]`).click();
+  assert.ok(await waitFor(async()=>{
+    const src=await p.locator(`#assetList .asset-card[data-asset-id="${htmlId}"] .asset-html-preview`).getAttribute('src');
+    return !!src&&new URL(src,origin).searchParams.has('v');
+  }),'单卡刷新没有重新载入 HTML 预览');
 
   const records=await p.evaluate(async()=>{
     const token=localStorage.getItem('reeden-sync-write-token');

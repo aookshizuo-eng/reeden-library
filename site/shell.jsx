@@ -151,7 +151,7 @@ export default function Shell() {
           <section className="asset-area">
             <div className="asset-filter-tabs" id="assetFilterTabs" role="tablist" aria-label="收藏分类"></div>
             <LibrarySearch id="assetSearchInput" label="搜索收藏" placeholder="搜索名称、作者或标签" />
-            <LibraryTools kind="asset" refreshId="refreshAssets"><Button id="refreshAssetPreviews" variant="outline" title="按原包重画这一页 RED 收藏的预览，并重新载入 SVG / HTML 预览">刷新预览</Button></LibraryTools>
+            <LibraryTools kind="asset" refreshId="refreshAssets" />
             <p className="cache-info" data-cache-info></p>
             <p className="catalog-status" data-library-status="asset" role="status">正在读取收藏…</p>
             <LibraryBulk kind="asset" />
