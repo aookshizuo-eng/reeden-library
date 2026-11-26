@@ -3507,24 +3507,49 @@ function fontClassificationEditor(font) {
   const source = font?.style_source === "glyph" ? (font?.glyph_method === "opentype" ? "字形判定 · 轮廓回退" : "字形判定") : "名称规则";
   return `<div class="record-classifications"><span class="category-chip">分类：${escapeHtml(style)} · ${source}</span>${tags.map(tag => `<span class="category-chip">#${escapeHtml(tag)}</span>`).join("")}</div><details class="font-edit-details"><summary>编辑分类与标签</summary><form class="asset-meta-form record-classification-form" data-record-form="${escapeHtml(font?.id || "")}" data-record-kind="font"><div class="asset-meta-fields"><label>分类<input name="style" value="${escapeHtml(style === "其他" && !font?.style ? "" : style)}" placeholder="宋体、黑体、圆体、手写体" /></label><label>标签<input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="标签，用逗号分隔" /></label></div><button class="text-button" type="submit">保存分类</button></form></details>`;
 }
+// 五行样张的本机缓存：老字体第一次打开时由原字体画一次 JPG 存这里，
+// 之后断网、静态页面、没连 Worker 都能直接读图，不必再渲染第二遍。
+const FONT_SPECIMEN_CACHE_KEY = "reeden-font-specimen-v1";
+function fontSpecimenCache() {
+  try { return JSON.parse(localStorage.getItem(FONT_SPECIMEN_CACHE_KEY) || "{}"); } catch { return {}; }
+}
+function cachedFontSpecimen(id) {
+  return fontSpecimenCache()[String(id)] || "";
+}
+function rememberFontSpecimen(id, dataUrl) {
+  try {
+    const cache = fontSpecimenCache(), keys = Object.keys(cache);
+    // 一张 700×300 的 JPG 转成 data URL 约几十 KB，留最近 24 张，避免撑爆 localStorage。
+    while (keys.length >= 24) delete cache[keys.shift()];
+    cache[String(id)] = dataUrl;
+    localStorage.setItem(FONT_SPECIMEN_CACHE_KEY, JSON.stringify(cache));
+  } catch (error) { console.warn("字体样张本机缓存写入失败", error); }
+}
+function fontSpecimenDataUrl(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return `data:image/jpeg;base64,${btoa(binary)}`;
+}
 function fontPreviewMarkup(font) {
   const name = font.family || font.file_name || "字体";
   const fid = escapeHtml(font.id || "");
-  const previewUrl = font.preview_url ? assetUrl(font.preview_url) : "";
-  // 入库时已经把「中文 / 简繁词句 / 拉丁字母 / 数字」那五行画进 JPG 了，
-  // 卡片直接读图。打开字体库不再下载原字体重新渲染，也不再耗那份流量。
-  if (previewUrl) {
-    const upgrade = font.preview_kind === "specimen-v2" ? "" : ` data-font-upgrade="${fid}"`;
-    return `<div class="font-preview-frame" data-font-id="${fid}"><img class="font-preview-image is-specimen" src="${escapeHtml(previewUrl)}" alt="${escapeHtml(name)} 字形样张" loading="lazy"${upgrade} /></div>`;
+  // 只有「入库时画好的五行图」或「本机已缓存的五行图」才能直接显示。
+  // 老记录里的 preview_url 指向的是单行「Aa 中文 你好 123」，绝不能拿出来当预览。
+  const specimenUrl = cachedFontSpecimen(font.id)
+    || (font.preview_kind === "specimen-v2" && font.preview_url ? assetUrl(font.preview_url) : "");
+  if (specimenUrl) {
+    return `<div class="font-preview-frame" data-font-id="${fid}"><img class="font-preview-image is-specimen" src="${escapeHtml(specimenUrl)}" alt="${escapeHtml(name)} 字形样张" loading="lazy" /></div>`;
   }
-  // 没有预览图的老字体和待入库项才走实时字形：进入视口后下载一次字体，
-  // 用五行样张显示；OTS 拒收的字体再用 opentype.js 描边，失败可点重试。
+  // 其余字体一律显示简繁五行样张：进视口后下载一次原字体套上真实字形，
+  // OTS 拒收的走 opentype 描边，失败可点重试。旧单行 JPG 只留作隐藏兜底节点。
   const hasSource = Boolean(font.view_url || font.url);
   const specimen = `<div class="font-specimen" data-font-preview-id="${fid}" data-state="${hasSource ? "loading" : "idle"}"><strong class="specimen-hero">中文</strong><span class="specimen-cjk specimen-sc">简体 · 汉字阅读 书写字体</span><span class="specimen-cjk specimen-tc">繁體 · 漢字閱讀 書寫字體</span><span class="specimen-latin">ABCDEFG abcdefg</span><span class="specimen-digits">0123456789 ，。！？</span></div>`;
   const outline = `<img class="font-specimen-outline" data-font-preview-id="${fid}" alt="${escapeHtml(name)} 简繁字形样张" hidden />`;
   const fallback = `<span class="font-preview-fallback" data-font-preview-id="${fid}" hidden>Aa 中文 你好 123</span>`;
   const note = `<button class="font-specimen-note" type="button" data-font-retry="${fid}" ${hasSource ? "" : "hidden"}>${hasSource ? "字形加载中…" : ""}</button>`;
-  return `<div class="font-preview-frame" data-font-id="${fid}">${specimen}${outline}${fallback}${note}</div>`;
+  // 有旧 JPG 但还不是五行图的，标记成待升级：后台只画一次，画好换成图片。
+  const upgrade = font.preview_url ? ` data-font-upgrade="${fid}"` : "";
+  return `<div class="font-preview-frame" data-font-id="${fid}"${upgrade}>${specimen}${outline}${fallback}${note}</div>`;
 }
 // 样张的三种状态：loading 半透明等字体、live 真实字形、fallback 加载失败可重试。
 // 状态写在帧上而不是只改 hidden，版式与文案才能统一，不会退回旧单行样张。
@@ -3591,18 +3616,27 @@ function applyFontPreviewImage(font) {
 async function upgradeLegacyFontPreview(font, done) {
   const finish = () => { if (typeof done === "function") done(); };
   const id = String(font?.id || "");
-  if (!id || !font?.preview_url || isFontSpecimenImage(font) || upgradedFontPreviews.has(id) || upgradingFontPreviews.has(id)) { finish(); return; }
-  if (!browserSyncEnabled()) { finish(); return; }
+  if (!id || isFontSpecimenImage(font) || cachedFontSpecimen(id) || upgradedFontPreviews.has(id) || upgradingFontPreviews.has(id)) { finish(); return; }
+  // 只认字体原文件地址；preview_url 可能是旧单行 JPG，不能当字体解析。
+  const source = assetUrl(font.view_url || font.url);
+  if (!source) { finish(); return; }
   upgradingFontPreviews.add(id);
   try {
-    const source = assetUrl(font.view_url || font.url);
-    if (!source) return;
-    // 字体对象不可变，走浏览器缓存即可；只有这一遍需要下载原字体。
+    // 字体对象不可变，走浏览器缓存即可；这一遍下载用来画五行样张。
     const response = await fetchWithReadTimeout(source, {headers: requestHeaders()}, 60000);
     if (!response.ok) throw new Error(`读取字体失败（HTTP ${response.status}）`);
     const bytes = new Uint8Array(await response.arrayBuffer());
     const analysis = await analyzeFontGlyphs(bytes, font.file_name || font.family || "font.ttf", font.style);
     if (!analysis.specimen?.length) return;
+    // 先落本机缓存并立刻换成图片：即使没连 Worker、没有写 Token，
+    // 这次会话和以后打开都不必再下载原字体，也不会露出旧单行 JPG。
+    const dataUrl = fontSpecimenDataUrl(analysis.specimen);
+    rememberFontSpecimen(id, dataUrl);
+    outlinedSpecimenFaces.set(id, dataUrl);
+    applyFontSpecimen(font);
+    upgradedFontPreviews.add(id);
+    // 连了同步服务再顺手写回 R2 + PATCH，让其他设备也直接用图。
+    if (!browserSyncEnabled() || !font.record_sha256) return;
     const codec = await browserCodec();
     const sha = await codec.sha256Hex(analysis.specimen);
     const previewPath = await uploadBrowserObject("previews", sha, "jpg", analysis.specimen, "image/jpeg", `${String(font.family || font.file_name || "字体").replace(/\.[^.]+$/, "")}-预览`);
@@ -3614,7 +3648,6 @@ async function upgradeLegacyFontPreview(font, done) {
     const index = state.fonts.findIndex(item => String(item.id) === id);
     if (index >= 0) state.fonts[index] = next;
     updateCachedRecord(next);
-    upgradedFontPreviews.add(id);
     applyFontPreviewImage(next);
   } catch (error) {
     console.warn("字体预览升级失败", font.family || font.file_name || id, error);

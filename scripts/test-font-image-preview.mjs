@@ -80,14 +80,16 @@ try{
   const cardState=id=>p.evaluate(id=>{
     const frame=document.querySelector(`#fontList .font-preview-frame[data-font-id="${id}"]`);
     const image=frame?.querySelector('.font-preview-image');
-    return {src:image?.getAttribute('src')||'',hidden:image?.hidden,upgrade:image?.dataset.fontUpgrade||'',hasSpecimen:Boolean(frame?.querySelector('.font-specimen'))};
+    return {src:image?.getAttribute('src')||'',hidden:image?.hidden,upgrade:frame?.dataset.fontUpgrade||'',hasSpecimen:Boolean(frame?.querySelector('.font-specimen')),specimenHidden:frame?.querySelector('.font-specimen')?.hidden};
   },id);
   const v2=await cardState('font-v2');
   assert.ok(v2.src.includes('/previews/')&&v2.hidden===false&&!v2.hasSpecimen,`图片字体必须直接显示预览图：${JSON.stringify(v2)}`);
   const before=await cardState('font-legacy');
-  assert.ok(before.src.includes('/previews/')&&before.upgrade.includes('font-legacy'),`老版预览先显示旧图并排队升级：${JSON.stringify(before)}`);
+  // 老字体绝不能露出「Aa 中文 你好 123」那张单行 JPG，而是先显示简繁五行样张。
+  assert.ok(before.hasSpecimen&&before.specimenHidden===false&&before.src==='',`老版字体必须先显示简繁五行样张：${JSON.stringify(before)}`);
+  assert.ok(before.upgrade.includes('font-legacy'),'老版字体应排队做一次性五行图升级');
 
-  await p.waitForFunction(()=>document.querySelector('#fontList .font-preview-frame[data-font-id="font-legacy"] .font-preview-image')?.dataset.fontUpgrade===undefined,{},{timeout:60000});
+  await p.waitForFunction(()=>Boolean(document.querySelector('#fontList .font-preview-frame[data-font-id="font-legacy"] .font-preview-image')),{},{timeout:60000});
   const after=await cardState('font-legacy');
   assert.notEqual(after.src,before.src,'老版预览升级后必须换成新画的图');
   assert.equal(after.hasSpecimen,false,'升级完成后不能再出现实时字形样张');
@@ -106,7 +108,8 @@ try{
   await p.reload({waitUntil:'domcontentloaded'});
   await p.waitForFunction(()=>document.querySelectorAll('#fontList .theme-card').length===2,{},{timeout:20000});
   const again=await cardState('font-legacy');
-  assert.equal(again.src,after.src,'刷新后应直接沿用已写回的图片预览');
+  assert.ok(again.src.startsWith('data:image/jpeg'),`刷新后应直接读本机缓存的五行图，不再渲染：${JSON.stringify(again)}`);
+  assert.equal(again.hasSpecimen,false,'刷新后不能再回到实时字形渲染');
   assert.equal(patches.filter(item=>String(item.path).includes('/api/fonts/font-legacy')).length,1,'刷新后不能再次升级同一张预览');
   assert.equal(fontRequests.filter(url=>url.includes('legacy~')).length,1,'刷新后不能再下载原字体');
   assert.deepEqual(errors,[]);
