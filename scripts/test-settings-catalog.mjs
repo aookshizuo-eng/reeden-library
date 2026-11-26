@@ -84,7 +84,12 @@ try{
     await p.locator('#assetList .theme-card-hit').first().click();await p.locator('#recordDialog input[name=author]').fill('新作者');await p.locator('#recordDialog input[name=tags]').fill('新标签, 测试');await p.locator('#recordDialog button[type=submit]').click();await p.waitForFunction(()=>document.querySelector('#assetList').textContent.includes('新作者'));await p.locator('#closeRecordDialog').click();
     await p.locator('[data-view=fonts]').click();await p.locator('#fontList .theme-card-hit').first().click();await p.locator('#recordDialog input[name=style]').fill('手写体');await p.locator('#recordDialog button[type=submit]').click();await p.waitForFunction(()=>document.querySelector('#fontList').textContent.includes('手写体'));await p.locator('#closeRecordDialog').click();
     await p.locator('#fontCategoryFilters').selectOption('手写体');assert.equal(await p.locator('#fontList .theme-card').count(),1);await p.locator('#fontCategoryFilters').selectOption('all');
-    assert.equal(await p.locator('#fontList .font-specimen').first().isVisible(),true,'font cards always keep the rich specimen');assert.equal(await p.locator('#fontList .font-preview-fallback').first().isVisible(),false,'single-line legacy specimen must not come back');
+    const fontPreview=await p.locator('#fontList .font-preview-frame').first().evaluate(frame=>{
+      const image=frame.querySelector('.font-preview-image'),specimen=frame.querySelector('.font-specimen');
+      return {imageSrc:image?.getAttribute('src')||'',imageHidden:image?image.hidden:true,specimenVisible:Boolean(specimen&&!specimen.hidden)};
+    });
+    assert.ok((fontPreview.imageSrc&&!fontPreview.imageHidden)||fontPreview.specimenVisible,`字体卡片必须有可见预览（图片或实时字形）：${JSON.stringify(fontPreview)}`);
+    assert.equal(await p.locator('#fontList .font-preview-fallback:visible').count(),0,'single-line legacy specimen must not come back');
     await p.locator('[data-view=themes]').click();await p.locator('#themePageInput').fill('4');await p.locator('#themePageInput').press('Enter');await p.reload();await p.waitForFunction(()=>document.querySelector('#apiBaseStatus').textContent.includes('已连接共享库'));assert.match(await p.locator('#themePageInfo').innerText(),/第 4/);
     console.log('PASS: font/asset classification edits persist; filtering resets pages; current page survives reload.');
     await p.setViewportSize({width:390,height:844});

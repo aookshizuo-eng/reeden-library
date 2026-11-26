@@ -791,16 +791,16 @@ async function updateRecordClassification(request, env, kind, id) {
     if (kind !== "theme" || (value !== "" && spec?.kind !== "previews")) return json({error: "预览地址必须指向本站 previews 对象"}, 400, request, env);
     previewUpdates[key] = value;
   }
-  // 收藏（asset）的预览图是浏览器按原包重画后上传到 previews 的，改了要能写回
+  // 收藏（asset）按原包重画、字体（font）把五行样张画成图片后都要能写回
   // 索引——records 是不可变对象，重复写同一个 id 会被当成重放忽略，只能走 PATCH。
   if (Object.hasOwn(payload, "preview_url")) {
     const value = payload.preview_url;
     const spec = typeof value === "string" && value ? objectSpec(value) : null;
-    if (kind !== "asset" || (value !== "" && spec?.kind !== "previews")) return json({error: "预览地址必须指向本站 previews 对象"}, 400, request, env);
+    if ((kind !== "asset" && kind !== "font") || (value !== "" && spec?.kind !== "previews")) return json({error: "预览地址必须指向本站 previews 对象"}, 400, request, env);
     previewUpdates.preview_url = value;
   }
   if (Object.hasOwn(payload, "preview_kind")) {
-    if (kind !== "asset") return json({error: "预览类型只用于收藏"}, 400, request, env);
+    if (!["asset", "font"].includes(kind)) return json({error: "预览类型只用于收藏和字体"}, 400, request, env);
     previewUpdates.preview_kind = String(payload.preview_kind || "").slice(0, 24);
   }
   if (Object.hasOwn(payload, "preview_details")) {

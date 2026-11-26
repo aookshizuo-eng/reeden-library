@@ -2803,20 +2803,25 @@ async function analyzeFontGlyphs(bytes, fileName, fallbackStyle) {
     else if (features.serifScore > 1.5 || features.strokeContrast > 2.8) style = "宋体";
     else if (features.density > 0.3) style = "艺术体";
     else style = "黑体";
-    // A visible specimen is generated from the same parsed font, so opening
-    // the card later never needs to fetch the original font file again.
-    // 样张要能看清字形：画布收紧到 700x300，字号按实际字宽自动收缩，
-    // 免得等宽字体的长串被裁掉两边；卡片里按高度铺满显示，字形比原来大一圈。
-    const specimenText = "Aa 中文 你好 123";
+    // 入库时就把卡片上那五行字形画成一张 700×300 JPG。之后打开字体库、
+    // 搜索、翻页都只读这张图，不再把几十 MB 的原字体重新下载一遍渲染。
     const specimenWidth = 700, specimenHeight = 300;
-    let specimenSize = 84;
-    const measured = Number(advanceOf(specimenText, specimenSize)) || 0;
-    if (measured > specimenWidth * 0.88) specimenSize = Math.max(46, Math.floor(specimenSize * specimenWidth * 0.88 / measured));
-    const specimen = renderer(specimenText, specimenSize, specimenWidth, specimenHeight);
+    const specimen = document.createElement("canvas");
+    specimen.width = specimenWidth; specimen.height = specimenHeight;
     const context = specimen.getContext("2d");
-    context.fillStyle = "#8a94a3"; context.font = "22px sans-serif";
-    context.textAlign = "center"; context.textBaseline = "middle";
-    context.fillText(String(fileName || "").slice(0, 60), specimenWidth / 2, specimenHeight - 38);
+    if (!context) throw new Error("浏览器不支持 Canvas 2D");
+    context.fillStyle = "#fff"; context.fillRect(0, 0, specimenWidth, specimenHeight);
+    // renderer 已经按 82% 宽高自动收缩，等宽字体或长串不会裁掉两边。
+    for (const line of [
+      {text: "中文", size: 92, y: 72, lineHeight: 112},
+      {text: "简体 · 汉字阅读 书写字体", size: 30, y: 152, lineHeight: 56},
+      {text: "繁體 · 漢字閱讀 書寫字體", size: 30, y: 194, lineHeight: 56},
+      {text: "ABCDEFG abcdefg", size: 26, y: 238, lineHeight: 48},
+      {text: "0123456789 ，。！？", size: 24, y: 277, lineHeight: 44},
+    ]) {
+      const drawn = renderer(line.text, line.size, specimenWidth, line.lineHeight);
+      context.drawImage(drawn, 0, line.y - line.lineHeight / 2, specimenWidth, line.lineHeight);
+    }
     const blob = await new Promise(resolve => specimen.toBlob(resolve, "image/jpeg", 0.9));
     fallback.specimen = blob ? new Uint8Array(await blob.arrayBuffer()) : null;
     return {style, source: "glyph", method: fallback.method, error: fallback.error, features, specimen: fallback.specimen};
@@ -3505,23 +3510,21 @@ function fontClassificationEditor(font) {
 function fontPreviewMarkup(font) {
   const name = font.family || font.file_name || "字体";
   const fid = escapeHtml(font.id || "");
-  // 富样张：进入视口后用真实字体渲染多行文字，能同时看清单字、中文词句、
-  // 拉丁字母和数字，比入库时那张单行 JPG 更能判断字体风格。
-  // 样张同时给简体和繁体：字形覆盖是选字体时最常看的一点，源文件里那张
-  // 单行 JPG 只有「Aa 中文 你好 123」，看不出简繁字形差别。
-  // 样张默认就显示（用系统字体 + 「字形加载中」提示），字体到了再换成真实
-  // 字形：此前默认 hidden 等 FontFace，一旦新上传的大字体还在下载，卡片就
-  // 露出入库时的单行 JPG，看起来像「又变回老样式」。版式必须一直是新版式。
-  const hasSource = Boolean(font.view_url || font.url || font.preview_url);
+  const previewUrl = font.preview_url ? assetUrl(font.preview_url) : "";
+  // 入库时已经把「中文 / 简繁词句 / 拉丁字母 / 数字」那五行画进 JPG 了，
+  // 卡片直接读图。打开字体库不再下载原字体重新渲染，也不再耗那份流量。
+  if (previewUrl) {
+    const upgrade = font.preview_kind === "specimen-v2" ? "" : ` data-font-upgrade="${fid}"`;
+    return `<div class="font-preview-frame" data-font-id="${fid}"><img class="font-preview-image is-specimen" src="${escapeHtml(previewUrl)}" alt="${escapeHtml(name)} 字形样张" loading="lazy"${upgrade} /></div>`;
+  }
+  // 没有预览图的老字体和待入库项才走实时字形：进入视口后下载一次字体，
+  // 用五行样张显示；OTS 拒收的字体再用 opentype.js 描边，失败可点重试。
+  const hasSource = Boolean(font.view_url || font.url);
   const specimen = `<div class="font-specimen" data-font-preview-id="${fid}" data-state="${hasSource ? "loading" : "idle"}"><strong class="specimen-hero">中文</strong><span class="specimen-cjk specimen-sc">简体 · 汉字阅读 书写字体</span><span class="specimen-cjk specimen-tc">繁體 · 漢字閱讀 書寫字體</span><span class="specimen-latin">ABCDEFG abcdefg</span><span class="specimen-digits">0123456789 ，。！？</span></div>`;
-  // Chromium 的 OTS 会拒掉一部分第三方中文字体，这类字体用 opentype.js
-  // 直接描字形轮廓生成样张图，避免永远停在旧的单行 JPG 上。
   const outline = `<img class="font-specimen-outline" data-font-preview-id="${fid}" alt="${escapeHtml(name)} 简繁字形样张" hidden />`;
-  // 兜底文本始终留在 DOM：JPG 坏掉且 FontFace 也失败时仍有可读字形。
   const fallback = `<span class="font-preview-fallback" data-font-preview-id="${fid}" hidden>Aa 中文 你好 123</span>`;
-  const image = font.preview_url ? `<img class="font-preview-image" alt="${escapeHtml(name)} 字形预览" hidden />` : "";
   const note = `<button class="font-specimen-note" type="button" data-font-retry="${fid}" ${hasSource ? "" : "hidden"}>${hasSource ? "字形加载中…" : ""}</button>`;
-  return `<div class="font-preview-frame" data-font-id="${fid}">${image}${specimen}${outline}${fallback}${note}</div>`;
+  return `<div class="font-preview-frame" data-font-id="${fid}">${specimen}${outline}${fallback}${note}</div>`;
 }
 // 样张的三种状态：loading 半透明等字体、live 真实字形、fallback 加载失败可重试。
 // 状态写在帧上而不是只改 hidden，版式与文案才能统一，不会退回旧单行样张。
@@ -3546,6 +3549,8 @@ function applyFontSpecimen(font) {
   const outlineUrl=outlinedSpecimenFaces.get(String(font.id));
   $$(`[data-font-id="${CSS.escape(font.id)}"]`).forEach(frame=>{
     const specimen=frame.querySelector(".font-specimen");
+    // 已经换成图片预览的卡片不再参与实时字形，别把图又藏回去。
+    if(!specimen)return;
     const image=frame.querySelector(".font-preview-image");
     const fallback=frame.querySelector(".font-preview-fallback");
     const outline=frame.querySelector(".font-specimen-outline");
@@ -3566,6 +3571,57 @@ function retryFontPreview(font) {
   failedFontFaces.delete(font.id);
   setFontPreviewState(font,"loading");
   enqueueFontPreview(font);
+}
+// 老记录只有入库时的单行预览图。每张字体只在第一次看到时下载一次原字体，
+// 按当前五行版式重画成 JPG 并走 PATCH 写回；之后所有设备都直接读图片，
+// 再也不会打开一次就重渲染一次。
+const upgradingFontPreviews = new Set();
+const upgradedFontPreviews = new Set();
+function isFontSpecimenImage(font) {
+  return font?.preview_kind === "specimen-v2";
+}
+function applyFontPreviewImage(font) {
+  const url = font?.preview_url ? assetUrl(font.preview_url) : "";
+  if (!url || !font?.id) return;
+  const name = escapeHtml(font.family || font.file_name || "字体");
+  $$(`#fontList .font-preview-frame[data-font-id="${CSS.escape(String(font.id))}"], #recordDialog .font-preview-frame[data-font-id="${CSS.escape(String(font.id))}"]`).forEach(frame => {
+    frame.innerHTML = `<img class="font-preview-image is-specimen" src="${escapeHtml(url)}" alt="${name} 字形样张" loading="lazy" />`;
+  });
+}
+async function upgradeLegacyFontPreview(font, done) {
+  const finish = () => { if (typeof done === "function") done(); };
+  const id = String(font?.id || "");
+  if (!id || !font?.preview_url || isFontSpecimenImage(font) || upgradedFontPreviews.has(id) || upgradingFontPreviews.has(id)) { finish(); return; }
+  if (!browserSyncEnabled()) { finish(); return; }
+  upgradingFontPreviews.add(id);
+  try {
+    const source = assetUrl(font.view_url || font.url);
+    if (!source) return;
+    // 字体对象不可变，走浏览器缓存即可；只有这一遍需要下载原字体。
+    const response = await fetchWithReadTimeout(source, {headers: requestHeaders()}, 60000);
+    if (!response.ok) throw new Error(`读取字体失败（HTTP ${response.status}）`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const analysis = await analyzeFontGlyphs(bytes, font.file_name || font.family || "font.ttf", font.style);
+    if (!analysis.specimen?.length) return;
+    const codec = await browserCodec();
+    const sha = await codec.sha256Hex(analysis.specimen);
+    const previewPath = await uploadBrowserObject("previews", sha, "jpg", analysis.specimen, "image/jpeg", `${String(font.family || font.file_name || "字体").replace(/\.[^.]+$/, "")}-预览`);
+    const result = await api(`/api/${recordKindPath("font")}/${encodeURIComponent(id)}`, {
+      method: "PATCH", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({record_sha256: font.record_sha256, preview_url: previewPath, preview_kind: "specimen-v2"}),
+    });
+    const next = { ...font, kind: "font", ...(result?.item || {}), preview_url: previewPath, preview_kind: "specimen-v2" };
+    const index = state.fonts.findIndex(item => String(item.id) === id);
+    if (index >= 0) state.fonts[index] = next;
+    updateCachedRecord(next);
+    upgradedFontPreviews.add(id);
+    applyFontPreviewImage(next);
+  } catch (error) {
+    console.warn("字体预览升级失败", font.family || font.file_name || id, error);
+  } finally {
+    upgradingFontPreviews.delete(id);
+    finish();
+  }
 }
 // 用 opentype.js 描边出简繁样张：FontFace 加载失败时仍能看到真实字形。
 async function drawFontSpecimenOutline(font,url) {
@@ -3597,11 +3653,22 @@ function pumpFontPreviewQueue() {
   while(fontPreviewActive<3 && fontPreviewQueue.length) {
     const font=fontPreviewQueue.shift();
     fontPreviewActive++;
-    loadFontPreviewFace(font,()=>{fontPreviewActive--;pumpFontPreviewQueue();});
+    const done=()=>{fontPreviewActive--;pumpFontPreviewQueue();};
+    // 有预览图的走一次性升级（只下一遍原字体），没图的才走实时字形路径。
+    if(font.preview_url)upgradeLegacyFontPreview(font,done);
+    else loadFontPreviewFace(font,done);
   }
 }
 function enqueueFontPreview(font) {
   if(!font?.id)return;
+  // 已经有图片的卡片什么都不做；老版单行预览只升级一次，用完写回库。
+  if(font.preview_url){
+    if(isFontSpecimenImage(font)||upgradedFontPreviews.has(font.id))return;
+    if(upgradingFontPreviews.has(font.id)||fontPreviewQueue.some(item=>String(item.id)===String(font.id)))return;
+    fontPreviewQueue.push(font);
+    pumpFontPreviewQueue();
+    return;
+  }
   // 已经成功加载/描边的字体在新卡片上必须重新套用，否则搜索翻页之后
   // 样张又被 hidden 的初始状态盖回旧 JPG，用户看到的就是「字形没更新」。
   if(loadedFontFaces.has(font.id)||outlinedSpecimenFaces.has(String(font.id))){applyFontSpecimen(font);return;}
@@ -4600,7 +4667,8 @@ function openRecordDialog(kind,id) {
   body.innerHTML=`<div class="record-dialog-preview">${font?fontPreviewMarkup(record):assetPreview(record)}</div><div class="record-dialog-fields"><form class="asset-meta-form" data-record-form="${escapeHtml(record.id)}" data-record-kind="${kind}">${font?'':`<label>作者<input name="author" value="${escapeHtml(kind==='asset'?assetAuthor(record):(record.author||''))}" placeholder="留空也可以，之后随时补" /></label>`}<label>${font?'分类':'风格'}<input name="style" value="${escapeHtml(font?fontCategory(record):record.style||'')}" /></label><label>标签<input name="tags" value="${escapeHtml(recordTags(record).join(', '))}" placeholder="用逗号分隔" /></label><button class="secondary-button" type="submit">保存分类</button></form><div class="record-detail-actions">${url?`<a class="primary-button" href="${escapeHtml(url)}" download="${escapeHtml(record.file_name||name)}">${font?'下载字体':'下载文件'}</a>`:''}${savedToCloud(record)?'':`<button class="secondary-button" data-record-sync>同步到 R2</button>`}${font?'':`<button class="secondary-button" data-refresh-asset="${escapeHtml(String(record.id))}" data-refresh-label="刷新预览">刷新预览</button>`}<button class="text-button danger-text" data-record-delete>删除</button></div><details><summary>文件信息</summary><p class="field-help">${escapeHtml(font?(record.file_name||''):assetFileNameLabel(record))}<br>SHA ${escapeHtml(record.sha256||'未记录')}</p>${record.cleanup_warning?`<p class="inline-error">${escapeHtml(typeof record.cleanup_warning==='string'?record.cleanup_warning:Object.values(record.cleanup_warning).join('；'))}</p>`:''}</details></div>`;
   const sync=$('[data-record-sync]',body);if(sync)sync.onclick=async()=>{sync.disabled=true;try{await(font?syncFont(id):syncAsset(id));openRecordDialog(kind,id);}finally{sync.disabled=false;}};
   $('[data-record-delete]',body).onclick=async()=>{await deleteSelectedRecords(kind,[id]);if(!state[kind+'s'].some(item=>String(item.id)===String(id)))dialog.close();};
-  if(font){$$('[data-font-retry]',body).forEach(button=>button.addEventListener('click',event=>{event.stopPropagation();retryFontPreview(record);}));loadFontPreviewFace(record);}
+  // 图片预览已经能看，就不必再为详情弹窗下载原字体；老版预览只升级一次。
+  if(font){$$('[data-font-retry]',body).forEach(button=>button.addEventListener('click',event=>{event.stopPropagation();retryFontPreview(record);}));if(!record.preview_url)loadFontPreviewFace(record);else upgradeLegacyFontPreview(record);}
   if(!dialog.open)dialog.showModal();
   scheduleFitHtmlPreviews(body);
   updateBulkControls();
@@ -5758,7 +5826,7 @@ async function importFonts(files, options = {}) {
             kind: "font", id: `font-${info.sha256.slice(0, 16)}`, sha256: info.sha256, file_name: file.name,
             family: analysis.family || file.name.replace(/\.[^.]+$/, ""), subfamily: analysis.subfamily || "Regular", extension: info.extension, bytes: info.bytes,
             style: analysis.style, style_source: analysis.source, glyph_method: analysis.method, glyph_error: analysis.error || "", glyph_analysis: analysis.features, tags: [],
-            url: fontPath, view_url: fontPath, preview_url: previewPath, preview_state: previewPath ? "generated" : "disabled", preview_error: "", saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
+            url: fontPath, view_url: fontPath, preview_url: previewPath, preview_kind: previewPath ? "specimen-v2" : "", preview_state: previewPath ? "generated" : "disabled", preview_error: "", saved_to_cloud: true, cloud: "cloudflare_r2", sync_status: { library: "synced" }, sync_error: ""
           }, codec);
           await completeLocalFiles([file]);
           transferDone(file.name);

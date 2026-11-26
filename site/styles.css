@@ -381,9 +381,8 @@ h3 { font-size: 14.5px; line-height: 1.35; margin-bottom: 4px; font-weight: 600;
 .font-card { display: grid; grid-template-columns: 1fr; gap: 0; overflow: hidden; padding: 0; align-items: stretch; }
 .font-card-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 34px; padding: 10px 13px 0; }
 .font-card-top > .item-select { flex: 0 0 auto; }
-/* 字体样张：优先用真实字体渲染多行富样张（见 fontPreviewMarkup），能同时看清
-   单字、中文词句、拉丁字母与数字。JPG 只是字体加载完成前的兜底，按 contain
-   完整显示、不再裁切；字体加载成功后富样张覆盖它。 */
+/* 字体样张：入库时就把「中文 / 简繁词句 / 拉丁 / 数字」五行画进 JPG，
+   打开字体库直接读图，不再下载原字体重渲染。contain 完整显示不裁字。 */
 .font-preview-frame { position: relative; display: grid; place-items: center; min-height: 140px; margin: 9px 12px 0; overflow: hidden; border: 1px solid var(--rule); border-radius: 7px; background: #fff; color: var(--text); }
 .font-preview-image { display: block; width: 100%; height: 140px; object-fit: contain; object-position: 50% 50%; background: #fff; }
 /* 字形没到之前也用同一份简繁样张占位：新上传的大字体要下载几十秒，若这时

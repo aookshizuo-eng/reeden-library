@@ -24,13 +24,13 @@ await bucket.put('previews/'+'a'.repeat(64)+'.jpg',png);
 // 用系统字体作为真实 FontFace 源；没有这台机器的字体时测试跳过字形套用断言。
 const localFont='C:/Windows/Fonts/NotoSansSC-VF.ttf';
 const realFont=existsSync(localFont)?await readFile(localFont):null;
-if(realFont){await bucket.put('fonts/'+'a'.repeat(64)+'.ttf',realFont);await bucket.put('fonts/'+'d'.repeat(64)+'.ttf',realFont);}
+if(realFont){await bucket.put('fonts/'+'a'.repeat(64)+'.ttf',realFont);await bucket.put('fonts/'+'b'.repeat(64)+'.ttf',realFont);await bucket.put('fonts/'+'d'.repeat(64)+'.ttf',realFont);}
 const fontPath=hash=>'/api/objects/fonts/'+hash+'.ttf';
 const records=[
-  {kind:'font',id:'font-a',family:'甲字体',file_name:'a.ttf',style:'黑体',tags:['标签甲'],bytes:1000,extension:'ttf',preview_url:previewPath,view_url:fontPath('a'.repeat(64)),url:fontPath('a'.repeat(64)),saved_to_cloud:true,sync_status:{library:'synced'}},
+  {kind:'font',id:'font-a',family:'甲字体',file_name:'a.ttf',style:'黑体',tags:['标签甲'],bytes:1000,extension:'ttf',preview_url:previewPath,preview_kind:'specimen-v2',view_url:fontPath('a'.repeat(64)),url:fontPath('a'.repeat(64)),saved_to_cloud:true,sync_status:{library:'synced'}},
   {kind:'font',id:'font-b',family:'乙字体',file_name:'b.ttf',style:'宋体',tags:['标签乙'],bytes:2000,extension:'ttf',preview_url:'',view_url:fontPath('b'.repeat(64)),url:fontPath('b'.repeat(64)),saved_to_cloud:true,sync_status:{library:'synced'}},
   {kind:'font',id:'font-c',family:'丙字体',file_name:'c.ttf',style:'圆体',tags:['标签丙'],bytes:3000,extension:'ttf',preview_url:'',view_url:fontPath('c'.repeat(64)),url:fontPath('c'.repeat(64)),saved_to_cloud:true,sync_status:{library:'synced'}},
-  {kind:'font',id:42,family:'数字字体',file_name:'d.ttf',style:'其他',tags:['标签丁'],bytes:4000,extension:'ttf',preview_url:previewPath,view_url:fontPath('d'.repeat(64)),url:fontPath('d'.repeat(64)),saved_to_cloud:true,sync_status:{library:'synced'}},
+  {kind:'font',id:42,family:'数字字体',file_name:'d.ttf',style:'其他',tags:['标签丁'],bytes:4000,extension:'ttf',preview_url:previewPath,preview_kind:'specimen-v2',view_url:fontPath('d'.repeat(64)),url:fontPath('d'.repeat(64)),saved_to_cloud:true,sync_status:{library:'synced'}},
 ];
 for(const record of records){
   const bytes=Buffer.from(JSON.stringify(record)),sha=await __test.digestHex(bytes);
@@ -64,6 +64,8 @@ await context.addInitScript(()=>{
   };
 });
 const p=await context.newPage();p.on('pageerror',e=>errors.push(e.message));
+const fontRequests=[];
+await p.route('**/api/objects/fonts/**',route=>{fontRequests.push(route.request().url());return route.continue();});
 const patches=[];
 await p.route('**/api/fonts/**',async route=>{
   if(route.request().method()==='PATCH')patches.push(route.request().postDataJSON()||{});
@@ -75,6 +77,12 @@ try{
   await p.waitForFunction(()=>document.querySelectorAll('#fontList .theme-card').length===4,{},{timeout:20000});
   const objectFit=await p.locator('#fontList .font-preview-image').first().evaluate(el=>getComputedStyle(el).objectFit);
   assert.equal(objectFit,'contain','网格里的 JPG 样张必须 contain 完整显示，不能再裁成半截大字');
+  const imageCard=await p.locator('#fontList .font-preview-frame[data-font-id="font-a"]').evaluate(frame=>{
+    const image=frame.querySelector('.font-preview-image');
+    return {src:image?.getAttribute('src')||'',hidden:image?.hidden,hasSpecimen:Boolean(frame.querySelector('.font-specimen'))};
+  });
+  assert.ok(imageCard.src.includes('/previews/')&&imageCard.hidden===false,`已有五行样张图的字体必须直接显示图片：${JSON.stringify(imageCard)}`);
+  assert.equal(imageCard.hasSpecimen,false,'图片预览卡片不能再保留实时字形样张');
   const specimenRows=await p.locator('#fontList .font-specimen .specimen-hero, #fontList .font-specimen .specimen-cjk, #fontList .font-specimen .specimen-latin, #fontList .font-specimen .specimen-digits').count();
   assert.ok(specimenRows>=8,'每张字体卡片应有 4 行富样张结构（4 张卡片）');
   const downloadHref=await p.locator('#fontList .font-card-download, #fontList .catalog-download').first().getAttribute('href');
@@ -95,9 +103,12 @@ try{
     await p.locator('#fontSearchInput').fill(term);
     await p.waitForTimeout(220);
   }
-  // 搜索重建 DOM 后，已加载字体仍要套回新样张（不能退回隐藏的旧 JPG）。
+  // 搜索重建 DOM 后，图片预览仍是图片；只有没预览图的字体才复用已加载字形。
+  await p.locator('#fontSearchInput').fill('甲');
+  const stillImage=await p.locator('#fontList .font-preview-frame[data-font-id="font-a"] .font-preview-image').evaluate(img=>({src:img.getAttribute('src')||'',hidden:img.hidden}));
+  assert.ok(stillImage.src.includes('/previews/')&&stillImage.hidden===false,'搜索重建后图片预览不能被换回实时字形');
   if(realFont){
-    await p.locator('#fontSearchInput').fill('甲');
+    await p.locator('#fontSearchInput').fill('乙');
     await p.waitForFunction(()=>{const f=document.querySelector('#fontList .font-specimen');return f&&!f.hidden&&getComputedStyle(f).fontFamily.includes('font-');},{},{timeout:15000});
     const reapplied=await p.locator('#fontList .font-specimen').first().evaluate(f=>({hidden:f.hidden,family:getComputedStyle(f).fontFamily}));
     assert.equal(reapplied.hidden,false,'搜索重建后富样张不能被 hidden 盖回旧 JPG');
@@ -106,6 +117,8 @@ try{
   const families=await p.evaluate(()=>window.__fontFaceFamilies||[]);
   const duplicates=families.filter((item,index)=>families.indexOf(item)!==index);
   assert.deepEqual(duplicates,[],`同一字体被重复创建 FontFace：${JSON.stringify(families)}`);
+  assert.ok(!families.includes('font-font-a')&&!families.includes('font-42'),`已有预览图的字体不能创建 FontFace：${JSON.stringify(families)}`);
+  assert.ok(!fontRequests.some(url=>url.includes('a'.repeat(64))),`已有预览图的字体不能再下载原字体重渲染：${JSON.stringify(fontRequests)}`);
 
   await p.locator('#fontSearchInput').fill('数字');
   await p.waitForTimeout(250);
