@@ -170,6 +170,8 @@ h3 { font-size: 14.5px; line-height: 1.35; margin-bottom: 4px; font-weight: 600;
 }
 /* 图集 / 高亮是收藏库的主分类，给实心标签，扫一眼就能区分。 */
 .theme-categories em.is-key { background: var(--accent-deep); color: #fff; font-weight: 600; }
+/* 用户手动打的标签：描边样式和自动分类区分，卡片下方有空行时换行铺满显示。 */
+.theme-categories em.is-tag { background: transparent; color: var(--faint); border: 1px solid var(--border); }
 .theme-category-editor { margin: 14px 0 4px; padding-top: 12px; border-top: 1px solid var(--rule); display: grid; gap: 8px; }
 .theme-category-chips, .theme-category-suggest, .theme-category-vocabulary { display: flex; flex-wrap: wrap; gap: 6px; }
 .category-chip, .category-suggest {

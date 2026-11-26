@@ -90,6 +90,18 @@ try{
   assert.equal(batches[0].changes?.length,COUNT,'批量标签应一次携带 21 条变更');
   const status=await p.locator('#bulkTagStatus').textContent();
   assert.ok(!status.includes('失败'),`批量标签不应有失败项：${status}`);
+  // 打进去的标签必须能在主题卡片上看到，且分类与标签分行也能放下。
+  await p.evaluate(()=>{location.hash='#themes';});
+  await p.waitForFunction(()=>document.querySelectorAll('#themeList .theme-card').length>=21,{},{timeout:10000});
+  const cardTags=await p.locator('#themeList .theme-card').first().evaluate(card=>
+    [...card.querySelectorAll('.theme-categories em')].map(item=>item.textContent));
+  assert.ok(cardTags.includes('#直购'),`卡片上应显示手动打的标签，实际：${cardTags.join(',')}`);
+  assert.ok(cardTags.includes('浅色'),`卡片上应保留自动分类，实际：${cardTags.join(',')}`);
+  const wrapped=await p.locator('#themeList .theme-card .theme-categories').first().evaluate(el=>{
+    const r=el.getBoundingClientRect(),line=el.querySelector('em')?.getBoundingClientRect();
+    return {width:r.width,cardWidth:el.closest('.theme-card')?.getBoundingClientRect().width,emWidth:line?.width||0};
+  });
+  assert.ok(wrapped.width>100&&wrapped.width<=wrapped.cardWidth+1,`标签行应铺满卡片宽度，实际：${JSON.stringify(wrapped)}`);
   assert.deepEqual(errors,[]);
-  console.log(`PASS: 21 项批量作者/标签各一次请求完成（作者 ${authorMs}ms），无 409、无失败。`);
+  console.log(`PASS: 21 项批量作者/标签各一次请求完成（作者 ${authorMs}ms），无 409、无失败；标签已显示在卡片上。`);
 }finally{await browser.close();await new Promise(resolve=>server.close(resolve));}

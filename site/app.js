@@ -4336,10 +4336,14 @@ function renderThemes() {
     const {title, author} = themeIdentity(theme);
     const preview = preferredPreview(theme.preview_light_url, theme.preview_dark_url);
     const categories = themeCategoryList(theme);
+    // 用户手动打的标签要能在卡片上看到：分类（色系等）在前，标签在后，
+    // 两者都放进 theme-categories 让 flex-wrap 自动换行，把卡片下方的空行填满。
+    // 标签加 is-tag 用描边样式和分类区分，避免「打了标签却看不到」。
+    const tags = recordTags(theme).filter(tag => !categories.includes(tag));
     return `<article class="theme-card" data-theme-id="${escapeHtml(theme.id)}">
       <button class="theme-card-hit" type="button" data-theme-open="${escapeHtml(theme.id)}" aria-label="查看 ${escapeHtml(title)} 的详情"></button>
       <div class="theme-preview">${preview.url ? `<div class="theme-thumbnail"><img src="${escapeHtml(assetUrl(preview.url))}" alt="${escapeHtml(title)} 主题预览" loading="lazy" /></div>` : '<span class="preview-empty">暂无预览</span>'}<span class="preview-caption" title="作者：${escapeHtml(author)}">${escapeHtml(author)}</span><button class="theme-more" type="button" data-theme-details="${escapeHtml(theme.id)}" aria-label="查看 ${escapeHtml(title)} 的详情">⋯</button></div>
-      <div class="theme-info">${isNewArrival(theme) ? '<span class="arrival-label">新入库</span>' : ''}<div class="item-heading">${selectInput('theme', theme.id, `主题 ${title}`, isAssetBusy('theme', theme.id))}<h3 class="theme-title">${escapeHtml(title)}</h3></div>${categories.length ? `<div class="theme-meta"><span class="theme-categories">${categories.map(category => `<em>${escapeHtml(category)}</em>`).join('')}</span></div>` : ''}${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === 'string' ? theme.sync_error : Object.values(theme.sync_error).join('；'))}</p>` : ''}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === 'string' ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join('；'))}</p>` : ''}</div>
+      <div class="theme-info">${isNewArrival(theme) ? '<span class="arrival-label">新入库</span>' : ''}<div class="item-heading">${selectInput('theme', theme.id, `主题 ${title}`, isAssetBusy('theme', theme.id))}<h3 class="theme-title">${escapeHtml(title)}</h3></div>${categories.length || tags.length ? `<div class="theme-meta"><span class="theme-categories">${categories.map(category => `<em>${escapeHtml(category)}</em>`).join('')}${tags.map(tag => `<em class="is-tag" title="标签：${escapeHtml(tag)}">#${escapeHtml(tag)}</em>`).join('')}</span></div>` : ''}${theme.sync_error ? `<p class="inline-error">${escapeHtml(typeof theme.sync_error === 'string' ? theme.sync_error : Object.values(theme.sync_error).join('；'))}</p>` : ''}${theme.cleanup_warning ? `<p class="inline-error">${escapeHtml(typeof theme.cleanup_warning === 'string' ? theme.cleanup_warning : Object.values(theme.cleanup_warning).join('；'))}</p>` : ''}</div>
     </article>`;
   }).join('');
   $$('#themeList [data-theme-open]').forEach(button => button.addEventListener('click', event => {
