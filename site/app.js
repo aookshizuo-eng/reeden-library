@@ -1521,7 +1521,8 @@ async function pan123DirectBackup(record,codec,config,inMemoryBytes,context){
     await persistPan123BackupResult(record,md5,result);return result;
   }
   const info=await pan123DirectRequest(token,'/file/upload_request',{method:'POST',body:{driveId:0,duplicate:0,etag:md5,fileName,parentFileId:parent,size:bytes.length,type:0}});
-  if(!info.Reuse){
+  const uploadedNow=!info.Reuse;
+  if(uploadedNow){
     if(!info.Bucket||!info.Key||!info.StorageNode||!info.FileId)throw new Error('123 未返回完整上传参数，原包仍保留在本地');
     const common={StorageNode:info.StorageNode,bucket:info.Bucket,key:info.Key,uploadId:String(info.UploadId||'')};
     const chunkSize=16*1024*1024,parts=Math.max(1,Math.ceil(bytes.length/chunkSize));
@@ -1537,12 +1538,38 @@ async function pan123DirectBackup(record,codec,config,inMemoryBytes,context){
       if(!response.ok)throw new Error(`123 分块上传失败（HTTP ${response.status}）`);
     });
     if(transferController?.signal.aborted)return {paused:true};
-    await pan123DirectRequest(token,'/file/upload_complete/v2',{method:'POST',body:{...common,fileId:info.FileId,fileSize:bytes.length,isMultipart:parts>1}});
+    // upload_complete 成功即代表 123 已接收整包；它的响应通常带最终 FileId。
+    const complete=await pan123DirectRequest(token,'/file/upload_complete/v2',{method:'POST',body:{...common,fileId:info.FileId,fileSize:bytes.length,isMultipart:parts>1}});
+    const finalId=complete?.FileId||complete?.fileId||complete?.file_info?.FileId||info.FileId;
+    // 目录列表是最终一致的，刚传完常常查不到。旧实现在这里直接判失败，导致大量
+    // 明明传成功的文件被标成「123 备份失败」。改成有限次退避重试：查到且校验
+    // 一致就带上真实 FileId；暂时查不到也按 upload_complete 的结果记账，不再误报。
+    let stored=null;
+    for(let attempt=0;attempt<4;attempt++){
+      try{stored=(await listFolder(parent)).find(item=>item&&String(item.FileName)===fileName);}catch{}
+      if(stored)break;
+      if(transferController?.signal.aborted)return {paused:true};
+      if(attempt<3)await new Promise(resolve=>setTimeout(resolve,600*(attempt+1)));
+    }
+    if(stored&&(Number(stored.Type)!==0||Number(stored.Size)!==bytes.length||String(stored.Etag||'').toLowerCase()!==md5))
+      throw new Error('123 目录里出现同名但内容不同的文件，未记为成功；本地原包仍在');
+    const result={ok:true,provider:'123pan',key:folder?`${folder}/${fileName}`:fileName,fileId:String(stored?.FileId||finalId),bytes:bytes.length,sha256,reused:false,verified:Boolean(stored)};
+    await persistPan123BackupResult(record,md5,result);return result;
   }
-  const stored=(await listFolder(parent)).find(item=>item&&String(item.FileName)===fileName);
-  if(!stored||Number(stored.Type)!==0||Number(stored.Size)!==bytes.length||String(stored.Etag||'').toLowerCase()!==md5)throw new Error('123 尚未确认原包落盘，未记为成功；本地原包仍在');
-  const result={ok:true,provider:'123pan',key:folder?`${folder}/${fileName}`:fileName,fileId:String(stored.FileId),bytes:bytes.length,sha256,reused:false};
-  await persistPan123BackupResult(record,md5,result);return result;
+  // 复用已有文件（info.Reuse）：目录里应当能查到，用它的 FileId 记账。
+  let stored=(await listFolder(parent)).find(item=>item&&String(item.FileName)===fileName);
+  if(!stored){
+    for(let attempt=0;attempt<3;attempt++){
+      await new Promise(resolve=>setTimeout(resolve,600*(attempt+1)));
+      stored=(await listFolder(parent)).find(item=>item&&String(item.FileName)===fileName);
+      if(stored)break;
+    }
+  }
+  if(!stored)throw new Error('123 复用了同名文件，但目录暂未显示；本地原包仍在，可稍后重试');
+  if(Number(stored.Type)!==0||Number(stored.Size)!==bytes.length||String(stored.Etag||'').toLowerCase()!==md5)
+    throw new Error('123 备份目录已有同名但不同的文件，未覆盖');
+  const reused={ok:true,provider:'123pan',key:folder?`${folder}/${fileName}`:fileName,fileId:String(stored.FileId),bytes:bytes.length,sha256,reused:true};
+  await persistPan123BackupResult(record,md5,reused);return reused;
 }
 async function backupOriginalTo123(record,codec,inMemoryBytes,context){
   const config=pan123BackupConfig();if(!config.token)return {error:'尚未连接 123 云盘'};
@@ -1635,6 +1662,24 @@ async function retryPan123Backups() {
   if(!pan123BackupConfig().token){operationMessage($('#pan123BackupStatus'),'请先连接 123 云盘。未备份的原包仍保留在本地或历史 R2 副本。',true);return;}
   setView('import');setOperation('backup-123');
   try{await runPan123Backups(state.themes.filter(pendingPan123Backup));}finally{setOperation('');}
+}
+// 单条重试：从主题详情里点「重试备份」，只备份这一条，不动其他记录。
+async function retryOnePan123Backup(theme, button) {
+  if(!theme||state.operation)return;
+  await whenStorageReady();await ensureWriteAccess();
+  const config=pan123BackupConfig();
+  if(!config.token){toast('请先连接 123 云盘');return;}
+  button.disabled=true;const label=button.textContent;button.textContent='备份中…';
+  setOperation('backup-123-one');
+  try{
+    const codec=await browserCodec();
+    const context={listFolder:pan123ListFolderFactory(config.token)};
+    const result=await backupOriginalTo123(theme,codec,backupByteStash.get(theme.id),context);
+    if(result?.paused)toast('已暂停，原包仍保留');
+    else if(result?.error)toast(`备份失败：${result.error}`);
+    else{backupByteStash.delete(theme.id);toast('123 备份成功');openThemeDialog(theme.id);}
+  }catch(error){toast(`备份失败：${error.message}`);}
+  finally{button.disabled=false;button.textContent=label;setOperation('');}
 }
 // 123 的 /b/api 接口同样返回 Access-Control-Allow-Origin: *，浏览器可以用自己的
 // 网络出口直连。登录已经走直连了，但「测试连接」此前还绕回同步 Worker —— 请求从
@@ -3013,7 +3058,19 @@ function renderCompressionResults() {
    直觉一致。类别词表存在本地，可以随时增删；每个主题的分类写在记录的
    categories 字段里，跟着同步走。 */
 const THEME_CATEGORY_KEY = "reeden-theme-categories";
-const DEFAULT_THEME_CATEGORIES = ["暖色", "冷色", "暗色", "明亮", "低饱和", "阅读主题", "红色系", "橙色系", "黄色系", "绿色系", "青色系", "蓝色系", "蓝紫系", "紫色系", "粉色系", "灰色系", "黑色系", "白色系"];
+const DEFAULT_THEME_CATEGORIES = ["暖色", "冷色", "暗色", "明亮", "低饱和", "高饱和", "阅读主题", "红色系", "橙色系", "黄色系", "绿色系", "青色系", "蓝色系", "蓝紫系", "紫色系", "粉色系", "灰色系", "黑色系", "白色系"];
+// 色调分类统一阈值：所有档位共用一套常量，避免「取色用一个值、分类用另一个值」
+// 导致低饱和/高饱和、白/黑/明亮/暗色互相抢或都判不出来。
+const TONE = {
+  black: .14,     // 亮度 ≤ .14 → 黑色系
+  white: .88,     // 亮度 ≥ .88 → 白色系
+  dark: .34,      // 亮度 < .34 → 暗色
+  bright: .76,    // 亮度 > .76 → 明亮
+  gray: .16,      // 饱和度 < .16 → 灰/白/黑（无明确色相）
+  lowSat: .22,    // 饱和度 < .22 → 低饱和
+  highSat: .62,   // 饱和度 ≥ .62 → 高饱和
+  hueMin: .25,    // 饱和度 ≥ .25 且色相集中才认色系（高于低饱和上限，避免重叠）
+};
 function themeCategoryVocabulary() {
   try {
     const raw = JSON.parse(localStorage.getItem(THEME_CATEGORY_KEY) || "null");
@@ -3028,7 +3085,8 @@ function saveThemeCategoryVocabulary(list) {
 }
 // 色相 → 色系。中文本地语境里粉/紫单独成系比并进红/蓝更直观。
 function hueColorFamily(hue, saturation = 1, light = .5) {
-  if (saturation < .13) return light > .82 ? "白色系" : light < .24 ? "黑色系" : "灰色系";
+  // 饱和度低到看不出色相时，按明度归到白/黑/灰，而不是硬塞进某个颜色系。
+  if (saturation < TONE.gray) return light >= TONE.white ? "白色系" : light <= TONE.black ? "黑色系" : "灰色系";
   const h = ((Number(hue) || 0) % 360 + 360) % 360;
   if (h < 12 || h >= 345) return "红色系";
   if (h < 38) return "橙色系";
@@ -3049,26 +3107,42 @@ function isReaderThemePackage(previewDetails = {}) {
   if (container) return container === "red_v1_gzip";
   return previewDetails.kind === "reader";
 }
+// 一张预览图的色调可以命中多个档位（暗 + 蓝、明亮 + 低饱和 + 白色系）。
+// themeToneCategory 给出最该显示的那一个主分类，themeToneCategories 给出全部标签。
+// 判定顺序固定为：极端明度 → 饱和档 → 色系 → 冷暖，每档用同一套 TONE 阈值。
+function toneFamilies(tone) {
+  const light = Number(tone?.light) || 0, saturation = Number(tone?.saturation) || 0;
+  const list = [];
+  // 1) 明度极端值：先认白/黑，其次暗色/明亮，这类主题不该被微弱的色相带跑。
+  if (light >= TONE.white) list.push("白色系");
+  else if (light <= TONE.black) list.push("黑色系");
+  else if (light < TONE.dark) list.push("暗色");
+  else if (light > TONE.bright) list.push("明亮");
+  // 2) 饱和度档位：低饱和 / 高饱和都要显式打出来，用户才能在筛选里分清。
+  // 纯白/纯黑已经被明度概括，不再重复贴低饱和/灰色系；其余饱和极低时
+  // 「低饱和」和「灰色系」并存，两者不互斥。
+  const extremeLight = list.includes("白色系") || list.includes("黑色系");
+  if (!extremeLight) {
+    if (saturation < TONE.lowSat) list.push("低饱和");
+    else if (saturation >= TONE.highSat) list.push("高饱和");
+    if (saturation < TONE.gray) list.push("灰色系");
+  }
+  // 3) 色系：饱和度够、且色相集中才算，避免给接近灰的主题乱贴颜色。
+  const hueStrength = Number(tone?.hueStrength) || 0;
+  if (tone?.colorFamily && saturation >= TONE.hueMin && hueStrength > 1.2
+      && !["白色系", "黑色系", "灰色系"].includes(list[0])) {
+    if (!list.includes(tone.colorFamily)) list.push(tone.colorFamily);
+  }
+  // 4) 冷暖兜底：没有任何其它标签时，至少给一个冷暖倾向。
+  if (!list.length) list.push(tone?.warm ? "暖色" : "冷色");
+  return list;
+}
 function themeToneCategory(tone, previewDetails = {}) {
   if (!tone) return isReaderThemePackage(previewDetails) ? "阅读主题" : "";
-  const light = Number(tone.light) || 0, saturation = Number(tone.saturation) || 0;
-  // 有明确主色相时优先给色系，这是用户要的“试着识别色系”；亮度档仍单独保留
-  // 一份（下面 themeCategoryList 会把两者合并），暗色主题一眼能看出来。
-  if (tone.colorFamily && (Number(tone.hueStrength) || 0) > 1.2) return tone.colorFamily;
-  if (light < .32) return "暗色";
-  if (saturation < .14) return light > .78 ? "明亮" : "低饱和";
-  return tone.warm ? "暖色" : "冷色";
+  return toneFamilies(tone)[0];
 }
 function themeToneCategories(tone, previewDetails = {}) {
-  const list = [];
-  const primary = themeToneCategory(tone, previewDetails);
-  if (primary) list.push(primary);
-  if (tone) {
-    const light = Number(tone.light) || 0, saturation = Number(tone.saturation) || 0;
-    if (light < .32 && primary !== "暗色") list.push("暗色");
-    else if (light > .78 && primary !== "明亮" && saturation < .3) list.push("明亮");
-    if (tone.colorFamily && tone.colorFamily !== primary) list.push(tone.colorFamily);
-  }
+  const list = tone ? toneFamilies(tone) : [];
   if (isReaderThemePackage(previewDetails) && !list.includes("阅读主题")) list.push("阅读主题");
   return list;
 }
@@ -3866,6 +3940,29 @@ async function patchThemeCategories(theme, categories, autoFields) {
   updateCachedRecord(theme);
   return theme;
 }
+// 按当前色调规则重算自动分类：只刷新 auto_categories / auto_category，
+// 用户手动加的 categories 原样保留。老主题存了 preview_tone，无需重传原包即可用新规则。
+async function reclassifyThemeTone(theme, button) {
+  if (!theme || state.operation) return;
+  if (!theme.preview_tone) { toast('这条记录没有色调数据，请「更新预览」后再重算'); return; }
+  const next = themeToneCategories(theme.preview_tone, theme.preview_details || {});
+  button.disabled = true;
+  try {
+    await ensureWriteAccess();
+    await ensureRecordReference(theme);
+    const result = await api(`/api/themes/${encodeURIComponent(theme.id)}`, {
+      method: 'PATCH', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({record_sha256: theme.record_sha256, auto_categories: next, auto_category: next[0] || ''}),
+    });
+    Object.assign(theme, result.item || {});
+    updateCachedRecord(theme);
+    if (browserSyncEnabled()) saveDeviceSnapshot();
+    renderThemes();
+    openThemeDialog(theme.id);
+    toast(`已按新规则重算分类：${next.join('、') || '无'}`);
+  } catch (error) { toast(`重算分类失败：${error.message}`); }
+  finally { button.disabled = false; }
+}
 async function saveThemeCategories(themeId, categories, autoFields) {
   const theme = state.themes.find(item => String(item.id) === String(themeId));
   if (!theme || state.operation) return;
@@ -4135,7 +4232,7 @@ function openThemeDialog(id) {
   $('#themeDialogSub').textContent = author;
   $('#themeDialogBody').innerHTML = `<div class="theme-dialog-preview">${previewImage(preview.url, `${title} · ${previewKind(theme.preview_details)}`, '', theme.preview_details)}${preview.url ? '<p class="preview-hint">点击图片放大</p>' : ''}</div>
     <div class="theme-dialog-details">
-      <div class="theme-detail-status"><span class="badge ${savedToCloud(theme) ? 'is-good' : ''}">${escapeHtml(syncLabel(theme))}</span><span class="badge">${backup}</span></div>
+      <div class="theme-detail-status"><span class="badge ${savedToCloud(theme) ? 'is-good' : ''}">${escapeHtml(syncLabel(theme))}</span><span class="badge${theme.original_123?.key ? ' is-good' : theme.original_123_error ? ' is-bad' : ''}"${theme.original_123_error ? ` title="${escapeHtml(theme.original_123_error)}"` : ''}>${backup}</span>${theme.original_123_error ? `<button class="text-button" type="button" data-retry-123="${escapeHtml(String(theme.id))}">重试备份</button>` : ''}</div>${theme.original_123_error ? `<p class="inline-error">${escapeHtml(theme.original_123_error)}</p>` : ''}
       <div class="theme-size-summary">${original && compressed && original !== compressed ? `<span>${formatBytes(original)}</span><span aria-label="压缩为">→</span>` : ''}<strong>${compressed || original ? formatBytes(compressed || original) : '体积未记录'}</strong>${reduction ? `<span class="theme-size-saving">${reduction}</span>` : ''}</div>
       ${tags.length ? `<div class="theme-detail-tags">${tags.slice(0, 5).map(tag => `<span class="category-chip">${escapeHtml(tag)}</span>`).join('')}${tags.length > 5 ? `<span class="field-help">另 ${tags.length - 5} 项</span>` : ''}</div>` : ''}
       <div class="theme-dialog-actions">
@@ -4157,7 +4254,7 @@ function openThemeDialog(id) {
           ${themeDetailRow('预览内容', previewKind(theme.preview_details))}
           ${themeDetailRow('资源角色', roles.join(' · '))}
           ${themeDetailRow('原始体积', original ? formatBytes(original) : '')}
-        </dl><div class="theme-maintenance-actions"><button class="text-button" id="themeDialogRebuild" type="button">更新预览</button><button class="text-button danger-text" id="themeDialogDelete" type="button">删除主题</button></div><p class="field-help">更新预览会读取一次已保存的主题文件，使用最新布局重新生成。</p></details>
+        </dl><div class="theme-maintenance-actions"><button class="text-button" id="themeDialogRebuild" type="button">更新预览</button><button class="text-button" id="themeDialogReclassify" type="button">重算分类</button><button class="text-button danger-text" id="themeDialogDelete" type="button">删除主题</button></div><p class="field-help">更新预览会读取一次已保存的主题文件，使用最新布局重新生成；重算分类按当前色调规则刷新自动标签，不动你手动加的分类。</p></details>
       </div>
     </div>`;
   $('#themeDialogBody').scrollTop = scrollTop;
@@ -4204,6 +4301,7 @@ function openThemeDialog(id) {
     saveThemeIdentity(theme.id, event.currentTarget);
   });
   $("#themeDialogSync")?.addEventListener("click", () => { dialog.close(); syncTheme(theme.id); });
+  $("#themeDialogBody [data-retry-123]")?.addEventListener("click", event => retryOnePan123Backup(theme, event.currentTarget));
   $("#themeDialogRebuild")?.addEventListener("click", async event => {
     const button = event.currentTarget;
     button.disabled = true; button.textContent = "正在更新…";
@@ -4215,6 +4313,7 @@ function openThemeDialog(id) {
     }
     finally { button.disabled = false; button.textContent = "更新预览"; }
   });
+  $("#themeDialogReclassify")?.addEventListener("click", event => reclassifyThemeTone(theme, event.currentTarget));
   $("#themeDialogDelete")?.addEventListener("click", () => { dialog.close(); deleteSelectedRecords("theme", [theme.id]); });
   if (!dialog.open) dialog.showModal();
 }
@@ -4669,7 +4768,13 @@ function assetPreview(asset, compact = false) {
     if (!preview) return `<div class="asset-preview-empty">暂无预览</div>`;
     return `<button class="preview-open asset-preview-button" type="button" aria-label="${escapeHtml(asset.name || asset.file_name || type)}，点击放大" data-preview-url="${escapeHtml(preview)}" data-preview-title="${escapeHtml(asset.name || asset.file_name || type)}" data-preview-description="${escapeHtml(type)}预览。"><img src="${escapeHtml(preview)}" alt="${escapeHtml(asset.name || asset.file_name || type)}" loading="lazy" /></button>`;
   }
-  if (type === "SVG") return `<button class="preview-open asset-preview-button" type="button" aria-label="${escapeHtml(asset.name || asset.file_name || "SVG")}，点击放大" data-preview-url="${escapeHtml(url)}" data-preview-title="${escapeHtml(asset.name || asset.file_name || "SVG")}" data-preview-description="SVG 收藏预览。"><img src="${escapeHtml(url)}" alt="${escapeHtml(asset.name || asset.file_name || "SVG")}" loading="lazy" /></button>`;
+  // SVG 直接用原始矢量文件显示：入库时生成的 JPG 预览靠 createImageBitmap 缩放，
+  // 只有 viewBox 没有 width/height 的 SVG 会被它按 300×150 截断，右侧和底部的内容
+  // 就丢了。原始 SVG 交给 <img> 按自身 viewBox 等比完整渲染，放大缩小都不失真。
+  if (type === "SVG") {
+    const svgUrl = assetUrl(asset.object_url || asset.url || asset.download_url || asset.preview_url || "");
+    return `<button class="preview-open asset-preview-button is-svg" type="button" aria-label="${escapeHtml(asset.name || asset.file_name || "SVG")}，点击放大" data-preview-url="${escapeHtml(svgUrl)}" data-preview-title="${escapeHtml(asset.name || asset.file_name || "SVG")}" data-preview-description="SVG 矢量预览，点击放大可查看完整图形。"><img src="${escapeHtml(svgUrl)}" alt="${escapeHtml(asset.name || asset.file_name || "SVG")}" loading="lazy" /></button>`;
+  }
   // A blank sandbox keeps user HTML isolated from the library page while still
   // allowing CSS and markup to render for a useful thumbnail.
   // iframe 外面套一层定尺寸的框：页面按桌面宽度排版，再整体缩到卡片里。直接把
@@ -4734,15 +4839,82 @@ function libraryRecordCard(kind,record,preview,caption) {
     ${downloadAction}
   </article>`;
 }
+// 记录里能拿到的原始文件路径（不含带下载参数的链接）。
+function recordSourcePath(record) {
+  return String(record?.object_url || record?.url || record?.download_url || "").split("?")[0];
+}
+// 复制 SVG 源码：读原始矢量文件而不是 JPG 预览，粘贴到编辑器里可直接用。
+async function copyRecordSource(record, button) {
+  const path = recordSourcePath(record);
+  if (!path) { toast("这条记录没有可读取的源文件"); return; }
+  button.disabled = true;
+  try {
+    const bytes = await fetchDownloadableBytes(path);
+    const text = new TextDecoder().decode(bytes);
+    await navigator.clipboard.writeText(text);
+    toast("SVG 代码已复制，可直接粘贴使用");
+  } catch (error) {
+    // 非安全上下文里 clipboard API 可能不可用，退回 textarea + execCommand。
+    try {
+      const bytes = await fetchDownloadableBytes(path);
+      const area = document.createElement("textarea");
+      area.value = new TextDecoder().decode(bytes);
+      area.style.position = "fixed"; area.style.opacity = "0";
+      document.body.appendChild(area); area.select();
+      const ok = document.execCommand("copy"); area.remove();
+      toast(ok ? "SVG 代码已复制" : `复制失败：${error.message}`);
+    } catch (inner) { toast(`复制失败：${inner.message || error.message}`); }
+  } finally { button.disabled = false; }
+}
+// 探测系统分享是否可用。navigator.canShare({files}) 在手机上返回 true、
+// 桌面 Chrome 通常 false；不显示不支持的按钮，避免误导。
+async function probeRecordShare(record, button) {
+  const path = recordSourcePath(record);
+  if (!path || typeof navigator === "undefined" || typeof navigator.share !== "function" || typeof navigator.canShare !== "function") return;
+  try {
+    const name = record.file_name || record.name || "file";
+    const file = new File([new Uint8Array([0])], name, {type: record.mime || "application/octet-stream"});
+    if (navigator.canShare({files: [file]})) button.hidden = false;
+  } catch { /* 不支持文件分享时保持隐藏 */ }
+}
+// 手机端把文件交给系统分享面板，直接发到微信/QQ/网盘等 app，不经过下载目录。
+async function shareRecordFile(record, button) {
+  const path = recordSourcePath(record);
+  if (!path) { toast("这条记录没有可分享的源文件"); return; }
+  button.disabled = true;
+  try {
+    const bytes = await fetchDownloadableBytes(path);
+    const name = record.file_name || record.name || "file";
+    const type = record.mime || (String(name).toLowerCase().endsWith(".svg") ? "image/svg+xml" : "application/octet-stream");
+    const file = new File([bytes], name, {type});
+    const payload = {files: [file], title: name};
+    if (typeof navigator.canShare === "function" && !navigator.canShare(payload)) throw new Error("当前设备不支持分享这个文件");
+    await navigator.share(payload);
+  } catch (error) {
+    if (error?.name !== "AbortError") toast(`分享失败：${error.message || error}`);
+  } finally { button.disabled = false; }
+}
 function openRecordDialog(kind,id) {
   const record=state[kind+'s'].find(item=>String(item.id)===String(id));if(!record)return;
   const name=(kind==='font'?record.family:record.name)||record.name||record.file_name||'未命名',dialog=$('#recordDialog'),body=$('#recordDialogBody'),font=kind==='font';
   $('#recordDialogTitle').textContent=name;
   $('#recordDialogDescription').textContent=`${font?'字体':assetTypeLabel(record)} · ${formatBytes(record.bytes)} · ${syncLabel(record)}`;
   const url=downloadUrl(record.download_url||record.object_url||record.url||'',record.file_name||name);
-  body.innerHTML=`<div class="record-dialog-preview">${font?fontPreviewMarkup(record):assetPreview(record)}</div><div class="record-dialog-fields"><form class="asset-meta-form" data-record-form="${escapeHtml(record.id)}" data-record-kind="${kind}">${font?'':`<label>作者<input name="author" value="${escapeHtml(kind==='asset'?assetAuthor(record):(record.author||''))}" placeholder="留空也可以，之后随时补" /></label>`}<label>${font?'分类':'风格'}<input name="style" value="${escapeHtml(font?fontCategory(record):record.style||'')}" /></label><label>标签<input name="tags" value="${escapeHtml(recordTags(record).join(', '))}" placeholder="用逗号分隔" /></label><button class="secondary-button" type="submit">保存分类</button></form><div class="record-detail-actions">${url?`<a class="primary-button" href="${escapeHtml(url)}" download="${escapeHtml(record.file_name||name)}">${font?'下载字体':'下载文件'}</a>`:''}${savedToCloud(record)?'':`<button class="secondary-button" data-record-sync>同步到 R2</button>`}${font?'':`<button class="secondary-button" data-refresh-asset="${escapeHtml(String(record.id))}" data-refresh-label="刷新预览">刷新预览</button>`}<button class="text-button danger-text" data-record-delete>删除</button></div><details><summary>文件信息</summary><p class="field-help">${escapeHtml(font?(record.file_name||''):assetFileNameLabel(record))}<br>SHA ${escapeHtml(record.sha256||'未记录')}</p>${record.cleanup_warning?`<p class="inline-error">${escapeHtml(typeof record.cleanup_warning==='string'?record.cleanup_warning:Object.values(record.cleanup_warning).join('；'))}</p>`:''}</details></div>`;
+  const isSvg=kind==='asset'&&assetTypeLabel(record)==='SVG';
+  const sourcePath=record.object_url||record.url||record.download_url||'';
+  const extraActions=`${isSvg&&sourcePath?`<button class="secondary-button" data-copy-svg="${escapeHtml(String(record.id))}">复制代码</button>`:''}${sourcePath?`<button class="secondary-button" data-share-record="${escapeHtml(String(record.id))}" hidden>分享到 App</button>`:''}`;
+  body.innerHTML=`<div class="record-dialog-preview">${font?fontPreviewMarkup(record):assetPreview(record)}</div><div class="record-dialog-fields"><form class="asset-meta-form" data-record-form="${escapeHtml(record.id)}" data-record-kind="${kind}">${font?'':`<label>作者<input name="author" value="${escapeHtml(kind==='asset'?assetAuthor(record):(record.author||''))}" placeholder="留空也可以，之后随时补" /></label>`}<label>${font?'分类':'风格'}<input name="style" value="${escapeHtml(font?fontCategory(record):record.style||'')}" /></label><label>标签<input name="tags" value="${escapeHtml(recordTags(record).join(', '))}" placeholder="用逗号分隔" /></label><button class="secondary-button" type="submit">保存分类</button></form><div class="record-detail-actions">${url?`<a class="primary-button" href="${escapeHtml(url)}" download="${escapeHtml(record.file_name||name)}">${font?'下载字体':'下载文件'}</a>`:''}${extraActions}${savedToCloud(record)?'':`<button class="secondary-button" data-record-sync>同步到 R2</button>`}${font?'':`<button class="secondary-button" data-refresh-asset="${escapeHtml(String(record.id))}" data-refresh-label="刷新预览">刷新预览</button>`}<button class="text-button danger-text" data-record-delete>删除</button></div><details><summary>文件信息</summary><p class="field-help">${escapeHtml(font?(record.file_name||''):assetFileNameLabel(record))}<br>SHA ${escapeHtml(record.sha256||'未记录')}</p>${record.cleanup_warning?`<p class="inline-error">${escapeHtml(typeof record.cleanup_warning==='string'?record.cleanup_warning:Object.values(record.cleanup_warning).join('；'))}</p>`:''}</details></div>`;
   const sync=$('[data-record-sync]',body);if(sync)sync.onclick=async()=>{sync.disabled=true;try{await(font?syncFont(id):syncAsset(id));openRecordDialog(kind,id);}finally{sync.disabled=false;}};
   $('[data-record-delete]',body).onclick=async()=>{await deleteSelectedRecords(kind,[id]);if(!state[kind+'s'].some(item=>String(item.id)===String(id)))dialog.close();};
+  const copySvg=$('[data-copy-svg]',body);
+  if(copySvg)copySvg.onclick=()=>copyRecordSource(record,copySvg);
+  const share=$('[data-share-record]',body);
+  if(share){
+    // 先探测设备是否支持分享文件：桌面 Chrome 通常不支持，手机（含 Android WebView）
+    // 支持。能分享才显示按钮，避免点了没反应。
+    probeRecordShare(record,share);
+    share.onclick=()=>shareRecordFile(record,share);
+  }
   // 图片预览已经能看，就不必再为详情弹窗下载原字体；老版预览只升级一次。
   if(font){$$('[data-font-retry]',body).forEach(button=>button.addEventListener('click',event=>{event.stopPropagation();retryFontPreview(record);}));if(!record.preview_url)loadFontPreviewFace(record);else upgradeLegacyFontPreview(record);}
   if(!dialog.open)dialog.showModal();
@@ -6869,24 +7041,34 @@ async function openCleanupDialog(targets, summary, options={}) {
     };
     const grantFolder=async()=>{
       if(busy||closed)return false;
+      const pendingTargets=()=>targets.filter(target=>selected.has(target)&&!target.deletable);
+      // 关键：showDirectoryPicker 必须在用户点击的同步手势里调用。以前这里先 await
+      // 一串 ensureDirectoryWrite/matchCleanupTargets，把用户激活消耗掉，目录选择器
+      // 被浏览器拒绝，表现就是「删文件时断开、要一个个重新授权」。现在第一件事就是
+      // 弹出目录选择器（一次授权覆盖该文件夹下所有文件），其余匹配都放到之后。
+      let folder=null;
+      if(pendingTargets().length&&supportsDirectoryHandle()){
+        busy=true;render();
+        try{folder=await window.showDirectoryPicker({id:'reeden-import',mode:'readwrite'});}
+        catch(error){if(error?.name!=='AbortError'&&!closed)$('#cleanupNote').textContent=`授权失败：未获得文件夹权限（${error.message}）。文件保留，可稍后重试。`;busy=false;if(!closed)render();return false;}
+      }
       busy=true;render();
       let matched=0;
       try{
-        const pendingTargets=()=>targets.filter(target=>selected.has(target)&&!target.deletable);
-        // 优先复用以前保存的目录句柄：只请求一次写权限，不再让用户重新选文件夹。
-        for(const directory of savedDirectories){
-          if(!pendingTargets().length)break;
-          if(!await ensureDirectoryWrite(directory))continue;
-          matched+=await matchCleanupTargets(directory,targets,pendingTargets());
-        }
-        if(pendingTargets().length&&supportsDirectoryHandle()){
-          const folder=await window.showDirectoryPicker({id:'reeden-import',mode:'readwrite'});
+        // 新授权目录优先：一次匹配它下面所有待删文件。
+        if(folder){
           if(!await directoryWriteGranted(folder))throw new Error('未获得文件夹的写入权限，请重新选择并允许修改。');
           await rememberCleanupDirectory(folder);
           matched+=await matchCleanupTargets(folder,targets,pendingTargets());
         }
+        // 再复用以前保存且已有权限的目录（只 query，不逐个弹 requestPermission）。
+        for(const directory of savedDirectories){
+          if(!pendingTargets().length)break;
+          if(!await directoryWriteGranted(directory))continue;
+          matched+=await matchCleanupTargets(directory,targets,pendingTargets());
+        }
         const remaining=pendingTargets().length;
-        if(!closed)$('#cleanupNote').textContent=remaining?`本次匹配 ${matched} 个，仍有 ${remaining} 个未匹配。请选择其余文件所在文件夹，或取消勾选；重名不唯一、内容已改变的文件会保留。`:`已核对 ${matched} 个文件。${options.note||'删除前会再次核对内容。'}`;
+        if(!closed)$('#cleanupNote').textContent=remaining?`本次匹配 ${matched} 个，仍有 ${remaining} 个未匹配。可再点「授权文件夹并删除」选它们所在的文件夹，或取消勾选；内容已改动的文件会保留。`:`已核对 ${matched} 个文件。${options.note||'删除前会再次核对内容。'}`;
         return !closed&&!remaining;
       }catch(error){if(!closed&&error.name!=='AbortError')$('#cleanupNote').textContent='授权失败：'+error.message;return false;}
       finally{busy=false;if(!closed)render();}

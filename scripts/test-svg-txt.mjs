@@ -87,8 +87,37 @@ try{
   assert.match(size,/B$|KB$|MB$/,'收藏卡要显示文件大小');
   // 卡片缩略图是懒加载的，等它真正解码完再看尺寸。
   await p.waitForFunction(()=>{const img=document.querySelector('#assetList .asset-card img');return img&&img.complete&&img.naturalWidth>0;},{},{timeout:15000}).catch(()=>{});
-  const image=await p.locator('#assetList .asset-card img').first().evaluate(img=>({w:img.naturalWidth,h:img.naturalHeight,src:img.currentSrc||img.src}));
+  const image=await p.locator('#assetList .asset-card img').first().evaluate(img=>({w:img.naturalWidth,h:img.naturalHeight,src:img.currentSrc||img.src,fit:getComputedStyle(img).objectFit}));
   assert.ok(image.w>0&&image.h>0,`SVG 预览图必须真的渲染出来：${JSON.stringify(image)}`);
+  // SVG 必须用原始矢量文件显示，不能用会截断无尺寸 SVG 的 JPG 预览。
+  assert.match(image.src,/\/assets\/.*\.svg/,'卡片 SVG 必须直接显示原始矢量文件，而不是 JPG 预览');
+  assert.equal(image.fit,'cover','SVG 预览必须铺满卡片框，不能缩成一小块让人点开才看清');
+  // 详情弹窗要有「复制代码」按钮，点了把 SVG 源码放进剪贴板。
+  await context.grantPermissions(['clipboard-read','clipboard-write']);
+  await p.locator('#assetList .asset-card [data-record-details]').first().click();
+  await p.waitForFunction(()=>document.querySelector('#recordDialog')?.open,{},{timeout:10000});
+  const copyButton=p.locator('#recordDialogBody [data-copy-svg]');
+  assert.equal(await copyButton.count(),1,'SVG 详情必须有「复制代码」按钮');
+  await copyButton.click();
+  await p.waitForFunction(()=>/已复制/.test(document.querySelector('#toast')?.textContent||''),{},{timeout:10000});
+  const copied=await p.evaluate(()=>navigator.clipboard.readText());
+  assert.match(copied,/<svg/,'复制出来的必须是 SVG 源码');
+  assert.match(copied,/<rect|<circle/,'复制出来的 SVG 源码要包含图形内容');
+  // 手机端分享：模拟 navigator.canShare/share 可用，按钮应出现并把文件交给系统面板。
+  await p.evaluate(()=>{
+    window.__shared=[];
+    navigator.canShare=()=>true;
+    navigator.share=async payload=>{window.__shared.push({names:payload.files.map(f=>f.name),types:payload.files.map(f=>f.type)});};
+  });
+  await p.locator('#recordDialog [data-record-details]').count(); // no-op keep dialog context
+  await p.evaluate(()=>{document.querySelector('#recordDialog')?.close();});
+  await p.locator('#assetList .asset-card [data-record-details]').first().click();
+  await p.waitForFunction(()=>document.querySelector('#recordDialog')?.open,{},{timeout:10000});
+  await p.waitForFunction(()=>{const b=document.querySelector('#recordDialogBody [data-share-record]');return b&&!b.hidden;},{},{timeout:10000});
+  await p.locator('#recordDialogBody [data-share-record]').click();
+  await p.waitForFunction(()=>window.__shared.length===1,{},{timeout:10000});
+  const shared=await p.evaluate(()=>window.__shared[0]);
+  assert.ok(shared.names.some(n=>n.endsWith('.svg')),`分享出去的应是 .svg 文件：${JSON.stringify(shared)}`);
   assert.deepEqual(errors,[]);
-  console.log('PASS: 存成 .txt 的 SVG 能识别、转存 .svg、生成预览并收录进收藏库；纯文本 .txt 被忽略。');
+  console.log('PASS: SVG 识别/转存/收录正常，卡片直接显示原始矢量文件，详情可一键复制 SVG 源码。');
 }finally{await browser.close();await new Promise(resolve=>server.close(resolve));}
