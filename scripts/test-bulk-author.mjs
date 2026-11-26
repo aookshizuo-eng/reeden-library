@@ -39,8 +39,9 @@ await context.addInitScript(()=>{
 });
 const p=await context.newPage();p.on('pageerror',e=>errors.push(e.message));
 const patches=[];
-await p.route('**/api/themes/**',async route=>{
-  if(route.request().method()==='PATCH')patches.push(route.request().postDataJSON()||{});
+await p.route('**/api/library/batch-patch',async route=>{
+  const body=route.request().postDataJSON()||{};
+  patches.push(...(body.changes||[]));
   return route.continue();
 });
 try{
@@ -69,8 +70,8 @@ try{
     return (j.records||[]).slice(0,3).map(x=>({id:x.id,author:x.author,name:x.name,categories:x.categories,tags:x.tags}));
   });
   console.log(JSON.stringify({patches,stored,dialogClosed:await p.evaluate(()=>!document.querySelector('#bulkAuthorDialog')?.open),errors},null,2));
-  assert.equal(patches.length,2,'只给勾选的 2 个主题发 PATCH');
-  assert.ok(patches.every(body=>body.author==='新作者'),'PATCH 必须携带新作者');
+  assert.equal(patches.length,2,'一次批量请求只改勾选的 2 个主题');
+  assert.ok(patches.every(body=>body.kind==='theme'&&body.author==='新作者'),'批量作者必须携带 kind 与新作者');
   assert.ok(patches.every(body=>!Object.hasOwn(body,'name')&&!Object.hasOwn(body,'categories')&&!Object.hasOwn(body,'tags')),'批量作者只提交 author，不覆盖作品名/类别/标签');
   assert.equal(stored.filter(item=>item.author==='新作者').length,2,'2 个主题的作者已落库');
   assert.equal(stored.filter(item=>item.author.startsWith('原作者')).length,1,'未勾选的主题作者不变');

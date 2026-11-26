@@ -777,18 +777,15 @@ function normalizeAssetTags(value) {
     .map((item) => item.slice(0, 80)).slice(0, 30);
 }
 
-async function updateRecordClassification(request, env, kind, id) {
-  if (!originAllowed(request, env, {write: true})) return json({error: "Origin 不在允许列表中"}, 403, request, env);
-  if (!checkWriteToken(request, env)) return json({error: "分类更新接口需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
-  let payload;
-  try { payload = await request.json(); } catch { return json({error: "分类数据不是有效 JSON"}, 400, request, env); }
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return json({error: "更新数据必须是 JSON 对象"}, 400, request, env);
+// 单条分类更新与批量更新共用同一套字段白名单/校验，避免两条写入路径产生差异。
+// 校验失败抛 problem(status,...)，调用方决定是整条失败还是只跳过这一项。
+function applyRecordPatch(target, kind, payload) {
   const previewUpdates = {};
   for (const key of ["preview_light_url", "preview_dark_url"]) {
     if (!Object.hasOwn(payload, key)) continue;
     const value = payload[key];
     const spec = typeof value === "string" && value ? objectSpec(value) : null;
-    if (kind !== "theme" || (value !== "" && spec?.kind !== "previews")) return json({error: "预览地址必须指向本站 previews 对象"}, 400, request, env);
+    if (kind !== "theme" || (value !== "" && spec?.kind !== "previews")) throw problem(400, "预览地址必须指向本站 previews 对象");
     previewUpdates[key] = value;
   }
   // 收藏（asset）按原包重画、字体（font）把五行样张画成图片后都要能写回
@@ -796,32 +793,28 @@ async function updateRecordClassification(request, env, kind, id) {
   if (Object.hasOwn(payload, "preview_url")) {
     const value = payload.preview_url;
     const spec = typeof value === "string" && value ? objectSpec(value) : null;
-    if ((kind !== "asset" && kind !== "font") || (value !== "" && spec?.kind !== "previews")) return json({error: "预览地址必须指向本站 previews 对象"}, 400, request, env);
+    if ((kind !== "asset" && kind !== "font") || (value !== "" && spec?.kind !== "previews")) throw problem(400, "预览地址必须指向本站 previews 对象");
     previewUpdates.preview_url = value;
   }
   if (Object.hasOwn(payload, "preview_kind")) {
-    if (!["asset", "font"].includes(kind)) return json({error: "预览类型只用于收藏和字体"}, 400, request, env);
+    if (!["asset", "font"].includes(kind)) throw problem(400, "预览类型只用于收藏和字体");
     previewUpdates.preview_kind = String(payload.preview_kind || "").slice(0, 24);
   }
   if (Object.hasOwn(payload, "preview_details")) {
-    if (!["theme", "asset"].includes(kind) || !payload.preview_details || typeof payload.preview_details !== "object" || Array.isArray(payload.preview_details) || JSON.stringify(payload.preview_details).length > 2048) return json({error: "预览信息无效"}, 400, request, env);
+    if (!["theme", "asset"].includes(kind) || !payload.preview_details || typeof payload.preview_details !== "object" || Array.isArray(payload.preview_details) || JSON.stringify(payload.preview_details).length > 2048) throw problem(400, "预览信息无效");
     previewUpdates.preview_details = payload.preview_details;
   }
   const reference = String(payload.record_sha256 || "");
-  if (reference && !SHA256.test(reference)) return json({error: "记录版本无效，请刷新列表"}, 400, request, env);
+  if (reference && !SHA256.test(reference)) throw problem(400, "记录版本无效，请刷新列表");
+  if (reference && reference !== target.record_sha256) throw problem(409, "这条记录已被其他设备修改，请刷新资源库后重试");
   // 自动识别的类别（auto_categories / auto_category）平时由入库流程写入。前端删除一个
   // 类别时必须能同时清掉它，否则 themeCategoryList() 会把 auto 分类合并回来，看起来
   // 「删了又复活」。只有显式带这两个字段时才覆盖，旧客户端不带字段时保持原样。
   const hasAutoCategories = Object.hasOwn(payload, "auto_categories");
   const hasAutoCategory = Object.hasOwn(payload, "auto_category");
-  let updated;
-  await mutateLibraryIndex(env,async data=>{
-    const target=data.records.find(item=>item.kind===kind && String(item.id)===String(id));
-    if(!target)throw problem(404,'资源记录不存在');
-    if(reference && reference!==target.record_sha256)throw problem(409,'这条记录已被其他设备修改，请刷新资源库后重试');
-    const record={...target};delete record.record_sha256;
+  const record = {...target}; delete record.record_sha256;
   const displayName = normalizeAssetClassification(payload.name);
-  updated = {
+  const updated = {
     ...record,
     ...previewUpdates,
     ...(displayName ? {name: displayName} : {}),
@@ -832,14 +825,68 @@ async function updateRecordClassification(request, env, kind, id) {
     ...(kind === "theme" && hasAutoCategory ? {auto_category: normalizeAssetClassification(payload.auto_category)} : {}),
     updated_at: new Date().toISOString(),
   };
+  return updated;
+}
+
+async function writeRecordPatch(env, data, kind, id, updated) {
   const bytes = new TextEncoder().encode(JSON.stringify(updated));
   const sha = await digestHex(bytes);
-  const key = `records/${sha}.json`;
-  await env.ASSETS.put(key, bytes, {httpMetadata: {contentType: "application/json; charset=utf-8"}});
-  updated.record_sha256=sha;
-  data.records=data.records.map(item=>indexRecordId(item)===indexRecordId(updated)?updated:item);
-  });
+  await env.ASSETS.put(`records/${sha}.json`, bytes, {httpMetadata: {contentType: "application/json; charset=utf-8"}});
+  updated.record_sha256 = sha;
+  data.records = data.records.map(item => item.kind === kind && String(item.id) === String(id) ? updated : item);
+  return updated;
+}
+
+async function updateRecordClassification(request, env, kind, id) {
+  if (!originAllowed(request, env, {write: true})) return json({error: "Origin 不在允许列表中"}, 403, request, env);
+  if (!checkWriteToken(request, env)) return json({error: "分类更新接口需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
+  let payload;
+  try { payload = await request.json(); } catch { return json({error: "分类数据不是有效 JSON"}, 400, request, env); }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return json({error: "更新数据必须是 JSON 对象"}, 400, request, env);
+  let updated, error;
+  try {
+    await mutateLibraryIndex(env, async data => {
+      const target = data.records.find(item => item.kind === kind && String(item.id) === String(id));
+      if (!target) throw problem(404, "资源记录不存在");
+      const next = applyRecordPatch(target, kind, payload);
+      updated = await writeRecordPatch(env, data, kind, id, next);
+    });
+  } catch (cause) { error = cause; }
+  if (error) return json({error: error.message || "更新失败"}, error.status || 500, request, env);
   return json({ok: true, item: updated}, 200, request, env);
+}
+
+// 批量改作者/标签/分类：必须在一次索引事务里写完。旧客户端逐条 PATCH，每条都要
+// 读-改-写整份 system/library-v1.json 并比对 ETag；十几条并发时互相把对方的 ETag
+// 抢走，重试 6 次后大面积 409「其他设备正在修改资源库」，用户看到的就是又慢又失败。
+// 一次提交多条变更只做一次 ETag 写入，既省掉 N 轮往返也不会自相冲突。
+// 单条冲突（版本被别的设备改过）只跳过那一项，其余照常保存。
+async function batchPatchRecords(request, env) {
+  if (!originAllowed(request, env, {write: true})) return json({error: "Origin 不在允许列表中"}, 403, request, env);
+  if (!checkWriteToken(request, env)) return json({error: "批量更新接口需要 SYNC_WRITE_TOKEN"}, 401, request, env, {"WWW-Authenticate": "Bearer"});
+  let payload;
+  try { payload = await request.json(); } catch { return json({error: "批量数据不是有效 JSON"}, 400, request, env); }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload) || !Array.isArray(payload.changes)) return json({error: "changes 必须是数组"}, 400, request, env);
+  if (!payload.changes.length || payload.changes.length > 200) return json({error: "一次最多批量修改 200 项"}, 400, request, env);
+  const results = [];
+  await mutateLibraryIndex(env, async data => {
+    results.length = 0;
+    for (const change of payload.changes) {
+      const kind = String(change?.kind || "");
+      const id = String(change?.id ?? "");
+      if (!["theme", "font", "asset"].includes(kind) || !id) { results.push({id, error: "记录类型无效"}); continue; }
+      try {
+        const target = data.records.find(item => item.kind === kind && String(item.id) === id);
+        if (!target) throw problem(404, "资源记录不存在");
+        const next = applyRecordPatch(target, kind, change);
+        const item = await writeRecordPatch(env, data, kind, id, next);
+        results.push({kind, id, item});
+      } catch (error) {
+        results.push({kind, id, error: error?.message || "更新失败"});
+      }
+    }
+  });
+  return json({ok: true, results}, 200, request, env);
 }
 
 function referencedObjectKeys(value, keys = new Set()) {
@@ -1583,6 +1630,7 @@ async function routeRequest(request, env) {
   if (url.pathname === "/api/assets" && request.method === "GET") return listRecords(request, env, "asset");
   if (url.pathname === "/api/download" && request.method === "GET") return downloadSelected(request, env);
   if (url.pathname === "/api/library" && request.method === "DELETE") return deleteLibraryRecords(request, env);
+  if (url.pathname === "/api/library/batch-patch" && request.method === "POST") return batchPatchRecords(request, env);
   if (url.pathname === "/api/private/repack" && request.method === "POST") return repackPrivateRed(request, env);
   if (url.pathname === "/api/private/directory" && request.method === "POST") return privateDirectory(request, env);
   if (url.pathname === "/api/private/preview" && request.method === "POST") return privatePreview(request, env);

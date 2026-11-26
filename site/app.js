@@ -745,6 +745,32 @@ async function mapConcurrent(items, limit, worker) {
   await Promise.all(Array.from({ length: width }, consume));
   return result;
 }
+/* 批量改作者 / 标签 / 分类统一走一次批量 PATCH：Worker 在单个索引事务里写完所有
+   记录。逐条 PATCH 每条都要读-改-写整份 system/library-v1.json 并比对 ETag，十几条
+   并发时互相抢锁，重试耗尽后出现大面积 409「其他设备正在修改资源库」。 */
+async function patchRecordsBatch(changes) {
+  const result = await api("/api/library/batch-patch", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({changes}),
+  });
+  return Array.isArray(result?.results) ? result.results : [];
+}
+// 把批量结果套回本地记录：只改返回的字段，写入本机快照。单条失败不影响其他项。
+function applyBatchResults(results, targets) {
+  const byId = new Map(targets.map(item => [String(item.id), item]));
+  const failures = [];
+  let done = 0;
+  for (const item of results || []) {
+    const record = byId.get(String(item.id));
+    if (item.item) {
+      if (record) { Object.assign(record, item.item); updateCachedRecord(record); }
+      done++;
+    } else {
+      failures.push({ id: item.id, name: record ? (record.name || record.family || record.id) : (item.id || ""), error: item.error || "保存失败" });
+    }
+  }
+  return {done, failures};
+}
 function invalidateBrowserLibraryRecords() {
   browserLibraryRecordsCache = undefined;
   browserLibraryRecordsLoadedAt = 0;
@@ -3927,19 +3953,30 @@ async function applyBulkThemeCategories() {
   setOperation("theme-categories");
   let done = 0, failed = 0;
   try {
-    for (const theme of targets) {
+    await ensureWriteAccess();
+    if (targets[0]) await ensureRecordReference(targets[0]);
+    if (applyButton) applyButton.textContent = `正在保存 ${targets.length} 项…`;
+    // 替换模式要连自动识别类别一起清掉，否则 auto_categories 会被 themeCategoryList()
+    // 合并回来，replace 看起来没生效；追加模式保留自动类别不动。
+    const changes = targets.map(theme => {
       const own = themeCategoryList(theme);
-      const next = replace ? [...picked] : [...own, ...picked.filter(category => !own.includes(category))];
-      if (applyButton) applyButton.textContent = `处理中 ${done + failed + 1}/${targets.length}`;
-      // 替换模式要连自动识别类别一起清掉，否则 auto_categories 会被 themeCategoryList()
-      // 合并回来，replace 看起来没生效；追加模式保留自动类别不动。
-      try { await patchThemeCategories(theme, next, replace ? { auto_categories: [], auto_category: "" } : undefined); done++; } catch { failed++; }
-    }
+      const categories = replace ? [...picked] : [...own, ...picked.filter(category => !own.includes(category))];
+      const change = {
+        kind: "theme", id: theme.id, record_sha256: theme.record_sha256,
+        author: theme.author === "作者未记录" ? "" : theme.author,
+        style: theme.style || "", tags: theme.tags || [], categories,
+      };
+      if (replace) Object.assign(change, { auto_categories: [], auto_category: "" });
+      return change;
+    });
+    const result = applyBatchResults(await patchRecordsBatch(changes), targets);
+    done = result.done; failed = result.failures.length;
     if (browserSyncEnabled()) saveDeviceSnapshot();
     renderThemes();
     dialog?.close();
     toast(failed ? `已更新 ${done} 个主题，${failed} 个失败` : `已把类别写入 ${done} 个主题`);
-  } finally { setOperation(""); }
+  } catch (error) { toast(`分类保存失败：${error.message}`); }
+  finally { setOperation(""); }
 }
 /* 批量作者：和单项「名称与作者」编辑走同一个 PATCH 接口，只提交 author，
    后端会保留作品名、类别、标签，避免出现两套互相打架的写入路径。 */
@@ -3983,15 +4020,17 @@ async function applyBulkThemeAuthors() {
   let done = 0, failed = 0;
   try {
     await ensureWriteAccess();
-    for (const theme of targets) {
-      if (applyButton) applyButton.textContent = `处理中 ${done + failed + 1}/${targets.length}`;
-      try { await patchThemeAuthor(theme, author); done++; } catch { failed++; }
-    }
+    if (targets[0]) await ensureRecordReference(targets[0]);
+    if (applyButton) applyButton.textContent = `正在保存 ${targets.length} 项…`;
+    const changes = targets.map(theme => ({ kind: "theme", id: theme.id, record_sha256: theme.record_sha256, author }));
+    const result = applyBatchResults(await patchRecordsBatch(changes), targets);
+    done = result.done; failed = result.failures.length;
     if (browserSyncEnabled()) saveDeviceSnapshot();
     renderThemes();
     dialog?.close();
     toast(failed ? `已更新 ${done} 个主题，${failed} 个失败` : `已把作者「${author || "作者未记录"}」写入 ${done} 个主题`);
-  } finally { setOperation(""); }
+  } catch (error) { toast(`作者保存失败：${error.message}`); }
+  finally { setOperation(""); }
 }
 function splitTags(value) { return [...new Set(String(value || "").split(/[,，;；\n]+/).map(value => value.trim().slice(0, 24)).filter(Boolean))].slice(0, 30); }
 function suggestedTags(record) {
@@ -4021,19 +4060,19 @@ async function applyBulkTags(event) {
   try {
     await ensureWriteAccess();
     if (targets[0]) await ensureRecordReference(targets[0]);
-    await mapConcurrent(targets, 3, async record => {
+    $("#bulkTagStatus").textContent = `正在保存 ${targets.length} 项…`;
+    const changes = [], pending = [];
+    for (const record of targets) {
       const own = record.tags || [];
       const tags = mode === "replace" ? picked : mode === "remove" ? own.filter(tag => !picked.includes(tag)) : [...new Set([...own, ...(mode === "auto" ? suggestedTags(record) : picked)])].slice(0, 30);
-      if (JSON.stringify(tags) === JSON.stringify(own)) { skipped++; return; }
-      try {
-        const result = await api(`/api/${recordKindPath(kind)}/${encodeURIComponent(record.id)}`, {
-          method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({record_sha256: record.record_sha256, tags}),
-        });
-        Object.assign(record, result.item);
-        updateCachedRecord(record); done++;
-      } catch (error) { failures.push({id: record.id, name: record.name || record.family || record.id, error: error.message}); }
-      $("#bulkTagStatus").textContent = `已保存 ${done} / ${targets.length} 项，失败 ${failures.length} 项…`;
-    });
+      if (JSON.stringify(tags) === JSON.stringify(own)) { skipped++; continue; }
+      changes.push({kind, id: record.id, record_sha256: record.record_sha256, tags});
+      pending.push(record);
+    }
+    if (changes.length) {
+      const result = applyBatchResults(await patchRecordsBatch(changes), pending);
+      done = result.done; failures.push(...result.failures);
+    }
     selections[kind] = new Set(failures.map(item => item.id));
     libraryKinds[kind].render();
     $("#bulkTagStatus").textContent = `保存 ${done} 项，无需修改 ${skipped} 项。` + failures.map(item => `${item.name}：${item.error}`).join("；");

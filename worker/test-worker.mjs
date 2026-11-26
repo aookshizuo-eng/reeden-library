@@ -458,4 +458,28 @@ assert.equal(ghostResponse.status, 200);
 const ghostZip = new Uint8Array(await ghostResponse.arrayBuffer());
 assert.equal(new TextDecoder().decode(ghostZip).includes("__errors.json"), true);
 assert.equal(new TextDecoder().decode(ghostZip).includes("font-dl-ghost"), true);
+// 批量 PATCH：一次请求改多条记录，只在单个索引事务里写一次，不会逐条抢 ETag
+// 触发 409。单条版本过期只跳过那一项，其余照常保存；未提交的字段保持原样。
+const batchEnv = {ASSETS: new MemoryR2(), ALLOWED_ORIGINS: origin, PRIVATE_LIBRARY:false, SYNC_WRITE_TOKEN: token};
+for (let i = 1; i <= 3; i++) {
+  const bytes = encoder.encode(JSON.stringify({kind: "theme", id: `batch-theme-${i}`, name: `批量${i}`, author: `原作者${i}`, style: "", tags: ["原标签"], categories: ["浅色"], updated_at: "2026-11-20T00:00:00.000Z"}));
+  await handle(new Request(`https://worker.example/api/objects/records/${await sha256(bytes)}.json`, {method: "PUT", headers: headers({"Content-Type": "application/json"}), body: bytes}), batchEnv);
+}
+const batchSeed = await handle(new Request("https://worker.example/api/library?all=1", {headers: {Origin: origin}}), batchEnv);
+assert.equal(batchSeed.status, 200);
+const batchRecordsSeed = (await batchSeed.json()).records;
+assert.equal(batchRecordsSeed.length, 3);
+const batchChanges = batchRecordsSeed.map(item => ({kind: "theme", id: item.id, record_sha256: item.record_sha256, author: "新作者"}));
+batchChanges[1].record_sha256 = "0".repeat(64); // 模拟这一条被别的设备改过
+const batchResponse = await handle(new Request("https://worker.example/api/library/batch-patch", {method: "POST", headers: headers({"Content-Type": "application/json"}), body: JSON.stringify({changes: batchChanges})}), batchEnv);
+assert.equal(batchResponse.status, 200);
+const batchResult = await batchResponse.json();
+assert.equal(batchResult.results.length, 3);
+assert.equal(batchResult.results.filter(item => item.item).length, 2, "版本过期的那一条要跳过，其余照常保存");
+assert.ok(batchResult.results.some(item => item.error), "冲突项要回报失败原因");
+const batchAfter = (await (await handle(new Request("https://worker.example/api/library?all=1", {headers: {Origin: origin}}), batchEnv)).json()).records;
+assert.equal(batchAfter.filter(item => item.author === "新作者").length, 2);
+assert.equal(batchAfter.find(item => item.id === "batch-theme-2").author, "原作者2", "冲突项不能被改动");
+assert.deepEqual(batchAfter.find(item => item.id === "batch-theme-1").tags, ["原标签"], "批量作者不能覆盖标签");
+assert.deepEqual(batchAfter.find(item => item.id === "batch-theme-1").categories, ["浅色"], "批量作者不能覆盖分类");
 console.log("github-pages worker tests passed");
