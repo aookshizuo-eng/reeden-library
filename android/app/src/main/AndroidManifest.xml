@@ -30,6 +30,26 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="*/*" />
             </intent-filter>
+            <!-- 文件管理器 / 微信 / 浏览器里点开主题、字体、RED 文件时，
+                 系统「用其他应用打开」走的是 ACTION_VIEW 而不是 SEND。
+                 只注册 SEND 会导致本 App 不出现在打开方式列表里。
+                 content/file 都要收：国内文件管理器两种 scheme 都在用。
+                 带 MIME 与不带 MIME 各一条，兼容只给 URI 或只给类型的来源。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+            </intent-filter>
         </activity>
         <!-- 应用内的 123 云盘网页登录页：主 WebView 不允许离开本站，所以登录
              单独开一个受控 WebView，再由它把会话 Token 交回主页面。 -->

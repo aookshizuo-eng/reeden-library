@@ -94,16 +94,21 @@ public final class MainActivity extends Activity {
         handleShareIntent(intent);
     }
 
-    /** 接收 ACTION_SEND / ACTION_SEND_MULTIPLE，把文件复制进 cache 并通知网页。 */
+    /** 接收 ACTION_SEND / ACTION_SEND_MULTIPLE / ACTION_VIEW，把文件复制进 cache 并通知网页。 */
     private void handleShareIntent(Intent intent) {
         if (intent == null) return;
         String action = intent.getAction();
         boolean single = Intent.ACTION_SEND.equals(action);
         boolean multiple = Intent.ACTION_SEND_MULTIPLE.equals(action);
-        if (!single && !multiple) return;
+        boolean view = Intent.ACTION_VIEW.equals(action);
+        if (!single && !multiple && !view) return;
         final List<Uri> uris = new ArrayList<>();
         try {
-            if (single) {
+            if (view) {
+                // 「用其他应用打开」把文件放在 data 里，且只有一个。
+                Uri uri = intent.getData();
+                if (uri != null) uris.add(uri);
+            } else if (single) {
                 Uri uri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
                 if (uri != null) uris.add(uri);
             } else {
@@ -114,6 +119,7 @@ public final class MainActivity extends Activity {
         }
         // 同一个 Intent 可能被重复投递（旋转屏幕、回到前台），取过的就不再处理。
         intent.removeExtra(Intent.EXTRA_STREAM);
+        intent.setData(null);
         if (uris.isEmpty()) return;
         new Thread(() -> {
             for (Uri uri : uris) importSharedUri(uri);
@@ -123,7 +129,17 @@ public final class MainActivity extends Activity {
 
     private boolean importSharedUri(Uri uri) {
         DocumentInfo info = describe(uri);
-        String name = info != null && info.name != null ? info.name : "分享文件";
+        String name = info != null && info.name != null ? info.name : null;
+        // content:// 走 OpenableColumns 能拿到真实文件名；file:// 通常 query 不到，
+        // 从 URI 末段补上。否则名字会变成「分享文件」、没有后缀，网页端按后缀分流就会失败。
+        if (name == null && uri != null) {
+            try {
+                String last = uri.getLastPathSegment();
+                if (last != null && !last.isEmpty()) name = last;
+            } catch (Exception ignored) {
+            }
+        }
+        if (name == null || name.isEmpty()) name = "分享文件";
         String extension = "";
         int dot = name.lastIndexOf('.');
         if (dot >= 0 && dot + 1 < name.length()) extension = name.substring(dot + 1).toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
